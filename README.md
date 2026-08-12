@@ -47,9 +47,10 @@ Functions over the twelve fixed widths, `boolean` and `string`, with `if`,
 comparisons, short-circuiting `&&`/`||`, calls, template literals and `console`.
 Structs and fixed-size arrays are in, with nested aggregates laid out inline,
 and so is the C boundary. Classes are in: fields, constructors, methods,
-`super`, single inheritance, virtual dispatch and slicing. Dispatched
-*interfaces* are still to come. Anything not yet supported is a `GF0001`
-diagnostic with a file and a line — never a failure inside the backend.
+`super`, single inheritance, virtual dispatch and slicing — and so are
+dispatched interfaces, with checked downcasts through `tryCast<T>`. Anything
+not yet supported is a `GF0001` diagnostic with a file and a line — never a
+failure inside the backend.
 
 Strings are the first **owning** type, so the value model is real now:
 
@@ -185,8 +186,20 @@ call, the same as a virtual call.
 
 Neither class writes `implements`. **Conversion is structural**, exactly as in
 TypeScript — the conversion site is what registers the itab, so a class the
-interface has never heard of still converts. Writing `implements` is allowed and
-will later be what makes a class findable by a *dynamic* cast.
+interface has never heard of still converts. Writing `implements` additionally
+makes the class findable by a *dynamic* cast:
+
+```ts
+function report(a: Reference<Animal>): void {
+  const s = tryCast<Speaker>(a);
+  if (s !== null) { console.log(s.speak()); }
+}
+```
+
+`tryCast<T>` answers "is this really a `T`" for a class or a contract, and the
+`| null` is the design rather than a detail: `strictNullChecks` **rejects**
+`tryCast<Speaker>(a).speak()`, so the check is the only way to reach the value.
+A boolean type guard could have been ignored.
 
 The distinction between the two kinds is **syntactic, at the declaration**:
 
@@ -360,3 +373,16 @@ caret under the operator.
 | `crates/goblin-codegen` | layout and repr, Cranelift translation, object emission, linking |
 | `tests/` | real source → real compiler → real binary → real output |
 | `examples/hello` | a build script you can run |
+
+## Licence
+
+Apache License 2.0 — see [`LICENSE`](LICENSE).
+
+[`NOTICE`](NOTICE) attributes the projects this is built on, and separates the
+ones that end up *inside* a compiled program — Cranelift, `target-lexicon`, and
+`libc` by way of the runtime — from the ones that only build or test the
+compiler. That distinction is the one that matters if you ship what this
+produces.
+
+TypeScript is in the second list but does more than the others: `tsc` **is** the
+type checker, not a dependency the compiler happens to use.

@@ -1,0 +1,105 @@
+goblin-forge
+Copyright 2026 The goblin-forge Authors
+
+Licensed under the Apache License, Version 2.0. See LICENSE for the full text.
+
+================================================================================
+Third-party software
+================================================================================
+
+goblin-forge is built on the projects below. None of their source is vendored
+into this repository — they are fetched by `cargo` and `bun` at build time —
+but a compiled Goblin program *does* statically link some of them, so the
+distinction between "used to build" and "shipped inside the output" is called
+out for each.
+
+Every licence named here is the one the project itself declares. They were read
+from the installed packages rather than recalled, but a licence can change
+between versions: verify against the exact versions you ship before relying on
+this list.
+
+--------------------------------------------------------------------------------
+Linked into compiled output
+--------------------------------------------------------------------------------
+
+These end up inside binaries this compiler produces, which is the case where
+attribution obligations follow the artefact rather than the repository.
+
+  Cranelift                       Apache-2.0 WITH LLVM-exception
+  (cranelift-codegen, -frontend, -module, -native, -object)
+  Bytecode Alliance
+  https://github.com/bytecodealliance/wasmtime
+  Code generation. Its output is machine code in every binary produced.
+
+  target-lexicon                  Apache-2.0 WITH LLVM-exception
+  Bytecode Alliance
+  https://github.com/bytecodealliance/target-lexicon
+
+  libc                            MIT OR Apache-2.0
+  The Rust Project Developers
+  https://github.com/rust-lang/libc
+  Used by the Goblin runtime, which is statically linked into every program.
+
+--------------------------------------------------------------------------------
+Used to build the compiler
+--------------------------------------------------------------------------------
+
+  TypeScript                      Apache-2.0
+  Microsoft Corporation
+  https://github.com/microsoft/TypeScript
+  Not merely a dependency: tsc *is* this compiler's type checker, and its
+  verdict on a program is final. See README.
+
+  Bun                             MIT
+  Oven
+  https://github.com/oven-sh/bun
+  The runtime and test runner the compiler's frontend executes under.
+
+  napi-rs                         MIT
+  (napi, napi-derive, napi-build)
+  https://github.com/napi-rs/napi-rs
+  The Node-API boundary between the TypeScript frontend and the Rust backend.
+
+  serde                           MIT OR Apache-2.0
+  https://github.com/serde-rs/serde
+
+  postcard, postcard-schema       MIT OR Apache-2.0
+  https://github.com/jamesmunns/postcard
+  The wire format the MIR crosses the napi boundary in.
+
+  object                          Apache-2.0 OR MIT
+  https://github.com/gimli-rs/object
+  Object-file writing, beneath cranelift-object.
+
+  anyhow                          MIT OR Apache-2.0
+  thiserror                       MIT OR Apache-2.0
+  https://github.com/dtolnay/anyhow
+  https://github.com/dtolnay/thiserror
+
+  cc                              MIT OR Apache-2.0
+  https://github.com/rust-lang/cc-rs
+
+  ts-rs                           MIT
+  https://github.com/Aleph-Alpha/ts-rs
+
+--------------------------------------------------------------------------------
+Used to test the compiler
+--------------------------------------------------------------------------------
+
+  CMake                           BSD-3-Clause
+  Kitware, Inc. and Contributors
+  https://cmake.org
+  Drives the differential test suites. It builds the C and C++ oracles that
+  this compiler is checked against; neither CMake nor the oracles are part of
+  any shipped artefact.
+
+  The platform C and C++ toolchain (MSVC, clang or gcc, whichever CMake finds)
+  compiles those oracles. It is whatever is installed on the machine and is not
+  distributed with this project.
+
+================================================================================
+
+`SPDX-License-Identifier: Apache-2.0` is the identifier for this project's own
+code. Dual-licensed dependencies above ("MIT OR Apache-2.0") are used under
+Apache-2.0, so that one licence covers the whole; the LLVM exception on the
+Cranelift crates is an additional permission and imposes nothing extra.
