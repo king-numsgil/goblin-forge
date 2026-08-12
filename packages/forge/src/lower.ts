@@ -1019,15 +1019,25 @@ class Lowerer {
    * defence in depth — it should now be unreachable.
    */
   #checkCBoundary(type: MachineType, at: ts.Node, what: string): boolean {
+    // `string` is deliberately absent from this list. It is a valid,
+    // nul-terminated `char *` — the runtime lays it out that way on purpose —
+    // so C reads one with no conversion, and ownership becomes the documented,
+    // manual thing it is in every C API that hands out memory. `T[]` is not:
+    // its elements are laid out for this compiler and its header is a shape
+    // nothing else knows.
     const reason =
-      type.kind === "string" || type.kind === "array"
-        ? "owns a heap buffer, and nothing at the boundary says who frees it"
+      type.kind === "array"
+        ? "owns a heap buffer whose elements are laid out for this compiler, and " +
+          "nothing outside this build knows that shape"
         : type.kind === "class"
           ? "is a class, so it carries a vtable pointer that only means something inside this build"
           : type.kind === "interface"
             ? "is an interface reference: a pair of pointers into this build's own tables"
             : type.kind === "struct" && type.fields.some((f) => needsDrop(f.type))
-              ? "has a field that owns a heap buffer, so a byte copy would not be the whole copy"
+              ? "has a field that owns a heap buffer. A `string` may cross on its " +
+                "own, where the signature makes the question visible and a doc " +
+                "comment can answer it — buried in a struct there is nothing to " +
+                "see and nothing to document"
               : type.kind === "fixedArray" && needsDrop(type.element)
                 ? "has elements that own a heap buffer"
                 : undefined;

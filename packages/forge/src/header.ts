@@ -65,6 +65,33 @@ export function emitHeader(module: Module, options: HeaderOptions): string {
   out.push("#endif");
   out.push("");
 
+  if (usesStrings(module)) {
+    out.push("/* A Goblin string.");
+    out.push(" *");
+    out.push(" * **Reading one is free.** It points at nul-terminated bytes, so `printf`,");
+    out.push(" * `strlen` and every other `const char *` reader work on it unchanged.");
+    out.push(" *");
+    out.push(" * **Making one is not.** A length header sits sixteen bytes *behind* the");
+    out.push(" * pointer, so a plain C string is not a GoblinString and passing one where");
+    out.push(" * this type is expected reads a length out of whatever precedes your");
+    out.push(" * literal. That is why this is a typedef and not `const char *`: the");
+    out.push(" * compiler cannot stop you, so the name is the warning. Use");
+    out.push(" * `gf_string_from_cstr`, which copies.");
+    out.push(" *");
+    out.push(" * **Freeing one is `gf_string_free`, never `free`** — the allocation starts");
+    out.push(" * at the header, not at the pointer you were handed.");
+    out.push(" *");
+    out.push(" * Which strings you own is this library's business to document, exactly as");
+    out.push(" * it is for any C API that hands out memory.");
+    out.push(" */");
+    out.push("typedef const char* GoblinString;");
+    out.push("");
+    out.push("GoblinString gf_string_from_cstr(const char* bytes);");
+    out.push("GoblinString gf_string_clone(GoblinString s);");
+    out.push("void gf_string_free(GoblinString s);");
+    out.push("");
+  }
+
   const structs = emitStructs(module);
   if (structs.length > 0) {
     out.push(...structs);
@@ -202,10 +229,17 @@ function spell(module: Module, kind: TyKind): string {
       // as a parameter or return has no C spelling — C cannot pass one by
       // value — and the ABI classifier rejects it before this is asked.
       return `${cType(module, kind.element)}*`;
+    // Spelled as its own typedef rather than as `const char *`, and the
+    // difference is the whole point. Reading one *is* just a `const char *`.
+    // But the length header sits behind the pointer, so a C literal is not one
+    // — and a header that says `const char *` invites exactly that mistake,
+    // which reads a length from whatever precedes the literal and is silently
+    // wrong rather than loudly. The name is the only warning available.
+    case "Str":
+      return "GoblinString";
     // These own something, or carry a vtable. `require_plain_data` in the ABI
     // classifier refuses them at the boundary, so reaching here means the two
     // halves disagree about what may cross.
-    case "Str":
     case "Array":
     case "Class":
     case "Interface":
@@ -229,6 +263,17 @@ const INT_TYPES: Record<string, string> = {
   Isize: "intptr_t",
   Usize: "uintptr_t",
 };
+
+/** Whether any exported signature mentions a `string`. */
+function usesStrings(module: Module): boolean {
+  const isStr = (ty: number): boolean => module.types[ty]?.kind.kind === "Str";
+  return module.funcs.some((func) => {
+    if (func.linkage !== "Export") return false;
+    const signature = module.sigs[func.sig];
+    if (signature === undefined) return false;
+    return signature.params.some((param) => isStr(param.ty)) || isStr(signature.ret);
+  });
+}
 
 function sym(module: Module, id: number): string {
   return module.strings[id] ?? `sym${id}`;

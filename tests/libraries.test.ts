@@ -194,6 +194,54 @@ int main(void) {
     expect(stdout).toBe("5,2\n14\n8 16\n");
   });
 
+  test("a `string` crosses as a `const char *`, and C releases it", async () => {
+    // A Goblin `string` is a pointer to nul-terminated bytes, so C reads one
+    // with no conversion — `printf("%s")` and `strlen` both work. What C must
+    // not do is `free` it: the allocation starts sixteen bytes earlier, behind
+    // a length header, so the call is `gf_string_free`.
+    //
+    // Ownership at this boundary is documentation, exactly as it is in any C
+    // API that hands out memory. `shout` returns a fresh string the caller
+    // owns; `measure` borrows one and frees nothing. The header says so.
+    const lib = await library(
+      "lib-strings",
+      `export function shout(text: string): string { return \`\${text}!\`; }
+       export function measure(text: string): usize { return text.length; }\n`,
+    );
+
+    // A typedef rather than `const char *`, because the two directions are not
+    // symmetric and the name is the only warning C can be given.
+    expect(lib.headerText).toContain("GoblinString shout(GoblinString p0);");
+    // The header has to hand the consumer both halves, or "do not use free" and
+    // "do not pass a literal" are advice with no alternative attached.
+    expect(lib.headerText).toContain("void gf_string_free(GoblinString s);");
+    expect(lib.headerText).toContain("GoblinString gf_string_from_cstr(const char* bytes);");
+
+    const stdout = buildConsumer({
+      ...lib,
+      main: `#include <stdio.h>
+#include <string.h>
+#include "main.h"
+
+int main(void) {
+  /* A C literal is *not* a GoblinString: the length header lives behind the
+     pointer, so one has to be built. This copies. */
+  GoblinString hello = gf_string_from_cstr("hello");
+  printf("%zu\\n", (size_t) measure(hello));
+
+  /* Coming back the other way it really is just a const char *. */
+  GoblinString loud = shout(hello);
+  printf("%s %zu\\n", loud, strlen(loud));
+
+  gf_string_free(loud);
+  gf_string_free(hello);
+  return 0;
+}
+`,
+    });
+    expect(stdout).toBe("5\nhello! 6\n");
+  }, CMAKE_TIMEOUT);
+
   test("the header guards, and is C++-safe", async () => {
     const lib = await library(
       "lib-header-shape",

@@ -202,17 +202,36 @@ describe("`export` versus the public ABI", () => {
     expect(result.stdout).toBe("hi!\n");
   });
 
-  test("an entry-module export may not", async () => {
-    // The same function in the entry module *is* the public surface: it is what
-    // a `static-lib` publishes and what the header declares, so it is limited
-    // to what a byte copy can carry.
-    const diagnostic = await expectRejected(
-      "abi-public-export",
+  test("an entry-module export may take a `string` too", async () => {
+    // A `string` is a valid nul-terminated `char *`, so it crosses and its
+    // ownership becomes documentation — the same deal every C API that hands
+    // out memory makes. What the *header* does about the asymmetry is
+    // `libraries.test.ts`'s business.
+    const result = await run(
+      "abi-public-string",
       `export function shout(text: string): string { return \`\${text}!\`; }
+
+       export function main(): i32 {
+         console.log(shout("hi"));
+         return 0;
+       }\n`,
+    );
+    expect(result.stdout).toBe("hi!\n");
+  });
+
+  test("a `string` buried in a struct still may not", async () => {
+    // The line between the two: a bare `string` puts the ownership question in
+    // the signature, where a doc comment can answer it. A field inside a struct
+    // that a C caller will build and copy by value has nothing to see and
+    // nothing to document.
+    const diagnostic = await expectRejected(
+      "abi-public-struct-string",
+      `interface Named { id: i32; name: string; }
+       export function label(n: Named): i32 { return n.id; }
        export function main(): i32 { return 0; }\n`,
       "GF0301",
     );
-    expect(diagnostic.message).toContain("owns a heap buffer");
+    expect(diagnostic.message).toContain("nothing to see and nothing to document");
   });
 
   test("a class cannot cross the public boundary either", async () => {

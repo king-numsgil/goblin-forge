@@ -593,10 +593,50 @@ One surface per build, which is what a library is. Found by a test that tried to
 call a `string`-returning helper across a module boundary and was told it could
 not, which was the compiler being wrong rather than the program.
 
-### `GF0301`: only plain data crosses the public boundary
+### A `string` crosses; ownership becomes documentation
 
-A `string` or `T[]` owns a heap buffer and nothing at the boundary says who
-frees it. A **class** carries a vtable pointer and an **interface reference** a
+The user's call, and the right one: in C a string is a `char *` and who frees it
+is something the docs say — SDL is the obvious example, with `SDL_free` and
+"this is managed by SDL, do not free" written next to the functions that need
+it. Forbidding a `string` at the boundary would make every Goblin library that
+deals in text unusable from C for no gain.
+
+The runtime was built for this. A `string` is a pointer to nul-terminated bytes,
+so C reads one with `printf` and `strlen` unchanged — `runtime/native/src/lib.rs`
+says so in its own header comment, and that was the intent from milestone 5.
+
+**But the boundary is not symmetric, and the assumption that it is was wrong.**
+The length header sits *behind* the pointer:
+
+```text
+  [ len: u64 ][ owned: u64 ][ bytes … ][ 0 ]
+                            ^ the `string` value points here
+```
+
+So a plain C literal is **not** a Goblin string. Passing `"hello"` to a
+`string` parameter reads a length out of whatever precedes the literal in
+`.rdata` — the first test of this printed `0` for its length and `"!"` for
+`shout("hello")`, silently, with no crash. And `free` on one is wrong for the
+same reason: the allocation starts at the header.
+
+Three things follow, and the header emitter does all three:
+
+- The C spelling is **`typedef const char* GoblinString`**, not `const char *`.
+  The compiler cannot stop a C caller passing a literal, so the name is the only
+  warning available, and `const char *` would have invited exactly the mistake.
+- The header declares `gf_string_from_cstr` (which copies), `gf_string_clone`
+  and `gf_string_free` — because "do not use `free`" and "do not pass a literal"
+  are advice with no alternative attached unless the alternative is right there.
+- A `string` **buried in a struct** stays rejected. A bare one puts the
+  ownership question in the signature where a doc comment can answer it; a field
+  inside a struct a C caller builds and copies by value has nothing to see and
+  nothing to document.
+
+### `GF0301`: what still cannot cross the public boundary
+
+A `T[]` owns a heap buffer whose elements are laid out for this compiler, and
+nothing outside the build knows that shape. A **class** carries a vtable pointer
+and an **interface reference** a
 pair of pointers into this build's own tables — addresses that mean nothing to C
 *or to a second Goblin build*, because type descriptors have exactly one owner
 per compilation (§11.2).
