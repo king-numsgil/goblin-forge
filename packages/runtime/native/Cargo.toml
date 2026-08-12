@@ -1,0 +1,22 @@
+[package]
+name = "goblin-runtime"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+name = "goblin_runtime"
+# A static library, linked into every compiled program. It is built for the
+# *user's* target rather than the host, which is why this crate is outside the
+# compiler's cargo workspace and is built on demand.
+crate-type = ["staticlib"]
+
+[dependencies]
+libc = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = true
+panic = "abort"

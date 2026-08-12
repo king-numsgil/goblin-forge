@@ -1,0 +1,29 @@
+{
+  "name": "goblin-forge-monorepo",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build:backend": "bun run --cwd packages/backend build",
+    "build:backend:debug": "bun run --cwd packages/backend build:debug",
+    "typecheck": "tsc --build",
+    "test": "bun test",
+    "bench:boundary": "bun run packages/backend/bench/boundary.bench.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "~6.0.3"
+  },
+  "engines": {
+    "bun": ">=1.3.0"
+  },
+  "dependencies": {
+    "goblin-forge": "workspace:*",
+    "@goblin-forge/runtime": "workspace:*",
+    "@goblin-forge/backend": "workspace:*",
+    "@goblin-forge/checker": "workspace:*"
+  }
+}

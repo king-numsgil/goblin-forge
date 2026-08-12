@@ -1,0 +1,84 @@
+# CI, on Windows *and* Linux.
+#
+# The Linux job is not routine coverage — it is the only thing that makes the
+# System V half of the C ABI real. REWRITE-PLAN §6: "Test System V for real. v1's
+# is written from the psABI and has never been run. Put a Linux job in CI on day
+# one; the classification is the part of a compiler where 'looks right' is worth
+# nothing."
+#
+# So `tests/struct-abi.test.ts` is the job that matters here. It builds a real
+# `extern "C"` library with the platform's own C compiler and requires this
+# compiler to agree with it about registers, stack slots and hidden return
+# pointers.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Both halves run even when one fails: a Windows failure and a System V
+      # failure are different bugs, and seeing only the first wastes a round.
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows (Win64 ABI)
+            os: windows-latest
+          - name: linux (System V ABI)
+            os: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      # The compiler's own crates and the runtime are separate workspaces, and
+      # the runtime is rebuilt per target, so both are worth caching.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            packages/runtime/native
+
+      - run: bun install --frozen-lockfile
+
+      # Regenerates the MIR bindings from the Rust definitions, then builds the
+      # addon. In that order, so the two halves of the boundary cannot disagree.
+      - run: bun run build:backend
+
+      - name: Type-check the compiler
+        run: bunx tsc --noEmit
+
+      - name: Lint the Rust
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Rust tests
+        run: cargo test --workspace
+
+      # The runtime is its own workspace and is not covered by the above.
+      - name: Lint the runtime
+        run: cargo clippy --all-targets -- -D warnings
+        working-directory: packages/runtime/native
+
+      # Everything: the language suite, the golden MIR, the C++ oracle, the
+      # layout suite and the struct-ABI suite. The last two need CMake, which
+      # both runners already have.
+      - name: Tests
+        run: bun test

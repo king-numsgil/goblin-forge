@@ -1,0 +1,43 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/goblin-mir",
+    "crates/goblin-codegen",
+    "packages/backend",
+]
+# The runtime is built for the *user's* target, not the host, so it is its own
+# workspace and is compiled on demand rather than as part of this one.
+exclude = ["packages/runtime/native"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+goblin-mir = { path = "crates/goblin-mir" }
+goblin-codegen = { path = "crates/goblin-codegen" }
+
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+postcard = { version = "1", features = ["use-std"] }
+thiserror = "2"
+ts-rs = "12"
+
+napi = { version = "3", default-features = false, features = ["napi9"] }
+napi-derive = "3"
+napi-build = "2"
+
+cranelift-codegen = "0.134"
+cranelift-frontend = "0.134"
+cranelift-module = "0.134"
+cranelift-native = "0.134"
+cranelift-object = "0.134"
+
+object = "0.37"
+cc = "1"
+
+[profile.release]
+lto = "thin"

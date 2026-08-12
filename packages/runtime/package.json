@@ -1,0 +1,27 @@
+{
+  "name": "@goblin-forge/runtime",
+  "version": "0.1.0",
+  "type": "module",
+  "//": [
+    "The language itself, as data: the ambient global surface every Goblin",
+    "program is checked against, the tsconfig base every project extends, and",
+    "(from milestone 5) the native runtime library those programs link.",
+    "",
+    "A package rather than a directory because both the compiler and the",
+    "user's editor have to resolve the same copy of global.d.ts. If the two",
+    "disagree, tsserver underlines things the compiler accepts and vice versa,",
+    "which is worse than having no editor support at all."
+  ],
+  "exports": {
+    "./global.d.ts": "./global.d.ts",
+    "./tsconfig.base.json": "./tsconfig.base.json",
+    "./paths": "./src/paths.ts",
+    "./build": "./src/build.ts"
+  },
+  "files": [
+    "global.d.ts",
+    "tsconfig.base.json",
+    "src",
+    "native"
+  ]
+}

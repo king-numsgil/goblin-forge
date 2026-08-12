@@ -1,0 +1,221 @@
+/**
+ * `FixedArray<T, N>` — the inline array.
+ *
+ * This is C's `T name[N]`, and the property everything else follows from is
+ * that it **is** the bytes rather than a pointer to them. A C array decays to a
+ * pointer in expression contexts, which is where the intuition that it *is* one
+ * comes from — but `sizeof` says otherwise, as a struct field it occupies its
+ * whole layout, and copying the parent copies the elements with it.
+ *
+ * Its storage class is therefore `Inline` (REWRITE-PLAN §4.2), not "stack": a
+ * fixed array inside a heap object is on the heap and is still inline.
+ *
+ * Layout is checked against a C compiler in `layout.test.ts`; these test what
+ * the language does with it. Every one of them also asserts the live allocation
+ * count is zero afterwards, automatically.
+ */
+
+import { describe, expect, test } from "bun:test";
+
+import { compileSource, errorCodes, expectRejected, run } from "./harness.ts";
+
+describe("fixed arrays", () => {
+  test("elements read and write, by constant and by computed index", async () => {
+    const result = await run(
+      "array-indexing",
+      `export function main(): i32 {
+         const buf: FixedArray<i32, 4> = fixedArray(4, 0);
+         buf[0] = 10;
+         buf[1] = 20;
+         let i: usize = 2;
+         buf[i] = 30;
+         console.log(\`\${buf[0]} \${buf[1]} \${buf[2]} \${buf[3]}\`);
+         return 0;
+       }\n`,
+    );
+    // The fourth is still the fill: every element is constructed, not left as
+    // whatever was on the stack.
+    expect(result.stdout).toBe("10 20 30 0\n");
+  });
+
+  test("`length` is a constant, not a load", async () => {
+    // The length is in the type, which is the whole difference between this and
+    // the `T[]` that will one day be the `std::vector` equivalent.
+    const result = await run(
+      "array-length",
+      `export function main(): i32 {
+         const buf: FixedArray<u8, 7> = fixedArray(7, 1);
+         console.log(\`\${buf.length}\`);
+         return 0;
+       }\n`,
+    );
+    expect(result.stdout).toBe("7\n");
+  });
+
+  test("an array is a value: binding copies the elements", async () => {
+    const result = await run(
+      "array-value-semantics",
+      `export function main(): i32 {
+         const a: FixedArray<i32, 3> = fixedArray(3, 1);
+         const b: FixedArray<i32, 3> = a;
+         b[0] = 99;
+         console.log(\`a[0]=\${a[0]} b[0]=\${b[0]}\`);
+         return 0;
+       }\n`,
+    );
+    expect(result.stdout).toBe("a[0]=1 b[0]=99\n");
+  });
+
+  test("every element gets its own copy of the fill", async () => {
+    // Moving the fill into the first element would leave every other one
+    // holding whatever the move left behind — which is exactly what happened
+    // before the fill was made a copy per iteration.
+    const result = await run(
+      "array-fill-copies",
+      `export function main(): i32 {
+         const names: FixedArray<string, 3> = fixedArray(3, "x" + "y");
+         names[0] = "a" + "b";
+         console.log(\`\${names[0]} \${names[1]} \${names[2]}\`);
+         return 0;
+       }\n`,
+    );
+    expect(result.stdout).toBe("ab xy xy\n");
+    expect(result.leaked).toBe(0);
+  });
+
+  test("an owning element is destroyed by the array", async () => {
+    const result = await run(
+      "array-owning-elements",
+      `export function main(): i32 {
+         let round: i32 = 0;
+         while (round < 20) {
+           const names: FixedArray<string, 4> = fixedArray(4, "value" + "!");
+           round = round + 1;
+         }
+         console.log("done");
+         return 0;
+       }\n`,
+    );
+    expect(result.stdout).toBe("done\n");
+    expect(result.leaked).toBe(0);
+  });
+
+  test("elements of struct type are inline and addressable", async () => {
+    const result = await run(
+      "array-struct-elements",
+      `interface Point { x: i32; y: i32; }
+
+       export function main(): i32 {
+         const pts: FixedArray<Point, 2> = fixedArray(2, { x: 1, y: 2 });
+         pts[1].x = 7;
+         console.log(\`\${pts[0].x} \${pts[1].x} \${pts[1].y}\`);
+         return 0;
+       }\n`,
+    );
+    // Only the second changed, and its other field kept the fill.
+    expect(result.stdout).toBe("1 7 2\n");
+  });
+
+  test("an array inside a struct is inline, and copies with it", async () => {
+    const result = await run(
+      "array-in-struct",
+      `interface Buffer { data: FixedArray<i32, 3>; tag: i32; }
+
+       export function main(): i32 {
+         const a: Buffer = { data: fixedArray(3, 5), tag: 1 };
+         const b: Buffer = a;
+         b.data[0] = 42;
+         console.log(\`\${a.data[0]} \${b.data[0]} \${b.tag}\`);
+         return 0;
+       }\n`,
+    );
+    expect(result.stdout).toBe("5 42 1\n");
+  });
+});
+
+describe("the type carries the length", () => {
+  test("two lengths are different types", async () => {
+    const { result } = await compileSource(
+      "array-length-identity",
+      `export function main(): i32 {
+         const a: FixedArray<i32, 8> = fixedArray(8, 0);
+         const b: FixedArray<i32, 4> = a;
+         return 0;
+       }\n`,
+    );
+    expect(result.ok).toBe(false);
+    // tsc says so, which is the right half of the compiler for it: the length
+    // is a literal type, so `8` is not assignable to `4`.
+    expect(errorCodes(result)).toContain("TS2322");
+  });
+
+  test("a pointer does not become a fixed array", async () => {
+    // The length brand is *required*, unlike the width brand. An optional one
+    // would be optional-and-absent on a plain pointer, and optional-and-absent
+    // is assignable — so any pointer would silently become an array of
+    // whatever length was asked for (REWRITE-PLAN §7's trap, in a new place).
+    const { result } = await compileSource(
+      "array-from-pointer",
+      `export function main(): i32 {
+         const p: Pointer<u8> = allocArray<u8>(16);
+         const wrong: FixedArray<u8, 16> = p;
+         p.freeArray();
+         return 0;
+       }\n`,
+    );
+    expect(result.ok).toBe(false);
+    expect(errorCodes(result).some((code) => code.startsWith("TS"))).toBe(true);
+  });
+
+  test("a fixed array decays to a pointer", async () => {
+    // C's array-to-pointer conversion, and what makes a C function taking
+    // `uint8_t*` callable with one. Only tsc's half is checked here — the C
+    // boundary itself arrives with milestone 7.
+    const { result } = await compileSource(
+      "array-decay",
+      `declare function takesPointer(p: Pointer<u8>): void;
+
+       export function main(): i32 {
+         const buf: FixedArray<u8, 8> = fixedArray(8, 0);
+         const p: Pointer<u8> = buf;
+         return 0;
+       }\n`,
+    );
+    // No TS error about the assignment; the remaining gaps are lowering ones.
+    expect(errorCodes(result).filter((code) => code.startsWith("TS"))).toEqual([]);
+  });
+});
+
+describe("what fixed arrays are not", () => {
+  test("`push` is not in the language", async () => {
+    const { result } = await compileSource(
+      "array-push",
+      `export function main(): i32 {
+         const buf: FixedArray<i32, 2> = fixedArray(2, 0);
+         buf.push(1);
+         return 0;
+       }\n`,
+    );
+    expect(result.ok).toBe(false);
+    // tsc, not the compiler: the method simply is not on the type, so the user
+    // sees it while typing rather than at build time.
+    expect(errorCodes(result)).toContain("TS2339");
+  });
+
+  test("`T[]` is declared but not implemented yet", async () => {
+    // It is the language's `std::vector`, and it is honest about not being
+    // here rather than half-present.
+    const diagnostic = await expectRejected(
+      "array-vector",
+      `function takesVector(xs: i32[]): i32 { return 0; }
+
+       export function main(): i32 {
+         return 0;
+       }\n`,
+      "GF0001",
+    );
+    // And it says what to use instead, rather than just refusing.
+    expect(diagnostic.message).toContain("FixedArray");
+    expect(diagnostic.message).toContain("allocArray");
+  });
+});

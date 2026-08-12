@@ -1,0 +1,7 @@
+{
+  "extends": "@goblin-forge/runtime/tsconfig.base.json",
+  "files": [
+    "../../packages/runtime/global.d.ts",
+    "src/main.ts"
+  ]
+}

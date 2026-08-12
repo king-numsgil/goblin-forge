@@ -1,0 +1,14 @@
+{
+  "name": "goblin-forge",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@goblin-forge/backend": "workspace:*",
+    "@goblin-forge/checker": "workspace:*",
+    "@goblin-forge/runtime": "workspace:*",
+    "typescript": "~6.0.3"
+  }
+}

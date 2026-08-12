@@ -1,0 +1,31 @@
+{
+  "name": "@goblin-forge/backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./js/index.ts"
+  },
+  "napi": {
+    "binaryName": "goblin-backend",
+    "targets": [
+      "x86_64-pc-windows-msvc",
+      "x86_64-unknown-linux-gnu",
+      "aarch64-apple-darwin"
+    ]
+  },
+  "files": [
+    "js",
+    "binding.js",
+    "binding.d.ts",
+    "*.node"
+  ],
+  "scripts": {
+    "bindings": "cargo run -q -p goblin-mir --bin gen-bindings",
+    "build": "bun run bindings && napi build --platform --esm --release --js binding.js --dts binding.d.ts",
+    "build:debug": "bun run bindings && napi build --platform --esm --js binding.js --dts binding.d.ts"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^3.8.5"
+  }
+}

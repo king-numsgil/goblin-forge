@@ -1,0 +1,77 @@
+// Base config for goblin-forge source. Every Goblin project's tsconfig extends
+// this. Nothing here is exotic — stock tsc, stock tsserver, no plugins.
+//
+// `compile()` validates that the settings the language actually depends on
+// survived whatever the project's own tsconfig did on top, and names the
+// setting in a diagnostic if one did not. v1 assumed them silently.
+//
+// Comments are `//` rather than `"//key": [...]` entries: TypeScript 6 rejects
+// unknown keys inside `compilerOptions` outright, and tsconfig.json has always
+// been JSONC.
+{
+  "compilerOptions": {
+    // What makes this a closed language: no lib.es*.d.ts, no DOM, no
+    // `console`, no `Array.prototype`. runtime/global.d.ts is the entire
+    // global surface.
+    //
+    // `noLib` alone is not enough to close it. Without `types` and `typeRoots`
+    // emptied, tsc walks up to the nearest node_modules and loads every
+    // `@types/*` package it finds — which is how a stray `@types/bun` quietly
+    // redeclares `console` and puts the whole DOM back. Nothing ambient
+    // arrives except by being named in `files`.
+    "noLib": true,
+    "types": [],
+    "typeRoots": [],
+
+    // v1 used ES5 for one specific reason: at that target tsc types `for...of`
+    // as index-based iteration over arrays, and any later target was thought to
+    // demand a `[Symbol.iterator]` method — which would be a fiction, since
+    // this language has no iterator protocol.
+    //
+    // That turns out not to be true under `noLib`. With no `Symbol` in scope at
+    // all, tsc falls back to the index signature and infers the element type
+    // correctly at ES2015 and later. Checked against tsc 6.0, not assumed:
+    // `for (const x of xs)` over an `i32[]` binds `x: i32`.
+    //
+    // So ES2015 it is, which also matters because ES5 is deprecated in
+    // TypeScript 6.0 and stops functioning in 7.0.
+    "target": "ES2015",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "moduleDetection": "force",
+
+    "strict": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+
+    // Off on purpose. It exists to make JavaScript's array access honest by
+    // admitting `undefined`, but this language has no `undefined` and no unions
+    // to put it in — indexing is unchecked, as documented. Leaving it on would
+    // demand a `!` on every element access, asserting away a value that cannot
+    // occur.
+    "noUncheckedIndexedAccess": false,
+
+    // Off on purpose, and for the same shape of reason. It guards against
+    // reading a field that is `undefined` because no constructor assigned it.
+    // Here every class is zero-initialised before its constructor runs — that
+    // is what `Rvalue::Default` does, along with installing the vtable pointer
+    // — so a field with no initialiser holds `0`, an empty string, or a null
+    // pointer, deterministically. The check would reject programs that are
+    // correct, and the alternative spelling (`x: i32 = 0` on every field) says
+    // nothing the language does not already guarantee.
+    "strictPropertyInitialization": false,
+
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+
+    // tsc never emits anything here: the compiler reads the checked program and
+    // produces machine code itself.
+    //
+    // v1 used declaration emit as the module-interface cache — importing a
+    // module read the emitted .d.ts rather than the original .ts. Whether that
+    // arrangement survives is REWRITE-PLAN §11.8, still open, and turning it on
+    // before the answer is known costs a `rootDir` that would have to be right
+    // for a layout nobody has designed yet.
+    "noEmit": true
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["bun"],
+    "paths": {
+      "goblin-forge": ["./packages/forge/src/index.ts"],
+      "@goblin-forge/checker": ["./packages/checker/src/index.ts"],
+      "@goblin-forge/backend": ["./packages/backend/index.ts"]
+    }
+  },
+  "//": [
+    "This config type-checks goblin-forge's *own* TypeScript — the compiler.",
+    "",
+    "Goblin programs are not in it, and must not be: they are checked against",
+    "packages/runtime/global.d.ts under `noLib`, which is a different language",
+    "with a different global surface. `examples/*/src` is excluded for exactly",
+    "that reason, and so is `tests/oracle/cases`, whose `.gf.ts` files are the",
+    "Goblin half of the C++ oracle. `examples/*/build.ts` is included, because",
+    "a build script is ordinary TypeScript that imports this compiler."
+  ],
+  "include": [
+    "packages/*/src/**/*.ts",
+    "packages/*/index.ts",
+    "packages/*/bench/**/*.ts",
+    "packages/*/test/**/*.ts",
+    "tests/**/*.ts",
+    "examples/*/build.ts"
+  ],
+  "exclude": [
+    "**/node_modules",
+    "**/dist",
+    "**/target",
+    "examples/*/src",
+    "tests/oracle",
+    "packages/runtime/global.d.ts"
+  ]
+}
