@@ -67,6 +67,20 @@ export type MachineType =
     }
   | {
       /**
+       * `Reference<I>` for a *contract* — an interface carrying at least one
+       * method signature. The two-word `(itab, data)` pair.
+       *
+       * A contract has no value form, so there is no separate `MachineType` for
+       * one: `I` on its own is rejected, and this is what `Reference<I>` erases
+       * to. An interface of pure data members is a `struct` and never reaches
+       * here (DECISIONS §11.2).
+       */
+      readonly kind: "interface";
+      readonly name: string;
+      readonly methods: readonly InterfaceMethod[];
+    }
+  | {
+      /**
        * A class instance.
        *
        * Only the name is carried. Unlike a struct, a class has an *identity*
@@ -82,6 +96,13 @@ export type MachineType =
 export interface StructField {
   readonly name: string;
   readonly type: MachineType;
+}
+
+/** One method of a contract, with the slot it dispatches through. */
+export interface InterfaceMethod {
+  readonly name: string;
+  readonly params: readonly MachineType[];
+  readonly returns: MachineType;
 }
 
 /** Raised when a type is legal TypeScript but outside the language. */
@@ -191,10 +212,19 @@ export function erase(checker: ts.TypeChecker, type: ts.Type): MachineType {
   // confusing way to be told no. The lowerer *builds* references (every `this`
   // is one); what is missing is reading one back out of source.
   if (isReferenceType(checker, type)) {
+    // `Reference<I>` where `I` is a contract is the one reference that *is*
+    // implemented, because it is the only way to hold a contract at all. It
+    // erases to the `(itab, data)` pair rather than to a reference-to-something.
+    const referent = referentOf(checker, type);
+    if (referent !== null) {
+      const contract = contractOf(checker, referent);
+      if (contract !== null) return contract;
+    }
     throw new ErasureError(
-      "a `Reference<T>` cannot be written as a type yet. The compiler makes " +
-        "them — `this` inside a method is one — but a parameter or a binding " +
-        "cannot be declared as one. Pass the value itself for now; it is copied.",
+      "a `Reference<T>` cannot be written as a type yet, except for an " +
+        "interface with methods. The compiler makes references — `this` inside " +
+        "a method is one — but a parameter or a binding cannot be declared as " +
+        "one. Pass the value itself for now; it is copied.",
       "GF0001",
     );
   }
@@ -241,6 +271,90 @@ export function classNameOf(type: ts.Type): string | null {
   if (symbol === undefined) return null;
   const declaration = symbol.declarations?.find(ts.isClassDeclaration);
   return declaration?.name?.text ?? null;
+}
+
+/** What a `Reference<T>` refers to, read off its brand, or `null`. */
+export function referentOf(checker: ts.TypeChecker, type: ts.Type): ts.Type | null {
+  const brand = brandedProperty(checker, type, "ReferenceBrand");
+  if (!brand) return null;
+  return checker.getNonNullableType(checker.getTypeOfSymbol(brand));
+}
+
+/**
+ * A *contract*, if this type is one: an interface carrying method signatures.
+ *
+ * DECISIONS §11.2 makes this decision **syntactic**, at the interface's own
+ * declaration, and that is the whole of the rule:
+ *
+ * | Written | Is |
+ * |---|---|
+ * | `feed(): void` — a `MethodSignature` | a contract: dispatched, itab |
+ * | `feed: () => void` — a `PropertySignature` of function type | a shape: an `FnPtr` field |
+ *
+ * They are different AST node kinds, so nothing is inferred from a type. Three
+ * things support drawing the line here rather than anywhere else:
+ *
+ * * **tsc already agrees.** Under `strictFunctionTypes` method signatures are
+ *   bivariant and function-typed properties are contravariant — TypeScript
+ *   treats them as different things today, and this is the same seam.
+ * * **JavaScript already agrees.** `feed() {}` in a class goes on the
+ *   prototype: one copy, shared, looked up dynamically. `feed = () => {}` is an
+ *   instance property. That is the vtable/field distinction exactly.
+ * * **It keeps C's struct-of-callbacks.** A struct of function pointers is how
+ *   a great deal of C API surface is shaped, and it stays a plain struct.
+ *
+ * A mixture is rejected rather than guessed at: an interface with both a method
+ * and a data member would have to be a dispatched thing *and* a layout, and no
+ * answer to that is better than the other two.
+ */
+export function contractOf(checker: ts.TypeChecker, type: ts.Type): MachineType | null {
+  const properties = checker.getPropertiesOfType(type);
+  const methods = properties.filter((property) =>
+    property.declarations?.some(ts.isMethodSignature),
+  );
+  if (methods.length === 0) return null;
+
+  const name = structNameOf(checker, type);
+  if (methods.length !== properties.length) {
+    const data = properties.find((property) => !methods.includes(property));
+    throw new ErasureError(
+      `\`${name}\` declares both methods and the data member \`${data?.name}\`. ` +
+        "An interface is either a *shape* — data only, laid out as a struct — or " +
+        "a *contract* — methods only, dispatched through an itable. One that is " +
+        "both would have to be a layout and a dispatch table at once. Split it, " +
+        "or make the data a method that returns it.",
+      "GF0002",
+    );
+  }
+
+  // Sorted by name, so a slot is a function of the method *set* rather than of
+  // the declaration's source order: reordering the declaration is then not a
+  // silent ABI change (DECISIONS §11.2).
+  const sorted = [...methods].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  return {
+    kind: "interface",
+    name,
+    methods: sorted.map((method) => {
+      const declaration = method.declarations?.find(ts.isMethodSignature);
+      const signature =
+        declaration === undefined
+          ? undefined
+          : checker.getSignatureFromDeclaration(declaration);
+      if (declaration === undefined || signature === undefined) {
+        throw new ErasureError(
+          `tsc could not give \`${name}.${method.name}\` a signature.`,
+          "GF0001",
+        );
+      }
+      return {
+        name: method.name,
+        params: declaration.parameters.map((parameter) =>
+          erase(checker, checker.getTypeAtLocation(parameter)),
+        ),
+        returns: erase(checker, checker.getReturnTypeOfSignature(signature)),
+      };
+    }),
+  };
 }
 
 /**
@@ -299,20 +413,26 @@ function eraseObject(checker: ts.TypeChecker, type: ts.Type): MachineType {
   const fields: StructField[] = [];
   for (const property of properties) {
     const declaration = property.declarations?.[0];
-    // A `MethodSignature` — `feed(): void` — makes the interface a *contract*:
-    // dispatched, with an itable, and usable only as `Reference<I>`. A
-    // function-typed *property* — `feed: () => void` — is an ordinary field
-    // holding a function pointer, and leaves this a plain struct. The two are
-    // different AST nodes, which is what keeps the rule syntactic rather than
-    // inferred (DECISIONS §11.2).
+    // A `MethodSignature` makes this a *contract*, and a contract has no value
+    // form — it is C++'s abstract base, which cannot be held by value either.
+    // Reaching here means one was written where a layout was wanted, so the
+    // message says how to hold one instead. See `contractOf` for why the line
+    // is drawn at the AST node kind.
     if (declaration !== undefined && ts.isMethodSignature(declaration)) {
+      // `contractOf` raises the better message when the interface is *mixed*,
+      // and it has to be given the chance: telling someone to write
+      // `Reference<Bad>` and then rejecting that too is two round trips for
+      // one mistake.
+      contractOf(checker, type);
       throw new ErasureError(
         `\`${name}\` declares the method \`${property.name}()\`, which makes it a ` +
-          "contract rather than a plain shape. Dispatched interfaces are not " +
-          "implemented yet. Two things that do work today: a class, which has " +
-          "methods and virtual dispatch; or a field holding a function pointer, " +
-          `written \`${property.name}: () => …\` rather than \`${property.name}()\`.`,
-        "GF0001",
+          "*contract* rather than a plain shape — it has no layout, so it cannot " +
+          `be a value, a field or a by-value parameter. Write \`Reference<${name}>\`, ` +
+          "which is the two-word pair a contract is held through.\n\n" +
+          "If dispatch was not what you wanted, a function-typed *property* — " +
+          `\`${property.name}: () => …\` rather than \`${property.name}()\` — is an ` +
+          "ordinary field holding a function pointer, and leaves this a struct.",
+        "GF0002",
       );
     }
     if ((property.flags & ts.SymbolFlags.Optional) !== 0) {
@@ -367,6 +487,8 @@ export function renderType(type: MachineType): string {
     case "struct":
     case "class":
       return type.name;
+    case "interface":
+      return `Reference<${type.name}>`;
     case "fixedArray":
       return `FixedArray<${renderType(type.element)}, ${type.length}>`;
   }

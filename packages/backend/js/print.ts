@@ -217,6 +217,9 @@ function callee(module: Module, target: Callee): string {
     // Showing the slot is what makes a golden MIR diff catch a shifted vtable.
     case "Virtual":
       return `virtual#${target.slot}`;
+    // Likewise: `args[0]` is the `(itab, data)` pair, and the call prints it.
+    case "Interface":
+      return `itab#${target.slot}`;
   }
 }
 
@@ -245,6 +248,10 @@ function rvalue(module: Module, value: Rvalue): string {
         .join(", ")} }`;
     case "Len":
       return `len(${place(value.value)})`;
+    case "MakeInterface":
+      return `(${sym(module, module.interfaces[value.interface]?.name ?? 0)}) ${place(
+        value.source,
+      )}`;
   }
 }
 

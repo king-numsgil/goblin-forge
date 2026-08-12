@@ -67,6 +67,8 @@ export interface ClassInfo {
   readonly destructorSymbol: string;
   /** `Class$new`, or `undefined` when the class declares no constructor. */
   readonly constructorSymbol: string | undefined;
+  /** Interfaces named in an `implements` clause, by name. */
+  readonly declaredInterfaces: readonly string[];
 }
 
 export interface ClassReport {
@@ -149,10 +151,24 @@ function build(
   const base = baseOf(node, analyse, report);
   if (base === null) return undefined;
 
+  // `implements` is erased by tsc — it is a shape assertion and nothing more —
+  // but the heritage clause is still in the AST, so it costs nothing to read.
+  //
+  // It is deliberately *not* required for a conversion: DECISIONS §11.2 makes a
+  // static conversion structural, matching TypeScript. What declaring it will
+  // buy is being findable by a **dynamic** cast, which needs the itab reachable
+  // from the class's type descriptor and therefore needs to be known at the
+  // class's own declaration. Recorded now so that arrives without a change of
+  // shape here.
+  const declaredInterfaces: string[] = [];
   for (const clause of node.heritageClauses ?? []) {
-    if (clause.token === ts.SyntaxKind.ImplementsKeyword) {
-      report.unsupported(clause, "an `implements` clause");
-      return undefined;
+    if (clause.token !== ts.SyntaxKind.ImplementsKeyword) continue;
+    for (const expression of clause.types) {
+      if (!ts.isIdentifier(expression.expression)) {
+        report.unsupported(expression, "an expression in an `implements` clause");
+        return undefined;
+      }
+      declaredInterfaces.push(expression.expression.text);
     }
   }
 
@@ -271,6 +287,7 @@ function build(
     ctor,
     destructorSymbol,
     constructorSymbol: ctor === undefined ? undefined : `${name}$new`,
+    declaredInterfaces,
   };
 }
 

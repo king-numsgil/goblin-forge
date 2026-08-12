@@ -57,14 +57,17 @@ export {
 
 export {
   classNameOf,
+  contractOf,
   erase,
   ErasureError,
+  type InterfaceMethod,
   isFloat,
   isInteger,
   isPointerType,
   isReferenceType,
   isSignedInteger,
   type MachineType,
+  referentOf,
   renderType,
   scalarName,
   type ScalarName,

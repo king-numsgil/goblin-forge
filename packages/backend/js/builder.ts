@@ -315,6 +315,31 @@ export class ModuleBuilder {
     };
   }
 
+  /**
+   * Record that a class is convertible to an interface, with the itab entries
+   * that answer it.
+   *
+   * Called while *bodies* are being lowered rather than at `defineClass`, and
+   * that ordering is the design rather than an accident: DECISIONS §11.2 makes
+   * a static conversion **structural**, so the set of interfaces a class
+   * converts to is only known once every conversion site has been seen. A class
+   * that declares `implements` is registered eagerly on top of that, because
+   * declaring it is what will make the class findable by a *dynamic* cast.
+   *
+   * Idempotent: the same pair registered twice keeps one itab, which is the
+   * within-a-module interning §11.2 asks for. Across modules there is no
+   * interning and none is needed — an itab is a cache, and only the type
+   * descriptor is an identity.
+   */
+  implementInterface(id: ClassId, interfaceId: InterfaceId, methods: FuncId[]): void {
+    const def = this.#classes[id];
+    if (def === undefined) throw new Error(`class ${id} was never declared`);
+    if (def.implements.some((entry) => entry.interface === interfaceId)) return;
+    const implemented = [...def.implements, { interface: interfaceId, methods }];
+    implemented.sort((a, b) => a.interface - b.interface);
+    this.#classes[id] = { ...def, implements: implemented };
+  }
+
   /** The methods of an interface, in slot order. Empty if it has none. */
   interfaceMethods(id: InterfaceId): readonly InterfaceMethod[] {
     return this.#interfaces[id]?.methods ?? [];

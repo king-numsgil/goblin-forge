@@ -381,31 +381,19 @@ describe("classes: what is rejected", () => {
     expect(diagnostic.message).toContain("getter");
   });
 
-  test("an `implements` clause", async () => {
-    // Contracts and itables are the second half of milestone 8; the shape of
-    // the answer is settled in DECISIONS §11.2 and not built yet.
-    await expectRejected(
-      "class-implements",
-      `interface Speaker { speak(): string; }
-       class A implements Speaker { speak(): string { return "a"; } }
-       export function main(): i32 { return 0; }\n`,
-      "GF0001",
-    );
-  });
-
-  test("an interface with a method is a contract, and says so", async () => {
+  test("a contract used as a value", async () => {
+    // A contract has no layout — it is C++'s abstract base, which cannot be
+    // held by value either. The message has to name both ways out, because
+    // "no layout" on its own leaves someone stuck: `Reference<I>` if dispatch
+    // was wanted, a function-typed property if it was not.
     const diagnostic = await expectRejected(
-      "interface-contract",
+      "interface-as-value",
       `interface Speaker { speak(): string; }
        function use(s: Speaker): i32 { return 0; }
        export function main(): i32 { return 0; }\n`,
-      "GF0001",
+      "GF0002",
     );
-    // The message has to name the two things that *do* work, because "not
-    // implemented" on its own leaves someone stuck. In particular it has to
-    // point at the property-vs-method distinction, since that is the fix in
-    // most of the cases where somebody did not want dispatch at all.
-    expect(diagnostic.message).toContain("contract");
+    expect(diagnostic.message).toContain("Reference<Speaker>");
     expect(diagnostic.message).toContain("function pointer");
   });
 

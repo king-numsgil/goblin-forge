@@ -52,6 +52,8 @@ import {
   sameType,
   type ScalarName,
   classNameOf,
+  contractOf,
+  referentOf,
 } from "@goblin-forge/checker";
 import {
   type ClassInfo,
@@ -67,6 +69,7 @@ import {
   FieldId,
   type FuncId,
   type FunctionBuilder,
+  type InterfaceId,
   type IntTy,
   LocalId,
   type Module as MirModule,
@@ -952,6 +955,8 @@ class Lowerer {
         }
         return ty;
       }
+      case "interface":
+        return this.#interfaceTy(type, at);
       case "reference":
         return this.#mir.ty({ kind: "Reference", value: this.tyOf(type.referent, at) });
       case "pointer":
@@ -1025,6 +1030,103 @@ class Lowerer {
     const ty = this.#mir.ty({ kind: "Struct", value: id });
     this.#structs.set(type.name, ty);
     return ty;
+  }
+
+  readonly #interfaces = new Map<string, InterfaceId>();
+  readonly #interfaceTys = new Map<string, TyId>();
+  readonly #interfaceInfo = new Map<string, Extract<MachineType, { kind: "interface" }>>();
+
+  /**
+   * Intern a contract by name, declaring it and its method signatures.
+   *
+   * The receiver of an interface method is typed `Pointer<void>` rather than
+   * `Reference<Self>`: the whole point of dispatch is that the implementing
+   * class is not known here, and every candidate's `this` is one machine word
+   * whatever class it belongs to, so the Cranelift signature is identical
+   * either way. Naming it as an opaque address says that on purpose.
+   */
+  #interfaceTy(
+    type: Extract<MachineType, { kind: "interface" }>,
+    at: ts.Node,
+  ): TyId {
+    const existing = this.#interfaceTys.get(type.name);
+    if (existing !== undefined) return existing;
+
+    const id = this.#mir.declareInterface({ name: type.name, span: this.span(at) });
+    this.#interfaces.set(type.name, id);
+    this.#interfaceInfo.set(type.name, type);
+    const ty = this.#mir.ty({ kind: "Interface", value: id });
+    this.#interfaceTys.set(type.name, ty);
+
+    const receiver = this.#mir.ty({
+      kind: "Pointer",
+      value: this.#mir.ty({ kind: "Void" }),
+    });
+    this.#mir.defineInterface(
+      id,
+      type.methods.map((method) => ({
+        name: method.name,
+        sig: this.#mir.sig({
+          params: [
+            { ty: receiver, name: null },
+            ...method.params.map((param) => ({ ty: this.tyOf(param, at), name: null })),
+          ],
+          ret: this.tyOf(method.returns, at),
+          abi: "Internal",
+        }),
+      })),
+    );
+    return ty;
+  }
+
+  interfaceId(name: string): InterfaceId | undefined {
+    return this.#interfaces.get(name);
+  }
+
+  classId(name: string): ClassId | undefined {
+    return this.#classIds.get(name);
+  }
+
+  interfaceInfo(name: string): Extract<MachineType, { kind: "interface" }> | undefined {
+    return this.#interfaceInfo.get(name);
+  }
+
+  /**
+   * Record a class → contract conversion, resolving the itab's entries.
+   *
+   * The entries are a **gather from the vtable**: the class's final overrider
+   * for each of the interface's methods, in the interface's own slot order. No
+   * search happens at run time and none happens in the backend.
+   */
+  implement(className: string, contract: Extract<MachineType, { kind: "interface" }>, at: ts.Node): boolean {
+    const classId = this.#classIds.get(className);
+    const info = this.#classes.get(className);
+    const interfaceId = this.#interfaces.get(contract.name);
+    if (classId === undefined || info === undefined || interfaceId === undefined) {
+      this.unsupported(at, `converting \`${className}\` to \`${contract.name}\``);
+      return false;
+    }
+
+    const methods: FuncId[] = [];
+    for (const wanted of contract.methods) {
+      const found = info.methods.get(wanted.name);
+      const record = found === undefined ? undefined : this.#functions.get(found.symbol);
+      if (found === undefined || record === undefined || record.kind !== "defined") {
+        // tsc has already checked the shape, so a genuine mismatch never gets
+        // here — reaching this means the two disagree about what satisfies
+        // what, which is a compiler bug rather than a user one.
+        this.unsupported(
+          at,
+          `converting \`${className}\` to \`${contract.name}\`, whose method ` +
+            `\`${wanted.name}\` this compiler could not resolve`,
+        );
+        return false;
+      }
+      methods.push(record.id);
+    }
+
+    this.#mir.implementInterface(classId, interfaceId, methods);
+    return true;
   }
 
   erase(at: ts.Node, type: ts.Type): MachineType | undefined {
@@ -2052,6 +2154,19 @@ class BodyLowerer {
     expression: ts.CallExpression,
     access: ts.PropertyAccessExpression,
   ): Width | "not-a-method" {
+    const contract = this.#contractAt(access.expression);
+    if (contract !== undefined) {
+      const method = contract.methods.find((m) => m.name === access.name.text);
+      if (method === undefined) {
+        this.#outer.unsupported(expression, `\`${contract.name}.${access.name.text}()\``);
+        return ERROR;
+      }
+      for (const argument of expression.arguments) {
+        if (this.width(argument).kind === "error") return ERROR;
+      }
+      return typed(method.returns);
+    }
+
     // `super.m()` resolves against the *base*, statically. Asking tsc for the
     // type of `super` would answer with the base too, but going through the
     // class registry keeps one path for "which body does this name" and it is
@@ -2203,6 +2318,13 @@ class BodyLowerer {
   #coerce(at: ts.Node, value: Typed, expected: MachineType): Typed | undefined {
     if (sameType(value.type, expected)) return value;
 
+    // The conversion site, and the only one. A class becomes a contract by
+    // building `(itab, &object)` — a *borrow*, so the object stays owned by
+    // whoever owned it and the pair is never destroyed.
+    if (expected.kind === "interface" && value.type.kind === "class") {
+      return this.#toInterface(at, value, expected);
+    }
+
     if (fits(value.type, expected)) {
       const kind = this.#castKind(at, value.type, expected);
       if (kind === undefined) return undefined;
@@ -2228,6 +2350,51 @@ class BodyLowerer {
             `\`${renderType(expected)}\` without losing values.`,
     );
     return undefined;
+  }
+
+  /**
+   * `dog` → `Reference<Pet>`: build the `(itab, &dog)` pair.
+   *
+   * The itab is for the **static** class of the source. Converting a `Base` to
+   * a contract yields a `Base`'s itab even when the object is really a
+   * `Derived`, and dispatch still reaches the derived override — because the
+   * itab holds `Base`'s *final overriders*, which is exactly where a virtual
+   * call through a `Base` would have gone.
+   *
+   * The object has to be somewhere addressable, so a value that is still a
+   * constant or a computed temporary is materialised first. Nothing here takes
+   * ownership: `Reference<I>` is a borrow, and the object outliving it is the
+   * programmer's business — the same deal `Reference<T>` has always made.
+   */
+  #toInterface(
+    at: ts.Node,
+    value: Typed,
+    contract: Extract<MachineType, { kind: "interface" }>,
+  ): Typed | undefined {
+    if (value.type.kind !== "class") return undefined;
+    if (!this.#outer.implement(value.type.name, contract, at)) return undefined;
+
+    const interfaceId = this.#outer.interfaceId(contract.name);
+    const classId = this.#outer.classId(value.type.name);
+    if (interfaceId === undefined || classId === undefined) return undefined;
+
+    const source = this.#placeOfSubject(at, value);
+    if (source === undefined) return undefined;
+
+    const local = this.#f.addLocal({
+      ty: this.#outer.tyOf(contract, at),
+      storage: "Temporary",
+      span: this.#outer.span(at),
+    });
+    this.#push({ kind: "StorageLive", value: local });
+    this.#push({
+      kind: "Init",
+      place: placeOf(local),
+      rvalue: { kind: "MakeInterface", interface: interfaceId, class: classId, source },
+    });
+    // `Copy`, not `Move`: the pair is two borrowed words, trivially copied, and
+    // reading it does not end anything.
+    return { operand: { kind: "Copy", value: placeOf(local) }, type: contract };
   }
 
   #castKind(at: ts.Node, from: MachineType, to: MachineType): CastKind | undefined {
@@ -3159,6 +3326,9 @@ class BodyLowerer {
       return this.#superMethodCall(expression, access);
     }
 
+    const contract = this.#contractAt(access.expression);
+    if (contract !== undefined) return this.#interfaceCall(expression, access, contract);
+
     // Asked of tsc rather than of the width pass, because the width pass
     // *reports*: `console.log` is a property access too, and running it over
     // `console` would raise a diagnostic about a name that does not resolve
@@ -3210,6 +3380,121 @@ class BodyLowerer {
     this.#seal({
       kind: "Call",
       callee: { kind: "Virtual", slot: method.slot, sig: record.sig },
+      args,
+      destination: { place: placeOf(destination ?? LocalId(0)), target: next },
+      unwind: NO_UNWIND,
+    });
+    this.#current = next;
+
+    if (destination === undefined) return undefined;
+    return this.#fromCall(destination, returns);
+  }
+
+  /**
+   * The contract an expression already holds, or `undefined`.
+   *
+   * Reports nothing, for the same reason `classNameAt` reports nothing: this
+   * decides *whether* a call is interface dispatch, before anything commits to
+   * lowering it that way.
+   */
+  #contractAt(
+    expression: ts.Expression,
+  ): Extract<MachineType, { kind: "interface" }> | undefined {
+    const width = this.#widths.get(expression);
+    if (width?.kind === "typed" && width.type.kind === "interface") return width.type;
+
+    const type = this.#outer.checker.getTypeAtLocation(expression);
+    const referent = referentOf(this.#outer.checker, type);
+    if (referent === null) return undefined;
+    try {
+      const contract = contractOf(this.#outer.checker, referent);
+      return contract?.kind === "interface" ? contract : undefined;
+    } catch {
+      // A malformed contract. Whatever is wrong with it is reported by the
+      // ordinary erasure path, which has a node to attach it to.
+      return undefined;
+    }
+  }
+
+  /**
+   * `p.feed()` where `p` is a `Reference<I>` — dispatch through the itab.
+   *
+   * Two loads and an indirect call, exactly like a virtual call, and the slot
+   * is a compile-time constant. The receiver operand is the *pair*; the backend
+   * takes the itab and the object out of it and passes the object as `this`, so
+   * the callee is an ordinary method that knows nothing about interfaces.
+   */
+  #interfaceCall(
+    expression: ts.CallExpression,
+    access: ts.PropertyAccessExpression,
+    contract: Extract<MachineType, { kind: "interface" }>,
+  ): Typed | undefined {
+    const slot = contract.methods.findIndex((method) => method.name === access.name.text);
+    const method = contract.methods[slot];
+    if (method === undefined) {
+      this.#outer.unsupported(access, `\`${contract.name}.${access.name.text}()\``);
+      return undefined;
+    }
+
+    const receiver = this.#value(access.expression, contract);
+    if (receiver === undefined) return undefined;
+
+    if (expression.arguments.length !== method.params.length) {
+      this.#outer.error(
+        expression,
+        "GF0002",
+        `\`${contract.name}.${method.name}\` takes ${method.params.length} ` +
+          `argument${method.params.length === 1 ? "" : "s"}, and ` +
+          `${expression.arguments.length} ${
+            expression.arguments.length === 1 ? "was" : "were"
+          } supplied.`,
+      );
+      return undefined;
+    }
+
+    const args: Operand[] = [this.#forRead(receiver)];
+    for (const [index, argument] of expression.arguments.entries()) {
+      const want = method.params[index]!;
+      const value = this.#expressionTyped(argument, want);
+      if (value === undefined) return undefined;
+      args.push(this.#forArgument(argument, value));
+    }
+
+    // The signature the *interface* declares, not any class's: at the call site
+    // the class is unknown, which is the whole point of dispatching.
+    const receiverTy = this.#outer.mir.ty({
+      kind: "Pointer",
+      value: this.#outer.mir.ty({ kind: "Void" }),
+    });
+    const sig = this.#outer.mir.sig({
+      params: [
+        { ty: receiverTy, name: null },
+        ...method.params.map((param) => ({
+          ty: this.#outer.tyOf(param, expression),
+          name: null,
+        })),
+      ],
+      ret: this.#outer.tyOf(method.returns, expression),
+      abi: "Internal",
+    });
+
+    const returns = method.returns;
+    const destination =
+      returns.kind === "void"
+        ? undefined
+        : this.#f.addLocal({
+            ty: this.#outer.tyOf(returns, expression),
+            storage: "Temporary",
+          });
+    if (destination !== undefined) {
+      this.#temporaries.push(destination);
+      this.#push({ kind: "StorageLive", value: destination });
+    }
+
+    const next = this.#f.block();
+    this.#seal({
+      kind: "Call",
+      callee: { kind: "Interface", slot, sig },
       args,
       destination: { place: placeOf(destination ?? LocalId(0)), target: next },
       unwind: NO_UNWIND,

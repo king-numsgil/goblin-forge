@@ -171,6 +171,37 @@ describe("golden MIR", () => {
       ),
     ).toMatchSnapshot();
   });
+  test("a contract: the conversion and the itab dispatch", async () => {
+    // Two things to read in the diff:
+    //
+    // * `(Speaker) _n` — the conversion, built into a temporary. It takes the
+    //   *static* class, so the itab is chosen at compile time and nothing is
+    //   looked up;
+    // * `itab#N` at the call, with the slot from the interface's name-sorted
+    //   method set. A shifted slot here calls a different body, and two methods
+    //   with compatible signatures would print plausible values rather than
+    //   crash.
+    expect(
+      await mirOf(
+        "mir-interface",
+        `interface Speaker { speak(): string; }
+         class Cat {
+           sound: string;
+           constructor(sound: string) { this.sound = sound; }
+           speak(): string { return this.sound; }
+         }
+
+         function announce(who: Reference<Speaker>): void {
+           console.log(who.speak());
+         }
+
+         export function main(): i32 {
+           announce(new Cat("mew"));
+           return 0;
+         }\n`,
+      ),
+    ).toMatchSnapshot();
+  });
 });
 
 describe("what the drop pass sees", () => {

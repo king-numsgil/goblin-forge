@@ -430,3 +430,94 @@ export fn main: extern "C" () -> i32 {
 }
 "
 `;
+
+exports[`golden MIR a contract: the conversion and the itab dispatch 1`] = `
+"extern fn gf_print: extern "C" (string) -> void  // ext0
+
+fn Cat$drop: (Reference<Cat>) -> void {
+  let _0: void  [Owned/Trivial]
+  let _1: Reference<Cat>  [Owned/Borrow]
+
+  bb0: {
+    drop((*_1).0);
+    return;
+  }
+}
+
+fn Cat$new: (Reference<Cat>, string) -> void {
+  let _0: void  [Owned/Trivial]
+  let _1: Reference<Cat>  [Owned/Borrow]
+  let _2: string  [Owned/Owning]
+
+  bb0: {
+    (*_1).0 <- copy _2;
+    return;
+  }
+}
+
+fn Cat$speak: (Reference<Cat>) -> string {
+  let _0: string  [Owned/Owning]
+  let _1: Reference<Cat>  [Owned/Borrow]
+
+  bb0: {
+    _0 = copy (*_1).0;
+    StorageDead(_1);
+    return;
+  }
+}
+
+fn announce: (Speaker) -> void {
+  let _0: void  [Owned/Trivial]
+  let _1: Speaker  [Owned/Borrow]
+  let _2: string  [Temporary/Owning]
+
+  bb0: {
+    StorageLive(_2);
+    _2 = itab#0(copy _1) -> [return: bb1];
+  }
+
+  bb1: {
+    _0 = gf_print(borrow _2) -> [return: bb2];
+  }
+
+  bb2: {
+    drop(_2);
+    StorageDead(_2);
+    return;
+  }
+}
+
+export fn main: extern "C" () -> i32 {
+  let _0: i32  [Owned/Trivial]
+  let _1: Cat  [Temporary/Polymorphic]
+  let _2: Reference<Cat>  [Temporary/Borrow]
+  let _3: string  [Temporary/Owning]
+  let _4: Speaker  [Temporary/Borrow]
+
+  bb0: {
+    StorageLive(_1);
+    _1 = default;
+    StorageLive(_2);
+    _2 = &_1;
+    StorageLive(_3);
+    _3 = "mew";
+    _0 = Cat$new(copy _2, borrow _3) -> [return: bb1];
+  }
+
+  bb1: {
+    StorageLive(_4);
+    _4 = (Speaker) _1;
+    _0 = announce(copy _4) -> [return: bb2];
+  }
+
+  bb2: {
+    drop(_3);
+    StorageDead(_3);
+    drop(_1);
+    StorageDead(_1);
+    _0 = 0_i32;
+    return;
+  }
+}
+"
+`;

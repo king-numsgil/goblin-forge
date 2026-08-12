@@ -159,8 +159,11 @@ describe("what structs are not", () => {
     );
   });
 
-  test("a method on a struct is not supported yet", async () => {
-    await expectRejected(
+  test("an interface mixing a method and a data member", async () => {
+    // An interface is a *shape* (data only, a struct) or a *contract* (methods
+    // only, dispatched). One that is both would have to be a layout and a
+    // dispatch table at once, so it is rejected rather than guessed at.
+    const diagnostic = await expectRejected(
       "struct-method",
       `interface WithMethod { x: i32; go(): i32; }
 
@@ -168,8 +171,9 @@ describe("what structs are not", () => {
          const a: WithMethod = { x: 1, go: () => 1 };
          return 0;
        }\n`,
-      "GF0001",
+      "GF0002",
     );
+    expect(diagnostic.message).toContain("both methods and the data member");
   });
 
   test("a missing field is tsc's business", async () => {
