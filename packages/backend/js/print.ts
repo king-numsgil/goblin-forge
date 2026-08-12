@@ -252,6 +252,10 @@ function rvalue(module: Module, value: Rvalue): string {
       return `tryCast<${sym(module, module.interfaces[value.interface]?.name ?? 0)}>(${place(
         value.source,
       )})`;
+    case "TryClass":
+      return `tryCast<${sym(module, module.classes[value.class]?.name ?? 0)}>(${place(
+        value.source,
+      )})`;
     case "InterfaceIsNull":
       return `isNull(${place(value.value)})`;
     case "MakeInterface":

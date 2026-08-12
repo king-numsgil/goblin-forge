@@ -353,16 +353,52 @@ describe("tryCast", () => {
     );
   });
 
-  test("casting to a class is not implemented yet", async () => {
-    const diagnostic = await expectRejected(
-      "trycast-to-class",
-      `${HIERARCHY}
+  test("casting to a class walks the base chain", async () => {
+    // The same question as the interface case and a different mechanism:
+    // descriptors have one owner and are compared by *address*, so this is a
+    // pointer walk with no names in it — which is what works across a library
+    // boundary, where comparing against the set of vtables known at compile
+    // time does not (DECISIONS §11.3).
+    const result = await run(
+      "trycast-class",
+      `class Animal { speak(): string { return "..."; } }
+       class Dog extends Animal {
+         override speak(): string { return "woof"; }
+         trick(): string { return "roll over"; }
+       }
+       class Cat extends Animal { override speak(): string { return "mew"; } }
+
+       function report(a: Reference<Animal>): void {
+         const d = tryCast<Dog>(a);
+         if (d !== null) {
+           console.log(\`dog: \${d.speak()} and can \${d.trick()}\`);
+         } else {
+           console.log(\`not a dog: \${a.speak()}\`);
+         }
+       }
+
        export function main(): i32 {
-         const d = tryCast<Dog>(new Rock());
+         report(new Dog());
+         report(new Cat());
+         report(new Animal());
          return 0;
        }\n`,
-      "GF0001",
     );
-    expect(diagnostic.message).toContain("class");
+    expect(result.stdout).toBe(
+      "dog: woof and can roll over\nnot a dog: mew\nnot a dog: ...\n",
+    );
+  });
+
+  test("casting to something that is neither a class nor a contract", async () => {
+    const diagnostic = await expectRejected(
+      "trycast-to-width",
+      `${HIERARCHY}
+       export function main(): i32 {
+         const n = tryCast<i32>(new Rock());
+         return 0;
+       }\n`,
+      "GF0002",
+    );
+    expect(diagnostic.message).toContain("nativeCast");
   });
 });

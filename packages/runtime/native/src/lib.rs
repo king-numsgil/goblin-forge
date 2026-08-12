@@ -416,3 +416,27 @@ pub unsafe extern "C" fn gf_find_itab(descriptor: *const u8, key: u64) -> *const
     }
     std::ptr::null()
 }
+
+/// Whether `descriptor`'s base chain reaches `target`. `1` for yes.
+///
+/// The class half of `tryCast`, and DECISIONS §11.3's answer: descriptors have
+/// one owner and are compared by *address*, so this is a pointer walk with no
+/// names involved. That is what works across a library boundary, where the
+/// closed-world trick of comparing against the set of vtables known at compile
+/// time does not.
+///
+/// # Safety
+///
+/// Both arguments must be descriptors this compiler emitted, or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gf_is_a(descriptor: *const u8, target: *const u8) -> u8 {
+    let mut current = descriptor;
+    while !current.is_null() {
+        if current == target {
+            return 1;
+        }
+        // `base` is the second word; see `goblin-codegen::vtable`.
+        current = unsafe { *(current as *const usize).add(1) } as *const u8;
+    }
+    0
+}

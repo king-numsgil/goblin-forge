@@ -1449,6 +1449,47 @@ impl<'a, 'm, M: ClifModule> FunctionTranslator<'a, 'm, M> {
             Rvalue::Aggregate { .. } => {
                 internal_error!("an aggregate literal outside an `Init`")
             }
+            // The class half of `tryCast`, and unlike the interface half this
+            // one *is* an ordinary value: a `Reference<C>` is one word, so the
+            // result is the object's address or null, with no pair to build.
+            Rvalue::TryClass { class, source } => {
+                let target = self
+                    .context
+                    .classes
+                    .get(class.index())
+                    .ok_or_else(|| {
+                        InternalError::new(format!("class {} has no descriptor", class.0))
+                    })?
+                    .descriptor;
+
+                let (address, offset) = self.place_address(source)?;
+                let object = if offset == 0 {
+                    address
+                } else {
+                    self.builder.ins().iadd_imm_s(address, i64::from(offset))
+                };
+
+                let pointer = self.target.pointer_type();
+                let flags = MemFlagsData::trusted();
+                let vtable = self.builder.ins().load(pointer, flags, object, 0);
+                let descriptor = self.builder.ins().load(
+                    pointer,
+                    flags,
+                    vtable,
+                    -(self.target.pointer_bytes as i32),
+                );
+
+                let global = self
+                    .clif_module
+                    .declare_data_in_func(target, self.builder.func);
+                let wanted = self.builder.ins().symbol_value(pointer, global);
+                let answer = self
+                    .call_runtime(RuntimeFn::IsA, &[descriptor, wanted])?
+                    .ok_or_else(|| InternalError::new("`gf_is_a` returned nothing"))?;
+
+                let zero = self.builder.ins().iconst(pointer, 0);
+                Some(self.builder.ins().select(answer, object, zero))
+            }
             // One load and a compare. The pair's itab word is zero exactly when
             // the cast that produced it failed.
             Rvalue::InterfaceIsNull(place) => {
@@ -2108,6 +2149,29 @@ enum Numeric {
 }
 
 /// Locals that need an address rather than a register.
+/// Places an rvalue holds **directly**, rather than inside an operand.
+///
+/// Easy to forget, and forgetting it is a compiler crash rather than a wrong
+/// answer: `addressed_locals` decides which locals get a stack slot, and a
+/// local that is projected into but was never noted lives in a register with no
+/// address for the projection to start from.
+///
+/// Kept beside [`rvalue_operands`] so that adding an rvalue with a `Place` in
+/// it means looking at two lists in the same place.
+fn rvalue_places(rvalue: &Rvalue) -> Vec<&Place> {
+    match rvalue {
+        Rvalue::Len(place)
+        | Rvalue::MakeInterface { source: place, .. }
+        | Rvalue::TryInterface { source: place, .. }
+        | Rvalue::TryClass { source: place, .. }
+        | Rvalue::InterfaceIsNull(place) => vec![place],
+        // `Ref` and `AddrOf` are handled by the caller, which inserts them
+        // unconditionally — taking the address of a bare local needs a slot
+        // even though there is no projection to notice.
+        _ => Vec::new(),
+    }
+}
+
 fn addressed_locals(func: &Function) -> std::collections::HashSet<LocalId> {
     let mut set = std::collections::HashSet::new();
     fn note(set: &mut std::collections::HashSet<LocalId>, place: &Place) {
@@ -2131,6 +2195,9 @@ fn addressed_locals(func: &Function) -> std::collections::HashSet<LocalId> {
                         if let Operand::Copy(p) | Operand::Move(p) | Operand::Borrow(p) = operand {
                             note(&mut set, p);
                         }
+                    }
+                    for inner in rvalue_places(rvalue) {
+                        note(&mut set, inner);
                     }
                 }
                 Statement::Drop { place, .. } => note(&mut set, place),
@@ -2162,7 +2229,8 @@ fn rvalue_operands(rvalue: &Rvalue) -> Vec<&Operand> {
         // the object's *address* and never reads it.
         | Rvalue::MakeInterface { .. }
         | Rvalue::TryInterface { .. }
-        | Rvalue::InterfaceIsNull(_) => Vec::new(),
+        | Rvalue::InterfaceIsNull(_)
+        | Rvalue::TryClass { .. } => Vec::new(),
     }
 }
 

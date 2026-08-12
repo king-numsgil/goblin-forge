@@ -211,6 +211,15 @@ interface Typed {
   readonly operand: Operand;
   readonly type: MachineType;
   readonly temporary?: LocalId;
+  /**
+   * A reference to something nothing owns.
+   *
+   * Legal as an *argument*: the temporary dies at the end of the enclosing
+   * full-expression, which is after the call returns. Illegal as a *binding*,
+   * which would outlive it — that is `GF0234`, and it is the one place the
+   * distinction matters, so the flag is set here and read only there.
+   */
+  readonly borrowsTemporary?: true;
 }
 
 interface Binding {
@@ -1731,6 +1740,25 @@ class BodyLowerer {
       this.#fullExpression(() => {
         const value = this.#expressionTyped(initializer, type);
         if (value === undefined) return;
+        // REWRITE-PLAN §4.4: **no lifetime extension.** C++ keeps a temporary
+        // bound to a `const&` alive for as long as the reference; here that is
+        // rejected instead, because extending a lifetime puts ownership back
+        // into the compiler's inference and keeping it out is the reason
+        // `Reference<T>` is written rather than deduced.
+        //
+        // Only a *binding* can outlive the temporary. Passing one as an
+        // argument is fine and stays fine — the call finishes inside the
+        // enclosing full-expression.
+        if (value.borrowsTemporary === true) {
+          this.#outer.error(
+            initializer,
+            "GF0234",
+            "nothing owns this value, so it would be released at the end of " +
+              "this statement and the reference would outlive it. Bind it to a " +
+              "name first, then take a reference to that.",
+          );
+          return;
+        }
         this.#push({ kind: "StorageLive", value: local });
         this.#push({
           kind: "Init",
@@ -2428,6 +2456,12 @@ class BodyLowerer {
     if (expected.kind === "interface" && value.type.kind === "class") {
       return this.#toInterface(at, value, expected);
     }
+    if (expected.kind === "reference" && expected.referent.kind === "class") {
+      return this.#toClassReference(at, value, expected.referent.name);
+    }
+    if (expected.kind === "class" && value.type.kind === "class") {
+      return this.#slice(at, value, expected);
+    }
 
     if (fits(value.type, expected)) {
       const kind = this.#castKind(at, value.type, expected);
@@ -2499,6 +2533,94 @@ class BodyLowerer {
     // `Copy`, not `Move`: the pair is two borrowed words, trivially copied, and
     // reading it does not end anything.
     return { operand: { kind: "Copy", value: placeOf(local) }, type: contract };
+  }
+
+  /**
+   * `wolf` → `Animal`, by value: **slice** it.
+   *
+   * REWRITE-PLAN §4.1 and §4.7. The destination takes the static type's fields
+   * and the static type's vtable, so what arrives really is an `Animal` and
+   * dispatches as one. The backend does the work — `copy_aggregate` reads the
+   * *destination's* type — so all this has to do is give it a destination of
+   * the right type.
+   *
+   * The copy is the caller's, and the caller destroys it (§4.5), which is what
+   * registering it as a temporary arranges.
+   */
+  #slice(
+    at: ts.Node,
+    value: Typed,
+    expected: Extract<MachineType, { kind: "class" }>,
+  ): Typed | undefined {
+    if (value.type.kind !== "class") return undefined;
+
+    const info = this.#outer.classInfo(value.type.name);
+    let base = info;
+    while (base !== undefined && base.name !== expected.name) base = base.base;
+    if (base === undefined) {
+      // tsc rejects an unrelated class first; this is the check that keeps the
+      // backend from being the one that notices if it ever does not.
+      this.#outer.error(
+        at,
+        "GF0002",
+        `\`${value.type.name}\` is not a \`${expected.name}\`, so there is no ` +
+          "conversion between them.",
+      );
+      return undefined;
+    }
+
+    const source = this.#placeOfSubject(at, value);
+    if (source === undefined) return undefined;
+
+    const local = this.#f.addLocal({
+      ty: this.#outer.tyOf(expected, at),
+      storage: "Temporary",
+      span: this.#outer.span(at),
+    });
+    this.#push({ kind: "StorageLive", value: local });
+    this.#push({
+      kind: "Init",
+      place: placeOf(local),
+      rvalue: { kind: "Use", value: { kind: "Copy", value: source } },
+    });
+    this.#temporaries.push(local);
+    return { operand: { kind: "Copy", value: placeOf(local) }, type: expected, temporary: local };
+  }
+
+  /**
+   * `dog` → `Reference<Animal>`: borrow the object rather than copy it.
+   *
+   * This is the whole reason `Reference<T>` is something you write. Passing a
+   * `Dog` where an `Animal` is expected **copies and slices** it — the derived
+   * part is gone and the vtable becomes `Animal`'s — which is right for a value
+   * and almost never what was wanted for a parameter. A reference keeps the
+   * dynamic type, so a virtual call through it finds the derived override.
+   *
+   * The upcast itself costs nothing: `ClassDef::fields` is flattened base-first,
+   * so a `Base` is a byte-for-byte prefix of every `Derived` and the same
+   * address serves both. Only the *type* changes.
+   */
+  #toClassReference(at: ts.Node, value: Typed, className: string): Typed | undefined {
+    const type: MachineType = {
+      kind: "reference",
+      referent: { kind: "class", name: className },
+    };
+
+    // Already a reference: an upcast, and nothing but a retype.
+    if (value.type.kind === "reference" && value.type.referent.kind === "class") {
+      return { operand: value.operand, type };
+    }
+    if (value.type.kind !== "class") return undefined;
+
+    const place = this.#placeOfSubject(at, value);
+    if (place === undefined) return undefined;
+    const operand = this.#refTo(at, place, value.type);
+    // Borrowing a temporary is fine *here* — it lives to the end of the
+    // enclosing full-expression, so a call completes inside its lifetime.
+    // Only a binding would outlive it, and that is where this is checked.
+    return value.temporary === undefined
+      ? { operand, type }
+      : { operand, type, borrowsTemporary: true };
   }
 
   #castKind(at: ts.Node, from: MachineType, to: MachineType): CastKind | undefined {
@@ -3584,8 +3706,17 @@ class BodyLowerer {
         ? expression.right
         : undefined;
     if (subject === undefined) return undefined;
-    if (this.#contractAt(subject) === undefined) return undefined;
-    return { subject, equals };
+    // A contract reference is a pair, and a class reference is one word. Both
+    // can be null; they are tested differently.
+    if (this.#contractAt(subject) !== undefined) return { subject, equals };
+    const type = this.#outer.checker.getNonNullableType(
+      this.#outer.checker.getTypeAtLocation(subject),
+    );
+    const referent = referentOf(this.#outer.checker, type);
+    if (referent !== null && classNameOf(referent) !== null) {
+      return { subject, equals };
+    }
+    return undefined;
   }
 
   /**
@@ -3606,6 +3737,20 @@ class BodyLowerer {
     if (place === undefined) return undefined;
 
     const bool: MachineType = { kind: "bool" };
+    // A class reference is a single word, so it compares against a null
+    // constant like any other address. A contract reference is a pair, and
+    // what is null is its itab word — a different read, hence a different node.
+    if (value.type.kind === "reference") {
+      return this.#temporaryTyped(expression, bool, {
+        kind: "Binary",
+        op: test.equals ? "Eq" : "Ne",
+        lhs: { kind: "Copy", value: place },
+        rhs: {
+          kind: "Const",
+          value: { kind: "Null", value: this.#outer.tyOf(value.type, expression) },
+        },
+      });
+    }
     const isNull = this.#temporaryTyped(expression, bool, {
       kind: "InterfaceIsNull",
       value: place,
@@ -3619,9 +3764,7 @@ class BodyLowerer {
   }
 
   /** The contract `tryCast<T>(…)` was asked for, or `undefined`. */
-  #tryCastTarget(
-    expression: ts.CallExpression,
-  ): Extract<MachineType, { kind: "interface" }> | undefined {
+  #tryCastTarget(expression: ts.CallExpression): MachineType | undefined {
     const argument = expression.typeArguments?.[0];
     if (expression.typeArguments?.length !== 1 || argument === undefined) {
       this.#outer.error(
@@ -3648,18 +3791,21 @@ class BodyLowerer {
     }
     target ??= this.#outer.erase(argument, type);
     if (target === undefined) return undefined;
-    if (target.kind !== "interface") {
-      // A class downcast is the same question and a different mechanism — walk
-      // the descriptor's base chain rather than search its itab table. It needs
-      // `Reference<C>` to be a writable type first, which it is not yet.
-      this.#outer.unsupported(
-        argument,
-        `\`tryCast\` to \`${renderType(target)}\`. Casting to a class` +
-          " (rather than to an interface with methods)",
-      );
-      return undefined;
+    // A contract, or a class. Same question, two mechanisms: search the
+    // dynamic type's itab table, or walk its descriptor's base chain.
+    if (target.kind === "interface") return target;
+    if (target.kind === "class") {
+      return { kind: "reference", referent: target };
     }
-    return target;
+    this.#outer.error(
+      argument,
+      "GF0002",
+      `\`tryCast\` asks whether a value is really some class or contract. ` +
+        `\`${renderType(target)}\` is neither, and for the twelve widths the ` +
+        "answer is decided at compile time — `nativeCast` is the conversion " +
+        "you want there.",
+    );
+    return undefined;
   }
 
   /**
@@ -3697,26 +3843,30 @@ class BodyLowerer {
       return undefined;
     }
 
-    const interfaceId = this.#outer.interfaceId(contract.name);
-    if (interfaceId === undefined) {
-      // Interning the type declares the interface, so asking for the type
-      // first is what makes the id exist.
-      this.#outer.tyOf(contract, expression);
+    // Interning the type is what declares the interface, so asking for the
+    // type is what makes the id exist.
+    const ty = this.#outer.tyOf(contract, expression);
+
+    let rvalue: Rvalue;
+    if (contract.kind === "interface") {
+      const resolved = this.#outer.interfaceId(contract.name);
+      if (resolved === undefined) return undefined;
+      rvalue = { kind: "TryInterface", interface: resolved, source: asClass.place };
+    } else if (contract.kind === "reference" && contract.referent.kind === "class") {
+      const resolved = this.#outer.classId(contract.referent.name);
+      if (resolved === undefined) return undefined;
+      rvalue = { kind: "TryClass", class: resolved, source: asClass.place };
+    } else {
+      return undefined;
     }
-    const resolved = this.#outer.interfaceId(contract.name);
-    if (resolved === undefined) return undefined;
 
     const local = this.#f.addLocal({
-      ty: this.#outer.tyOf(contract, expression),
+      ty,
       storage: "Temporary",
       span: this.#outer.span(expression),
     });
     this.#push({ kind: "StorageLive", value: local });
-    this.#push({
-      kind: "Init",
-      place: placeOf(local),
-      rvalue: { kind: "TryInterface", interface: resolved, source: asClass.place },
-    });
+    this.#push({ kind: "Init", place: placeOf(local), rvalue });
     return { operand: { kind: "Copy", value: placeOf(local) }, type: contract };
   }
 

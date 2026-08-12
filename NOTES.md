@@ -93,9 +93,9 @@ backend failure:
 
 | Not implemented | Where it is refused | Milestone |
 |---|---|---|
-| **dynamic** interface casts (`x instanceof Pet`) | no spelling yet — see below | later |
+| interface-to-interface conversion, and a contract extending another | nothing lowers either | later |
 | `T[]` — the owning, runtime-length array | `checker/src/types.ts`, `isArrayType` branch | later |
-| `Reference<T>` as a *written* type, except `Reference<I>` for a contract | erasure refuses it; the contract case works | 9 |
+| `Reference<T>` for anything but a class or a contract | `checker/src/types.ts`, the `isReferenceType` branch | later |
 | an interface mixing methods and data | `checker/src/types.ts`, `contractOf` — a rule, not a gap | — |
 | `nativeSizeOf`/`nativeAlignOf`/`nativeNew`/`alloc`/… | lowerer, no intrinsic case | later |
 | `allocArray` / `freeArray()` | declared in the prelude, not lowered | later |
@@ -340,19 +340,63 @@ descriptor and therefore known at the class's own declaration.
 
 ## What interface dispatch still does not do
 
-**Dynamic casts.** `ClassDef::implements` and the per-class descriptor are in
-place and populated; what is missing is the operation that searches them. §11.3
-settles the mechanism — walk the base chain, compare descriptor pointers — and
-the itab array on the descriptor is already sorted by `InterfaceId` for a binary
-search.
-
-There is **no spelling** for one and it has to be invented: `x instanceof Pet` is
-already a TypeScript error ("only refers to a type"), so nothing can diverge. An
-intrinsic returning null on failure fits the machinery that already exists for
-`nativeCast<u8>`, and needs no general generics. Ask before choosing one.
-
 **Contracts at the C boundary.** Refused. Revisit with header emission at
 milestone 9.
 
 **Interface-to-interface conversion**, and a contract extending another. Neither
 is implemented; both are ordinary work on top of what is here.
+
+---
+
+## `tryCast<T>` and `Reference<C>`
+
+```ts
+function report(a: Reference<Animal>): void {
+  const d = tryCast<Dog>(a);          // a class: walk the base chain
+  const s = tryCast<Speaker>(a);      // a contract: search the itab table
+  if (d !== null) { … }
+}
+```
+
+**`| null` is the design, not a detail.** `strictNullChecks` *rejects*
+`tryCast<Pet>(x).feed()`, so the check is the only way to reach the value — a
+boolean type guard could have been ignored, and would have needed flow-sensitive
+rebinding in the lowerer that this does not.
+
+**It is the language's only union.** `Reference<I> | null` is the *same sixteen
+bytes* as `Reference<I>`, with a zero itab meaning "no", so nullability stays
+tsc's view and never becomes a second representation. `nullableOf` recognises
+exactly one shape; anything else with a `|` falls through and is refused.
+
+**Two mechanisms, two nodes.** `Rvalue::TryInterface` searches the dynamic type
+descriptor's itab table (`gf_find_itab`); `Rvalue::TryClass` walks its base chain
+comparing descriptor *addresses* (`gf_is_a`). Addresses, not names, is what makes
+§11.3 work across a library boundary.
+
+**Descriptor keys are a hash of the interface's name**, never its `InterfaceId`.
+Ids are numbered per compilation and two modules would disagree the moment
+`static-lib` exists. `vtable::interface_key`, FNV-1a.
+
+**Itab tables are flattened onto every derived class**, not inherited. A derived
+class needs its *own* itab holding its *own* final overriders — inheriting the
+base's gives the right shape and the wrong bodies, which nothing about the
+program looks wrong while doing. `Lowerer.implement` propagates, and is
+idempotent because it re-enters itself.
+
+**`Reference<C>` keeps the dynamic type; a by-value `C` slices.** That pair of
+behaviours is the reason `Reference<T>` is written rather than inferred, and
+`tests/classes.test.ts` pins both in one test.
+
+**No lifetime extension** (§4.4). Borrowing a temporary is fine as an
+*argument* — it dies at the end of the enclosing full-expression, after the call
+returns — and is `GF0234` as a *binding*, which would outlive it. `Typed.borrowsTemporary`
+carries the distinction, set in `#toClassReference` and read only in the
+declaration path.
+
+**Watch `addressed_locals` when adding an `Rvalue` that holds a `Place`.** It
+decides which locals get a stack slot, and a place held *directly* by an rvalue
+rather than inside an operand is invisible to it — the result is
+`_n is projected into but lives in a register`, a panic rather than a wrong
+answer. `rvalue_places` is the list to extend, and it sits next to
+`rvalue_operands` for that reason. `Rvalue::Len` had this bug from milestone 5
+and nothing reached it until class references existed.

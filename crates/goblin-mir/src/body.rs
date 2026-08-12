@@ -285,6 +285,17 @@ pub enum Rvalue {
         interface: InterfaceId,
         source: Place,
     },
+    /// `tryCast<C>(place)` for a **class**: walk the dynamic type's base chain
+    /// looking for `class`'s descriptor.
+    ///
+    /// A different mechanism from [`Rvalue::TryInterface`] answering the same
+    /// question, which is why they are two nodes rather than one with a flag —
+    /// an interface is found in a table, a base class is found by walking. The
+    /// result is one word: the object's address, or null.
+    TryClass {
+        class: ClassId,
+        source: Place,
+    },
     /// `place === null` for a `Reference<I>`: whether its itab word is zero.
     ///
     /// A node of its own rather than a `BinOp::Eq`, because the pair is an

@@ -467,3 +467,100 @@ describe("classes: what is rejected", () => {
     expect(diagnostic.message).not.toContain("contract");
   });
 });
+
+describe("`Reference<C>` for a class", () => {
+  test("keeps the dynamic type, where a by-value parameter slices", async () => {
+    // The pair of lines this feature exists for, and the reason `Reference<T>`
+    // is something you write rather than something the compiler infers.
+    const result = await run(
+      "classref-vs-value",
+      `class Animal { speak(): string { return "..."; } }
+       class Wolf extends Animal { override speak(): string { return "howl"; } }
+
+       function viaRef(a: Reference<Animal>): string { return a.speak(); }
+       function viaValue(a: Animal): string { return a.speak(); }
+
+       export function main(): i32 {
+         const w = new Wolf();
+         console.log(\`ref=\${viaRef(w)} value=\${viaValue(w)}\`);
+         return 0;
+       }\n`,
+    );
+    expect(result.stdout).toBe("ref=howl value=...\n");
+  });
+
+  test("mutation through a reference reaches the caller's object", async () => {
+    const result = await run(
+      "classref-mutate",
+      `class Box { v: i32; constructor(v: i32) { this.v = v; } }
+       function bump(b: Reference<Box>): void { b.v = b.v + 100; }
+
+       export function main(): i32 {
+         const box = new Box(1);
+         bump(box);
+         console.log(\`\${box.v}\`);
+         return 0;
+       }\n`,
+    );
+    expect(result.stdout).toBe("101\n");
+  });
+
+  test("a reference is a borrow: nothing is released twice", async () => {
+    // `Category::Borrow` doing its job. If a reference were treated as owning,
+    // the callee would release a string the caller still owns.
+    const result = await run(
+      "classref-borrow",
+      `class Named { name: string; constructor(name: string) { this.name = name; } }
+       function read(n: Reference<Named>): usize { return n.name.length; }
+
+       export function main(): i32 {
+         let i: i32 = 0;
+         let total: usize = 0;
+         while (i < 3) {
+           const n = new Named(\`item\${i}\`);
+           total = total + read(n);
+           i = i + 1;
+         }
+         console.log(\`total=\${total}\`);
+         return 0;
+       }\n`,
+    );
+    expect(result.stdout).toBe("total=15\n");
+  });
+
+  test("an upcast costs nothing, because a base is a layout prefix", async () => {
+    const result = await run(
+      "classref-upcast",
+      `class A { who(): string { return "A"; } }
+       class B extends A { override who(): string { return "B"; } }
+       class C extends B { override who(): string { return "C"; } }
+
+       function asA(x: Reference<A>): string { return x.who(); }
+       function asB(x: Reference<B>): string { return x.who(); }
+
+       export function main(): i32 {
+         const c = new C();
+         console.log(\`\${asA(c)}\${asB(c)}\`);
+         return 0;
+       }\n`,
+    );
+    // Both find `C`'s override: an upcast changes the type, not the object.
+    expect(result.stdout).toBe("CC\n");
+  });
+
+  test("binding a reference to a temporary is GF0234", async () => {
+    // REWRITE-PLAN §4.4: no lifetime extension. C++ keeps a temporary bound to
+    // a `const&` alive; here it is rejected, because extending a lifetime puts
+    // ownership back into the compiler's inference.
+    const diagnostic = await expectRejected(
+      "classref-temporary",
+      `class Box { v: i32; constructor(v: i32) { this.v = v; } }
+       export function main(): i32 {
+         const r: Reference<Box> = new Box(1);
+         return r.v;
+       }\n`,
+      "GF0234",
+    );
+    expect(diagnostic.message).toContain("outlive");
+  });
+});

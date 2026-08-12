@@ -152,6 +152,21 @@ export function sameType(a: MachineType, b: MachineType): boolean {
       const other = b as typeof a;
       return a.name === other.name;
     }
+    // Nominal too, and more sharply so: two classes with identical fields have
+    // different vtables and different identities, and one is not the other.
+    //
+    // Falling into `default` here — which is what happened until classes
+    // existed and nothing noticed — makes every class the same type as every
+    // other, so a `Wolf` passed to an `Animal` parameter is never converted and
+    // therefore never **sliced**. The program keeps the derived vtable and
+    // dispatches to overrides a by-value `Animal` cannot have. No crash, just
+    // the wrong answer.
+    case "class":
+    case "interface": {
+      const other = b as typeof a;
+      return a.name === other.name;
+    }
+    // `void`, `bool` and `string` carry nothing to compare.
     default:
       return true;
   }

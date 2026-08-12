@@ -230,6 +230,13 @@ export function erase(checker: ts.TypeChecker, type: ts.Type): MachineType {
     if (referent !== null) {
       const contract = contractOf(checker, referent);
       if (contract !== null) return contract;
+      // `Reference<C>` for a class: one machine word holding the object's
+      // address. This is how polymorphism travels — a `Reference<Base>` keeps
+      // the dynamic type, where copying to a `Base` value would slice it.
+      const className = classNameOf(referent);
+      if (className !== null) {
+        return { kind: "reference", referent: { kind: "class", name: className } };
+      }
     }
     throw new ErasureError(
       "a `Reference<T>` cannot be written as a type yet, except for an " +

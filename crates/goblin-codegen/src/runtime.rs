@@ -48,12 +48,15 @@ pub enum RuntimeFn {
     /// `gf_find_itab(descriptor, key) -> *const Itab` — the dynamic half of
     /// `tryCast`. Null when the type does not satisfy the interface.
     FindItab,
+    /// `gf_is_a(descriptor, target) -> u8` — the class half of `tryCast`.
+    IsA,
 }
 
 impl RuntimeFn {
     pub fn symbol(self) -> &'static str {
         match self {
             RuntimeFn::FindItab => "gf_find_itab",
+            RuntimeFn::IsA => "gf_is_a",
             RuntimeFn::StringClone => "gf_string_clone",
             RuntimeFn::StringFree => "gf_string_free",
             RuntimeFn::StringLen => "gf_string_len",
@@ -85,6 +88,7 @@ impl RuntimeFn {
             // The key is always 64 bits, so a 32-bit target agrees with the
             // runtime about the interface name's hash rather than truncating it.
             RuntimeFn::FindItab => (vec![pointer, types::I64], Some(pointer)),
+            RuntimeFn::IsA => (vec![pointer, pointer], Some(types::I8)),
         }
     }
 }
