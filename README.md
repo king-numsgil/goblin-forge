@@ -162,10 +162,45 @@ because the caller destroys a by-value argument and an owning value travels as a
 handle in a register, so emptying the callee's copy does nothing to the caller's.
 It is `GF0236` now, with the explanation in the message.
 
-Dispatched interfaces are the part still missing. An interface carrying a method
-signature is a *contract* and is refused with a diagnostic that names the two
-things that do work; one carrying only data is a struct, as it has been since
-milestone 6.
+### Interfaces come in two kinds, and the syntax says which
+
+```ts
+interface Speaker { speak(): string; }        // a contract — dispatched
+interface Point   { x: i32; y: i32; }         // a shape — a struct, as before
+
+class Dog   { name: string;  speak(): string { return `${this.name} says woof`; } }
+class Robot { id: i32;       speak(): string { return `unit ${this.id} reporting`; } }
+
+function announce(who: Reference<Speaker>): void {
+  console.log(who.speak());
+}
+```
+
+`Dog` and `Robot` share no base class, so no vtable layout could serve both —
+which is exactly why interface dispatch needs a third object neither of them
+owns. A `Reference<Speaker>` is a two-word `(itab, data)` pair, and the itab is
+static data holding that one class's answers to that one interface, built at
+compile time by gathering from its vtable. Dispatch is two loads and an indirect
+call, the same as a virtual call.
+
+Neither class writes `implements`. **Conversion is structural**, exactly as in
+TypeScript — the conversion site is what registers the itab, so a class the
+interface has never heard of still converts. Writing `implements` is allowed and
+will later be what makes a class findable by a *dynamic* cast.
+
+The distinction between the two kinds is **syntactic, at the declaration**:
+
+| Written | Is |
+|---|---|
+| `feed(): void` — a method signature | a **contract**: dispatched, no layout, held as `Reference<I>` |
+| `feed: () => void` — a function-typed property | a **shape**: an ordinary function-pointer field |
+
+TypeScript already treats these differently (under `strictFunctionTypes`, method
+signatures are bivariant and function-typed properties are contravariant), and so
+does JavaScript — a method goes on the prototype, a property lives on the
+instance. Drawing the line there keeps C's struct-of-callbacks a plain struct,
+and means adding contracts to the language changed the meaning of no existing
+declaration.
 
 ### Arrays come in C's three kinds
 

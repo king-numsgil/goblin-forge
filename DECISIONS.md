@@ -189,11 +189,14 @@ Confirm at milestone 8, when the class representation is actually being built.
 
 ---
 
-## §11.2 — Interface dispatch *(provisional, 2026-08-12)*
+## §11.2 — Interface dispatch *(settled and built, 2026-08-12)*
 
-**Leaning: itables, Go-shaped — a fat reference `(itab*, data*)`, with the itab
+**Answer: itables, Go-shaped — a two-word reference `(itab, data)`, with the itab
 emitted statically at the conversion site.** REWRITE-PLAN §3's option (b), which
 it already called "what most languages land on and is the least clever".
+
+Built at milestone 8b. Everything below stood up except one prediction, recorded
+at the end: the fat reference was expected to be the expensive part and was not.
 
 ### Why itables rather than per-name slots
 
@@ -323,13 +326,29 @@ no general generics — §11.7 stays parked.
 Class → *shape* conversion stays rejected (`GF0002`), so slicing happens only
 class → base class, where it is visible.
 
-### What it costs, and what to check first
+### The prediction that was wrong: it did not break the handle invariant
 
-**It breaks the one-word-handle invariant.** `layout.rs:140` states it outright —
-every handle in this language is one machine word — and `Repr` is
-`Void | Register | Aggregate` with no two-register form. A fat reference is the
-first exception and lands in `layout.rs`, `abi.rs` and `translate.rs` at once.
-This is the real price of the decision, and it is larger than the itab machinery.
+This entry said, before it was built, that the fat reference was the real price:
+that `layout.rs`'s "every handle in this language is one machine word" would have
+to go, that `Repr` would need a two-register form, and that the change would land
+in `layout.rs`, `abi.rs` and `translate.rs` together.
+
+None of that happened, because the framing was wrong. **A `Reference<I>` is an
+aggregate of two handles, not a fat handle.** Nothing about it is a *handle* —
+it is two words at fixed offsets, which is a struct, and structs have travelled
+by address internally since milestone 6. `layout.rs` gained one arm returning a
+two-word layout and one more type in an existing `Repr::Aggregate` list. `abi.rs`
+was not touched at all. The invariant it was going to break is still true and
+still says the same thing.
+
+The residue is real but small: passing one internally copies sixteen bytes
+rather than filling two registers. That is a later optimisation and an isolated
+one — it changes how the pair travels, not what it is — and it only matters at
+`Abi::Internal`, since a contract is refused at the C boundary anyway.
+
+Worth keeping as a note about estimating: "this needs a new `Repr`" was an
+assumption about the *implementation*, made while the design was still being
+argued, and it survived into the written decision as though it were part of it.
 
 **Itabs are not unique across modules, and nothing may depend on their address.**
 Two modules converting the same `(interface, class)` pair each emit an itab, and
@@ -373,13 +392,19 @@ The failure this avoids is a well-known one: it is C++'s `typeid` and
 `.so`s compares unequal and the cast silently returns null. The fix there was
 always to give the identity symbol one owner and export it.
 
-**Contracts do not cross the C boundary** — `GF0001` at milestone 8, revisited
-with header emission at milestone 9.
+**Contracts do not cross the C boundary.** Revisit with header emission at
+milestone 9.
 
-Confirm at milestone 8. The emission path exists already: string literals are
-built with `declare_data`/`define_data` in `translate.rs:1280`, and
-`DataDescription::write_function_addr` (cranelift-module 0.134.3) puts function
-relocations into static data, which is all an itab or a vtable is.
+### One rule added while building it: no mixed interfaces
+
+An interface declaring **both** a method and a data member is rejected
+(`GF0002`). It would have to be a layout *and* a dispatch table at once, and
+neither reading is better than the other. Split it, or make the data a method
+that returns it.
+
+This was not in the design; it fell out of implementing the shape/contract
+split, and it is the one case where the syntactic rule does not decide on its
+own.
 
 ---
 

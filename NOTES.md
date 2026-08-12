@@ -1,17 +1,16 @@
 # Implementation notes
 
-State of the build after milestone 8, written so that milestones 9–10 can be
-picked up cold.
+State of the build after milestone 8 — classes *and* interface dispatch —
+written so that milestones 9–10 can be picked up cold.
 
 - [`REWRITE-PLAN.md`](REWRITE-PLAN.md) is the design. It does not change.
 - [`DECISIONS.md`](DECISIONS.md) is what was decided and why, including the §11
   answers. Read it before re-litigating anything.
 - This file is *where the code is* and *what it does not do yet*.
 
-Everything below is as of milestone 8 complete — classes, vtables, virtual
-dispatch, inheritance, slicing and generated destructors, but **not** interface
-dispatch: 201 TS tests, 6 Rust test binaries, `tsc --noEmit` clean, `cargo
-clippy --workspace --all-targets -D warnings` clean.
+Everything below is as of milestone 8 complete, both halves: 217 TS tests, 6
+Rust test binaries, `tsc --noEmit` clean, `cargo fmt --all --check` clean,
+`cargo clippy --workspace --all-targets -D warnings` clean.
 
 ---
 
@@ -46,7 +45,7 @@ compile(options)                          packages/forge/src/compile.ts
 | `crates/goblin-codegen/src/layout.rs` | 277 | `Layout` (bytes) and `Repr` (registers) — §5.2's two questions |
 | `crates/goblin-codegen/src/abi.rs` | 626 | Win64 + System V classification, with unit tests |
 | `crates/goblin-codegen/src/translate.rs` | 1789 | MIR → Cranelift. The big one. |
-| `crates/goblin-codegen/src/vtable.rs` | 152 | per-class descriptor and vtable, as static data |
+| `crates/goblin-codegen/src/vtable.rs` | 199 | per-class descriptor, vtable and itabs, as static data |
 | `crates/goblin-codegen/src/runtime.rs` | 153 | runtime symbols, string literal data layout |
 | `crates/goblin-codegen/src/link.rs` | 199 | linker discovery, lifted from v1 |
 | `packages/forge/src/lower.ts` | 2701 | AST → MIR. The other big one. |
@@ -94,10 +93,10 @@ backend failure:
 
 | Not implemented | Where it is refused | Milestone |
 |---|---|---|
-| **interface dispatch** — contracts, itables, dynamic casts | `checker/src/types.ts`, the `isMethodSignature` branch; `implements` in `classes.ts` | 8, second half |
-| `instanceof` | no spelling yet — see below | 8, second half |
+| **dynamic** interface casts (`x instanceof Pet`) | no spelling yet — see below | later |
 | `T[]` — the owning, runtime-length array | `checker/src/types.ts`, `isArrayType` branch | later |
-| `Reference<T>` as a *written* type | the lowerer builds them; nothing parses one from source | 9 |
+| `Reference<T>` as a *written* type, except `Reference<I>` for a contract | erasure refuses it; the contract case works | 9 |
+| an interface mixing methods and data | `checker/src/types.ts`, `contractOf` — a rule, not a gap | — |
 | `nativeSizeOf`/`nativeAlignOf`/`nativeNew`/`alloc`/… | lowerer, no intrinsic case | later |
 | `allocArray` / `freeArray()` | declared in the prelude, not lowered | later |
 | static fields and methods, getters, setters | `classes.ts`, `describeMember` | later |
@@ -206,6 +205,7 @@ is not.
 | `tests/layout.test.ts` | layout vs a **real C compiler**, ten shapes |
 | `tests/struct-abi.test.ts` | the C ABI vs a **real `extern "C"` library**, 24 cases |
 | `tests/classes.test.ts` | vtables, dispatch, slicing, destructor chains, and what is refused |
+| `tests/interfaces.test.ts` | contracts, itabs, structural conversion, slot ordering |
 | `tests/oracle.test.ts` | allocation traces vs **real C++**, 9 paired cases |
 | `packages/backend/test/roundtrip.test.ts` | the wire format, byte-for-byte |
 
@@ -287,32 +287,72 @@ class?" test belongs on `classNameAt`, not on `width`.
 
 ---
 
-## Milestone 8, second half — interface dispatch
+## Contracts, as built
 
-Not built. The design is settled in `DECISIONS.md` §11.2 and is worth reading in
-full; the short version:
+**`TyKind::Interface` is the `(itab, data)` pair**, not the contract. It is what
+`Reference<I>` erases to; a bare `I` has no value form and is refused. There is
+no `TyKind` for a contract itself.
 
-- An interface is a **shape** (data members only → a struct, exactly as today)
-  or a **contract** (any `MethodSignature` → dispatched). Decided at the
-  interface's declaration by AST node kind, so `feed: () => void` stays an
-  ordinary function-pointer field and `feed(): void` does not.
-- A contract has no layout and exists only as `Reference<I>`, a two-word
-  `(itab, data)` pair. **That is the first fat handle in the language** —
-  `layout.rs:140` says every handle is one word and `Repr` has no two-register
-  form, so this lands in `layout.rs`, `abi.rs` and `translate.rs` together and
-  is the real cost of the milestone.
-- Itabs are emitted **statically**, at the conversion site, and never interned
-  across modules. Identity lives in the type descriptor, which has one owner;
-  nothing may compare an itab's address.
-- `implements` gates *dynamic* casts only; a static conversion is structural.
+**It is an aggregate of two handles, not a fat handle.** That framing is what
+kept this cheap: `layout.rs`'s "every handle is one machine word" is still true
+and still says the same thing, `Repr` needed no two-register form, and `abi.rs`
+was not touched. The pair travels by address internally, exactly like a struct.
+The cost is copying sixteen bytes instead of filling two registers — a later,
+isolated optimisation.
 
-The MIR is already shaped for it: `TyKind::Interface`, `InterfaceDef`,
-`InterfaceMethod` and `ClassDef::implements` exist and are empty. `vtable.rs`
-already emits a per-class descriptor `{ name, base }` at `[vptr - 8]`, which is
-what §11.3's `instanceof` walks and what an itab points at.
+**Shape or contract, decided by AST node kind**, in `contractOf`:
+`feed(): void` is a `MethodSignature` → dispatched; `feed: () => void` is a
+`PropertySignature` → an ordinary `FnPtr` field, and the interface stays a
+struct. Nothing is inferred from a type. An interface with **both** is rejected
+(`GF0002`) rather than guessed at.
 
-There is **no spelling** for a dynamic cast yet, and one has to be invented:
-`x instanceof Pet` is already a TypeScript error ("only refers to a type"), so
-nothing can diverge. An intrinsic returning null on failure fits the machinery
-that already exists for `nativeCast<u8>` and `allocArray<T>`, and needs no
-general generics.
+**Slots are the interface's method set sorted by name**, so a slot is a function
+of the set rather than of the declaration's source order. `tests/interfaces.test.ts`
+declares one out of order on purpose — two of its three methods have compatible
+signatures, so a shifted slot would print plausible numbers rather than crash.
+
+**Itabs are `[ descriptor ][ method 0 ] …`**, the same shape as a vtable, so a
+dynamic cast can later hand one back and reaching the descriptor at `[-1]` works
+unchanged. They are emitted statically, per `(interface, class)` pair actually
+converted. `ModuleBuilder.implementInterface` is called *while bodies are being
+lowered*, not at `defineClass`, because a structural conversion is only known
+once its site has been seen — that ordering is deliberate.
+
+**The itab is chosen from the source's *static* class.** Converting a `Base`
+yields a `Base`'s itab even when the object is a `Derived`, and dispatch still
+reaches the derived override, because the itab holds `Base`'s final overriders —
+which is where a virtual call through a `Base` would have gone anyway.
+
+**Nothing may compare an itab's address.** An itab is a *cache*; the type
+descriptor is the identity, and it has exactly one owner. Two modules converting
+the same pair will each emit an itab, and that is correct.
+
+**`#contractAt` reports nothing**, like `classNameAt` and for the same reason:
+it decides *whether* a call is interface dispatch before anything commits to
+lowering it that way.
+
+**`implements` is accepted and recorded but not required.** A static conversion
+is structural, matching TypeScript. Declaring the clause is what will make a
+class findable by a dynamic cast, which needs the itab reachable from the type
+descriptor and therefore known at the class's own declaration.
+
+---
+
+## What interface dispatch still does not do
+
+**Dynamic casts.** `ClassDef::implements` and the per-class descriptor are in
+place and populated; what is missing is the operation that searches them. §11.3
+settles the mechanism — walk the base chain, compare descriptor pointers — and
+the itab array on the descriptor is already sorted by `InterfaceId` for a binary
+search.
+
+There is **no spelling** for one and it has to be invented: `x instanceof Pet` is
+already a TypeScript error ("only refers to a type"), so nothing can diverge. An
+intrinsic returning null on failure fits the machinery that already exists for
+`nativeCast<u8>`, and needs no general generics. Ask before choosing one.
+
+**Contracts at the C boundary.** Refused. Revisit with header emission at
+milestone 9.
+
+**Interface-to-interface conversion**, and a contract extending another. Neither
+is implemented; both are ordinary work on top of what is here.
