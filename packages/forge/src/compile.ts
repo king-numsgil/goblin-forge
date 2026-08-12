@@ -179,6 +179,7 @@ export class Compiler {
     const lowered = lower(checked.program, checked.checker, moduleName, {
       requireMain: kind === "bin",
       root: this.#root,
+      entry: this.#resolve(this.#options.entry),
     });
     diagnostics.push(...lowered.diagnostics);
     if (lowered.module === undefined || hasErrors(diagnostics)) return failed(diagnostics);

@@ -157,6 +157,25 @@ pub fn require_plain_data(module: &Module, ty: TyId, what: &str) -> Result<()> {
             crate::layout::render_type(module, *element),
         ))),
         TyKind::FixedArray { element, .. } => require_plain_data(module, *element, what),
+        // A class carries a vtable pointer, and a contract reference carries an
+        // itab — both of them addresses into *this* build's read-only data. A
+        // byte copy of one is meaningless to C, and meaningless to a second
+        // Goblin build too, since descriptors have one owner per compilation
+        // (DECISIONS §11.2).
+        TyKind::Class(id) => Err(InternalError::new(format!(
+            "`{}` is a class, so {what} would hand over a vtable pointer that              only means something inside this build. Pass its fields, or a              `Pointer<T>` to it.",
+            module
+                .class(*id)
+                .and_then(|class| module.sym(class.name))
+                .unwrap_or("a class"),
+        ))),
+        TyKind::Interface(id) => Err(InternalError::new(format!(
+            "`{}` is an interface reference — a pair of pointers into this              build's own tables — so {what} is not meaningful.",
+            module
+                .interface(*id)
+                .and_then(|def| module.sym(def.name))
+                .unwrap_or("an interface"),
+        ))),
         TyKind::Struct(id) => {
             let Some(strukt) = module.strukt(*id) else {
                 return Err(InternalError::new(format!("struct {} is missing", id.0)));
@@ -259,6 +278,12 @@ fn signedness(module: &Module, ty: TyId) -> bool {
 
 /// How a parameter of this type crosses the boundary.
 pub fn classify_param(layouts: &mut Layouts<'_>, ty: TyId, conv: Conv) -> Result<Slot> {
+    // Only aggregates are checked here, and that is deliberate. A one-word
+    // owning handle *does* legitimately cross this boundary in one case: the
+    // runtime's own `extern "C"` functions, which take and return `string`
+    // because they are the code that knows the ownership rules. Whether a
+    // *user's* export may do the same is a question about the source, and the
+    // frontend answers it — `GF0301`, with a file and a line.
     match layouts.repr(ty)? {
         Repr::Void => return Ok(Slot::None),
         Repr::Register(clif) => {
@@ -308,6 +333,7 @@ pub fn classify_param(layouts: &mut Layouts<'_>, ty: TyId, conv: Conv) -> Result
 /// registers is written through a pointer the caller supplies rather than
 /// copied onto the stack.
 pub fn classify_return(layouts: &mut Layouts<'_>, ty: TyId, conv: Conv) -> Result<Slot> {
+    // Aggregates only, for the same reason as `classify_param`.
     match layouts.repr(ty)? {
         Repr::Void => return Ok(Slot::None),
         Repr::Register(clif) => {

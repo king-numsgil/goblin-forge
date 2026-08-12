@@ -333,7 +333,12 @@ export function lower(
   program: ts.Program,
   checker: ts.TypeChecker,
   moduleName: string,
-  options: { readonly requireMain?: boolean; readonly root?: string } = {},
+  options: {
+    readonly requireMain?: boolean;
+    readonly root?: string;
+    /** The entry file. Its exports are the build's public ABI. */
+    readonly entry?: string;
+  } = {},
 ): LowerResult {
   return new Lowerer(
     program,
@@ -341,6 +346,7 @@ export function lower(
     moduleName,
     options.requireMain ?? true,
     options.root ?? "",
+    options.entry ?? "",
   ).run();
 }
 
@@ -506,6 +512,7 @@ class Lowerer {
 
   readonly #requireMain: boolean;
   readonly #root: string;
+  readonly #entry: string;
 
   constructor(
     program: ts.Program,
@@ -513,12 +520,37 @@ class Lowerer {
     moduleName: string,
     requireMain: boolean,
     root: string,
+    entry: string,
   ) {
     this.#program = program;
     this.#checker = checker;
     this.#mir = new ModuleBuilder(moduleName);
     this.#requireMain = requireMain;
     this.#root = root.replaceAll("\\", "/");
+    this.#entry = entry.replaceAll("\\", "/");
+  }
+
+  /**
+   * Whether a declaration is part of the build's **public ABI**.
+   *
+   * REWRITE-PLAN §3 asks whether `export` means "visible to other Goblin
+   * modules" or "visible to the dynamic linker", and warns that v1 conflates
+   * them. They are different things and this is where they separate.
+   *
+   * `export` is TypeScript's word for *importable*, and a program is one
+   * compilation, so an exported function another module calls needs no C ABI at
+   * all — it is an ordinary internal call, free to take a `string`.
+   *
+   * The **entry module's** exports are the public surface: they are what a
+   * `static-lib` publishes, what the generated header declares, and what a DLL
+   * names in its `.def`. Those are classified by the platform's C rules and
+   * limited to plain data (`GF0301`). Everything else is internal, whatever it
+   * says in the source.
+   */
+  #isPublic(node: ts.Node, exported: boolean): boolean {
+    if (!exported) return false;
+    if (this.#entry === "") return true;
+    return node.getSourceFile().fileName.replaceAll("\\", "/") === this.#entry;
   }
 
   run(): LowerResult {
@@ -891,9 +923,30 @@ class Lowerer {
     const name = statement.name.text;
     const exported =
       statement.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword) ?? false;
+    // `export` makes it importable; being an entry-module export makes it part
+    // of the build's public ABI. Only the second is a C boundary.
+    const isPublic = this.#isPublic(statement, exported);
 
     const signature = this.#signature(statement);
     if (signature === undefined) return undefined;
+
+    // An exported function is a boundary, so what crosses it has to be
+    // something both sides can agree about. Checked here rather than left to
+    // the backend's classifier: that one panics, and REWRITE-PLAN §8 says a
+    // program tsc accepted must never reach it.
+    if (isPublic && statement.body !== undefined) {
+      let crossable = true;
+      signature.params.forEach((param, index) => {
+        const at = statement.parameters[index] ?? statement;
+        if (!this.#checkCBoundary(param.type, at, `the parameter \`${param.name}\``)) {
+          crossable = false;
+        }
+      });
+      if (!this.#checkCBoundary(signature.returns, statement.type ?? statement, "the return")) {
+        crossable = false;
+      }
+      if (!crossable) return undefined;
+    }
 
     // An exported function is a C entry point: something outside this module
     // calls it by its symbol, so it is classified by the C rules. `main` in
@@ -904,17 +957,17 @@ class Lowerer {
         name: null,
       })),
       ret: this.tyOf(signature.returns, statement),
-      abi: exported ? "C" : "Internal",
+      abi: isPublic ? "C" : "Internal",
     });
 
-    if (exported && name === "main" && !this.#checkEntryPoint(statement, signature)) {
+    if (isPublic && name === "main" && !this.#checkEntryPoint(statement, signature)) {
       return undefined;
     }
 
     const builder = this.#mir.declareFunction({
-      name: this.#symbolOf(statement, name, exported),
+      name: this.#symbolOf(statement, name, isPublic),
       sig,
-      linkage: exported ? "Export" : "Internal",
+      linkage: isPublic ? "Export" : "Internal",
       span: this.span(statement),
     });
 
@@ -924,7 +977,7 @@ class Lowerer {
       sig,
       signature,
       name,
-      exported,
+      exported: isPublic,
     });
     return { node: statement, builder };
   }
@@ -956,6 +1009,38 @@ class Lowerer {
     });
     const id = this.#mir.extern({ name, sig, span: this.span(node) });
     this.#functions.set(key, { kind: "imported", id, sig, signature, name, exported: true });
+  }
+
+  /**
+   * Whether a type may cross the C boundary, reporting if it may not.
+   *
+   * The same rule the backend's `require_plain_data` enforces, said in the
+   * frontend where there is a node to point at. The backend keeps its copy as
+   * defence in depth — it should now be unreachable.
+   */
+  #checkCBoundary(type: MachineType, at: ts.Node, what: string): boolean {
+    const reason =
+      type.kind === "string" || type.kind === "array"
+        ? "owns a heap buffer, and nothing at the boundary says who frees it"
+        : type.kind === "class"
+          ? "is a class, so it carries a vtable pointer that only means something inside this build"
+          : type.kind === "interface"
+            ? "is an interface reference: a pair of pointers into this build's own tables"
+            : type.kind === "struct" && type.fields.some((f) => needsDrop(f.type))
+              ? "has a field that owns a heap buffer, so a byte copy would not be the whole copy"
+              : type.kind === "fixedArray" && needsDrop(type.element)
+                ? "has elements that own a heap buffer"
+                : undefined;
+    if (reason === undefined) return true;
+    this.error(
+      at,
+      "GF0301",
+      `${what} is a \`${renderType(type)}\`, which ${reason}. An exported ` +
+        "function is called from outside this build, so it can only take and " +
+        "return plain data — the fixed widths, `boolean`, a struct of those, or " +
+        "a `Pointer<T>` and a length.",
+    );
+    return false;
   }
 
   #signature(node: ts.FunctionDeclaration): FnSignature | undefined {

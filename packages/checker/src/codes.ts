@@ -174,6 +174,24 @@ export const CODES = {
       "then take a reference to that.",
   },
 
+  // -- Layout and the C boundary -------------------------------------------
+  GF0301: {
+    title: "this type cannot cross the C boundary",
+    explanation:
+      "An exported function is called by something outside this build — C, " +
+      "another language, or another Goblin build — so its parameters and its " +
+      "return have to be things both sides can agree about. A byte copy has to " +
+      "*be* the whole copy.\n\n" +
+      "A `string` or a `T[]` owns a heap buffer, and nothing at the boundary " +
+      "says who frees it. A class carries a vtable pointer, and an interface " +
+      "reference a pair of pointers into this build's own tables — addresses " +
+      "that mean nothing to anyone else, including a second Goblin build, " +
+      "because type descriptors have exactly one owner per compilation.\n\n" +
+      "Pass plain data instead: the fixed widths, `boolean`, a struct of those, " +
+      "or a `Pointer<T>` and a length. An internal function has no such limit — " +
+      "it is only `export` that makes this a boundary.",
+  },
+
   // -- The compiler is broken ----------------------------------------------
   GF9001: {
     title: "the backend could not decode the MIR",

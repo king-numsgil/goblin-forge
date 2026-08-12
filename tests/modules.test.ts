@@ -177,3 +177,55 @@ describe("multi-module programs", () => {
     expect(diagnostic.message).toContain("already a class called");
   });
 });
+
+describe("`export` versus the public ABI", () => {
+  test("a non-entry export may take and return owning values", async () => {
+    // REWRITE-PLAN §3 warns that v1 conflates "visible to other Goblin modules"
+    // with "visible to the dynamic linker". They separate here: `export` is
+    // TypeScript's word for *importable*, and a program is one compilation, so
+    // an exported function another module calls is an ordinary internal call —
+    // free to take a `string`, which no C boundary could.
+    const result = await run(
+      "abi-internal-export",
+      `import { shout } from "./text.ts";
+
+       export function main(): i32 {
+         console.log(shout("hi"));
+         return 0;
+       }\n`,
+      {
+        files: {
+          "text.ts": `export function shout(text: string): string { return \`\${text}!\`; }\n`,
+        },
+      },
+    );
+    expect(result.stdout).toBe("hi!\n");
+  });
+
+  test("an entry-module export may not", async () => {
+    // The same function in the entry module *is* the public surface: it is what
+    // a `static-lib` publishes and what the header declares, so it is limited
+    // to what a byte copy can carry.
+    const diagnostic = await expectRejected(
+      "abi-public-export",
+      `export function shout(text: string): string { return \`\${text}!\`; }
+       export function main(): i32 { return 0; }\n`,
+      "GF0301",
+    );
+    expect(diagnostic.message).toContain("owns a heap buffer");
+  });
+
+  test("a class cannot cross the public boundary either", async () => {
+    // It carries a vtable pointer — an address into *this* build's read-only
+    // data, meaningless to C and to a second Goblin build alike, because type
+    // descriptors have one owner per compilation.
+    const diagnostic = await expectRejected(
+      "abi-public-class",
+      `class Dog { n: i32; }
+       export function feed(d: Dog): i32 { return d.n; }
+       export function main(): i32 { return 0; }\n`,
+      "GF0301",
+    );
+    expect(diagnostic.message).toContain("vtable");
+  });
+});

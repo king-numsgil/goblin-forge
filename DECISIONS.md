@@ -570,16 +570,47 @@ is ever wanted.
 
 ## Library targets *(2026-08-12, milestone 9)*
 
-### `export` means "visible to the linker", and that is all it means
+### `export` versus the public ABI *(revised at milestone 10)*
 
-REWRITE-PLAN §3 asks whether `export` in the source means "visible to other
-Goblin modules" or "visible to the dynamic linker". **The linker.** An exported
-function is `Abi::C`, gets `Linkage::Export`, appears in the generated header,
-and is named in a DLL's `.def` file.
+REWRITE-PLAN §3 asks whether `export` means "visible to other Goblin modules" or
+"visible to the dynamic linker", and warns that v1 conflates them.
 
-Cross-module *Goblin* visibility is milestone 10's problem and a different
-mechanism — a module interface, not a linkage attribute. Conflating them is what
-v1 did, and it got away with it only because it built nothing but executables.
+**Milestone 9 answered "the linker" and that was wrong** — or rather, it was the
+only answer available while a build was one file, and it stopped being right the
+moment a second one existed. `export` is TypeScript's word for *importable*, and
+a Goblin program is one compilation, so an exported function that another module
+calls is an ordinary internal call. Making it a C boundary would forbid it a
+`string` parameter for no reason at all.
+
+The rule now:
+
+| | |
+|---|---|
+| `export` on any declaration | **importable** by another module in this build. Internal linkage, qualified symbol, no ABI restriction. |
+| `export` in the **entry module** | the build's **public ABI**. `Abi::C`, `Linkage::Export`, bare symbol, in the generated header, named in a DLL's `.def` — and limited to plain data. |
+
+One surface per build, which is what a library is. Found by a test that tried to
+call a `string`-returning helper across a module boundary and was told it could
+not, which was the compiler being wrong rather than the program.
+
+### `GF0301`: only plain data crosses the public boundary
+
+A `string` or `T[]` owns a heap buffer and nothing at the boundary says who
+frees it. A **class** carries a vtable pointer and an **interface reference** a
+pair of pointers into this build's own tables — addresses that mean nothing to C
+*or to a second Goblin build*, because type descriptors have exactly one owner
+per compilation (§11.2).
+
+None of this was checked before: `require_plain_data` ran only for aggregates,
+so a one-word `string` handle sailed through as `Slot::Plain`, and it had no
+`Class` arm at all. Found by asking what happens when a Goblin executable links
+a Goblin shared library — which does work, for plain data.
+
+The check lives in the **frontend**, where there is a node to point at. The
+backend's copy stays as defence in depth and deliberately still only inspects
+aggregates: the runtime's own `extern "C"` functions take and return `string`
+legitimately, because they are the code that knows the ownership rules, and the
+backend cannot tell those from a user's export. The frontend can.
 
 ### A static library carries only its own objects
 
