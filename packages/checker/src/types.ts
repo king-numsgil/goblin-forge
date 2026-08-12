@@ -174,6 +174,10 @@ export function isReferenceType(checker: ts.TypeChecker, type: ts.Type): boolean
   return brandedProperty(checker, type, "ReferenceBrand") !== null;
 }
 
+export function isCStringType(checker: ts.TypeChecker, type: ts.Type): boolean {
+  return brandedProperty(checker, type, "CStringBrand") !== null;
+}
+
 /**
  * Erase a `ts.Type`.
  *

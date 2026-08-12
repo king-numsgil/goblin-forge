@@ -1879,7 +1879,11 @@ impl<'a, 'm, M: ClifModule> FunctionTranslator<'a, 'm, M> {
             }),
             Some(TyKind::Float(_)) => Ok(Numeric::Float),
             Some(TyKind::Bool) => Ok(Numeric::Unsigned),
-            Some(TyKind::Pointer(_) | TyKind::Reference(_)) => Ok(Numeric::Unsigned),
+            // Addresses, compared as unsigned words. `CStr` is here because
+            // `p !== null` on a C string is the single most common thing a
+            // Goblin program will do with one — `getenv`, `SDL_GetError`, half
+            // of libc return null and mean it.
+            Some(TyKind::Pointer(_) | TyKind::Reference(_) | TyKind::CStr) => Ok(Numeric::Unsigned),
             _ => internal_error!("a non-numeric type reached an arithmetic operator"),
         }
     }

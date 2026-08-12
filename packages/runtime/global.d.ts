@@ -578,6 +578,32 @@ interface CString {
  */
 declare function cstring(value: string): CString;
 
+/**
+ * Release a `CString` that came from a Goblin `string`.
+ *
+ * The companion to `cstring(move(…))`, and **only** to that. It calls Goblin's
+ * own deallocator, which subtracts sixteen bytes to reach the length header —
+ * so handing it a `CString` from anywhere else is not a leak, it is memory
+ * corruption:
+ *
+ * ```ts
+ * const mine = cstring(move(built));
+ * cstring_free(mine);          // right
+ *
+ * declare function SDL_GetPrefPath(o: CString, a: CString): CString | null;
+ * const theirs = SDL_GetPrefPath(cstring("acme"), cstring("game"));
+ * cstring_free(theirs);        // WRONG — SDL allocated it, `SDL_free` releases it
+ * ```
+ *
+ * There is deliberately **no `free()` method on `CString`**. A method would have
+ * to pick one deallocator and there is no right one to pick: SDL's needs
+ * `SDL_free`, `malloc`'s needs `free`, and only a moved Goblin string needs
+ * this. Releasing a `CString` is always "call the free that came with it", which
+ * is the same rule C has always had — and a named function per allocator is how
+ * C says it.
+ */
+declare function cstring_free(value: CString): void;
+
 // ---------------------------------------------------------------------------
 // console
 //

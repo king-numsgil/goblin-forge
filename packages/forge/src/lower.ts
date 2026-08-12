@@ -53,6 +53,7 @@ import {
   type ScalarName,
   classNameOf,
   contractOf,
+  isCStringType,
   referentOf,
 } from "@goblin-forge/checker";
 import {
@@ -100,6 +101,8 @@ const FIXED_ARRAY = "fixedArray";
 const TRY_CAST = "tryCast";
 /** `cstring(s)` — borrow a `string`'s bytes as a raw `const char *`. */
 const CSTRING = "cstring";
+/** `cstring_free(c)` — release one that came from a Goblin `string`. */
+const CSTRING_FREE = "cstring_free";
 
 /**
  * Runtime entry points the lowerer names directly.
@@ -117,6 +120,7 @@ const RUNTIME = {
   fromU64: "gf_string_from_u64",
   fromF64: "gf_string_from_f64",
   fromBool: "gf_string_from_bool",
+  stringFree: "gf_string_free",
 } as const;
 
 /** `console` methods, and which stream each writes to. */
@@ -2516,6 +2520,12 @@ class BodyLowerer {
       return typed(CSTRING_TYPE);
     }
 
+    if (expression.expression.text === CSTRING_FREE) {
+      const argument = expression.arguments[0];
+      if (argument !== undefined && this.width(argument).kind === "error") return ERROR;
+      return typed(VOID);
+    }
+
     // `move(x)` has whatever type `x` has; it changes ownership, not type.
     if (expression.expression.text === MOVE) {
       const argument = expression.arguments[0];
@@ -3802,6 +3812,7 @@ class BodyLowerer {
     if (name === FIXED_ARRAY) return this.#fixedArray(expression, natural);
     if (name === TRY_CAST) return this.#tryCast(expression);
     if (name === CSTRING) return this.#cstring(expression);
+    if (name === CSTRING_FREE) return this.#cstringFree(expression);
 
     // Resolved through tsc's symbol, not by name: an imported function is the
     // same symbol as its declaration however it is spelled at the call site,
@@ -3977,6 +3988,13 @@ class BodyLowerer {
     if (referent !== null && classNameOf(referent) !== null) {
       return { subject, equals };
     }
+    // A `CString` is one machine word and is the type a C function most often
+    // returns null from — `getenv`, `SDL_GetError`, half of libc. Declaring one
+    // `CString | null` and being made to check it is the whole benefit of the
+    // nullable spelling, and it is worth nothing if the check does not lower.
+    if (isCStringType(this.#outer.checker, type)) {
+      return { subject, equals };
+    }
     return undefined;
   }
 
@@ -3998,10 +4016,11 @@ class BodyLowerer {
     if (place === undefined) return undefined;
 
     const bool: MachineType = { kind: "bool" };
-    // A class reference is a single word, so it compares against a null
-    // constant like any other address. A contract reference is a pair, and
-    // what is null is its itab word — a different read, hence a different node.
-    if (value.type.kind === "reference") {
+    // A class reference and a `CString` are each a single word, so they compare
+    // against a null constant like any other address. A contract reference is a
+    // pair, and what is null is its itab word — a different read, hence a
+    // different node.
+    if (value.type.kind === "reference" || value.type.kind === "cstring") {
       return this.#temporaryTyped(expression, bool, {
         kind: "Binary",
         op: test.equals ? "Eq" : "Ne",
@@ -4085,6 +4104,36 @@ class BodyLowerer {
       operand,
       to: this.#outer.tyOf(CSTRING_TYPE, expression),
     });
+  }
+
+  /**
+   * `cstring_free(c)` — release a `CString` through Goblin's own deallocator.
+   *
+   * An intrinsic rather than a method on `CString`, and that is the design
+   * rather than a shortcut. A `.free()` would have to pick one deallocator, and
+   * there is no right one to pick: an SDL string needs `SDL_free`, a `strdup`
+   * needs `free`, and only a moved Goblin string needs this one. Releasing a
+   * `CString` is always "call the free that came with it" — the rule C has
+   * always had, and a named function per allocator is how C says it.
+   */
+  #cstringFree(expression: ts.CallExpression): Typed | undefined {
+    const argument = expression.arguments[0];
+    if (expression.arguments.length !== 1 || argument === undefined) {
+      this.#outer.error(expression, "GF0002", "`cstring_free` takes exactly one `CString`.");
+      return undefined;
+    }
+    const value = this.#expressionTyped(argument, CSTRING_TYPE);
+    if (value === undefined) return undefined;
+    if (value.type.kind !== "cstring") {
+      this.#outer.error(
+        argument,
+        "GF0002",
+        `\`cstring_free\` releases a \`CString\`, and this is a ` +
+          `\`${renderType(value.type)}\`. A \`string\` releases itself.`,
+      );
+      return undefined;
+    }
+    return this.#callRuntime(expression, RUNTIME.stringFree, [value], VOID);
   }
 
   /** The contract `tryCast<T>(…)` was asked for, or `undefined`. */

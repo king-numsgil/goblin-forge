@@ -63,6 +63,7 @@ export {
   type InterfaceMethod,
   isFloat,
   isInteger,
+  isCStringType,
   isPointerType,
   isReferenceType,
   isSignedInteger,

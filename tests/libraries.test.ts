@@ -147,7 +147,7 @@ int main(void) {
 `,
     });
     expect(stdout).toBe("42\n3.50\n1\n");
-  });
+  }, CMAKE_TIMEOUT);
 
   test("structs cross the boundary with the layout the header declares", async () => {
     // The header is generated from the MIR, so the `Point` the C compiler lays
@@ -192,7 +192,7 @@ int main(void) {
 `,
     });
     expect(stdout).toBe("5,2\n14\n8 16\n");
-  });
+  }, CMAKE_TIMEOUT);
 
   test("a `string` crosses as a `const char *`, and C releases it", async () => {
     // A Goblin `string` is a pointer to nul-terminated bytes, so C reads one

@@ -77,6 +77,72 @@ describe("CString", () => {
     expect(diagnostic.message).toContain("move");
   });
 
+  test("`cstring_free` releases a moved-out string", async () => {
+    // The companion to `cstring(move(…))`, and only to that: it calls Goblin's
+    // own deallocator, which subtracts sixteen bytes to reach the length
+    // header. A `CString` from anywhere else needs *its* library's free.
+    const result = await run(
+      "cstring-free",
+      `export function main(): i32 {
+         const s: string = "a" + "bcd";
+         const c: CString = cstring(move(s));
+         console.log(\`len=\${c.length}\`);
+         cstring_free(c);
+         return 0;
+       }\n`,
+    );
+    expect(result.stdout).toBe("len=4\n");
+  });
+
+  test("`cstring_free` refuses a `string` — and tsc says so first", async () => {
+    // A `string` releases itself; handing one here would free it twice. The
+    // brand is what makes this tsc's to catch rather than the lowerer's, which
+    // is the better outcome: the editor underlines it while you type. The
+    // lowerer keeps its own check anyway, per REWRITE-PLAN §8.
+    await expectRejected(
+      "cstring-free-string",
+      `export function main(): i32 {
+         const s: string = "a" + "b";
+         cstring_free(s);
+         return 0;
+       }\n`,
+      "TS2345",
+    );
+  });
+
+  test("a foreign `CString` is freed by whoever allocated it", async () => {
+    // The question this type exists to answer, with the two real shapes:
+    //
+    //   `getenv`  — library-owned, do **not** free   (SDL_GetError)
+    //   `_strdup` — yours, freed with *its* free     (SDL_GetPrefPath / SDL_free)
+    //
+    // Goblin never needs to know which allocator was used, because it is never
+    // asked to free them. That is the whole content of "untracked", and it is
+    // why there is no `.free()` method: there would be no right answer for it.
+    //
+    // The leak count is zero because the runtime correctly counts *nothing*
+    // here — none of this memory is Goblin's.
+    const result = await run(
+      "cstring-foreign",
+      `declare function getenv(name: CString): CString | null;
+       declare function _strdup(source: CString): CString | null;
+       declare function free(mem: CString): void;
+
+       export function main(): i32 {
+         const path = getenv(cstring("PATH"));
+         if (path !== null) { console.log("PATH is set"); } else { console.log("unset"); }
+
+         const copy = _strdup(cstring("borrowed then owned"));
+         if (copy !== null) {
+           console.log(\`copy len=\${copy.length}\`);
+           free(copy);
+         }
+         return 0;
+       }\n`,
+    );
+    expect(result.stdout).toBe("PATH is set\ncopy len=19\n");
+  });
+
   test("`cstring(move(s))` takes the bytes out of the compiler's hands", async () => {
     // The unsafe escape hatch, working as designed. `move` makes the string
     // dead, so no destructor runs and the bytes outlive the scope — which is a
