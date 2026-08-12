@@ -111,8 +111,33 @@ pub fn emit(
         // (DECISIONS §11.2).
         let name_data = declare_string(clif_module, &format!("__gf_name${name}"), name)?;
 
+        // Followed by the itab table `gf_find_itab` searches:
+        //
+        //   +0  name   +8  base   +16  count   +24  [ { key, itab } ; count ]
+        //
+        // `key` is a hash of the *interface's name*, never its `InterfaceId`.
+        // Ids are numbered per compilation, so two modules would disagree about
+        // them the moment `static-lib` exists; a name is the same everywhere.
+        let mut sorted: Vec<_> = class.implements.iter().collect();
+        sorted.sort_by_key(|implemented| implemented.interface.0);
+
         let mut descriptor = DataDescription::new();
-        descriptor.define(vec![0u8; pointer * 2].into_boxed_slice());
+        let mut bytes = vec![0u8; pointer * (3 + sorted.len() * 2)];
+        bytes[pointer * 2..pointer * 3]
+            .copy_from_slice(&(sorted.len() as u64).to_le_bytes()[..pointer]);
+        for (index, implemented) in sorted.iter().enumerate() {
+            let interface = module
+                .interface(implemented.interface)
+                .and_then(|def| module.sym(def.name))
+                .ok_or_else(|| {
+                    InternalError::new(format!("interface {} is missing", implemented.interface.0))
+                })?;
+            let at = pointer * (3 + index * 2);
+            bytes[at..at + pointer]
+                .copy_from_slice(&interface_key(interface).to_le_bytes()[..pointer]);
+        }
+        descriptor.define(bytes.into_boxed_slice());
+
         let name_ref = clif_module.declare_data_in_data(name_data, &mut descriptor);
         descriptor.write_data_addr(0, name_ref, 0);
         if let Some(base) = class.base {
@@ -121,6 +146,22 @@ pub fn emit(
                 .ok_or_else(|| InternalError::new(format!("base class {} is missing", base.0)))?;
             let base_ref = clif_module.declare_data_in_data(base_data.descriptor, &mut descriptor);
             descriptor.write_data_addr(pointer as u32, base_ref, 0);
+        }
+        for (index, implemented) in sorted.iter().enumerate() {
+            let itab = *entry.itabs.get(&implemented.interface.0).ok_or_else(|| {
+                InternalError::new(format!(
+                    "class `{name}` has no itab declared for interface {}",
+                    implemented.interface.0,
+                ))
+            })?;
+            let itab_ref = clif_module.declare_data_in_data(itab, &mut descriptor);
+            // Biased past the itab's own descriptor word, so what a dynamic
+            // cast hands back is what a static conversion would have built.
+            descriptor.write_data_addr(
+                (pointer * (4 + index * 2)) as u32,
+                itab_ref,
+                ClassData::vtable_bias(target),
+            );
         }
         define(
             clif_module,
@@ -225,4 +266,23 @@ fn define(
     clif_module
         .define_data(id, description)
         .map_err(|error| InternalError::new(format!("defining `{symbol}`: {error}")))
+}
+
+/// A stable key for an interface, from its **name**.
+///
+/// FNV-1a, 64-bit. Deliberately not the `InterfaceId`: ids are numbered per
+/// compilation, so two modules would disagree about them the moment a library
+/// boundary exists — which is precisely the closed-world mistake REWRITE-PLAN
+/// §3 says to design out rather than fix later.
+///
+/// A collision would make a dynamic cast answer yes to the wrong interface.
+/// Two names colliding in 64 bits is not something to plan around, but it is
+/// something to *notice* if a cast ever comes back inexplicably true.
+pub fn interface_key(name: &str) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in name.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
 }

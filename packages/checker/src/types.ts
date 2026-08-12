@@ -174,6 +174,17 @@ export function isReferenceType(checker: ts.TypeChecker, type: ts.Type): boolean
  * caller always has a node to attach and this function usually does not.
  */
 export function erase(checker: ts.TypeChecker, type: ts.Type): MachineType {
+  // `Reference<T> | null` — the result of `tryCast`, and the **only** union the
+  // language has. It erases to the same machine type as `Reference<T>`, because
+  // the null is representable inside the pair itself: a zero itab means "no".
+  // So nullability stays entirely tsc's view of the program and reaches neither
+  // the MIR nor the backend.
+  //
+  // Deliberately not a step toward general unions. Anything else with a `|` in
+  // it falls through to the ordinary path and is refused.
+  const nullable = nullableOf(checker, type);
+  if (nullable !== null) return erase(checker, nullable);
+
   const flags = type.getFlags();
 
   if (flags & (ts.TypeFlags.Void | ts.TypeFlags.Undefined)) return { kind: "void" };
@@ -271,6 +282,22 @@ export function classNameOf(type: ts.Type): string | null {
   if (symbol === undefined) return null;
   const declaration = symbol.declarations?.find(ts.isClassDeclaration);
   return declaration?.name?.text ?? null;
+}
+
+/**
+ * The non-null half of `X | null`, or `null` when the type is not that shape.
+ *
+ * Exactly one union is recognised, and only this one: `null` (or `undefined`,
+ * which tsc folds in alongside it) with a single other member. A union of two
+ * real types is not a thing this language has, and falls through to be refused
+ * by whatever asked.
+ */
+export function nullableOf(checker: ts.TypeChecker, type: ts.Type): ts.Type | null {
+  if (!type.isUnion()) return null;
+  const nullish = ts.TypeFlags.Null | ts.TypeFlags.Undefined;
+  const real = type.types.filter((part) => (part.getFlags() & nullish) === 0);
+  if (real.length !== 1 || real.length === type.types.length) return null;
+  return real[0] ?? null;
 }
 
 /** What a `Reference<T>` refers to, read off its brand, or `null`. */

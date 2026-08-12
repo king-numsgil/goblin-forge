@@ -250,3 +250,75 @@ describe("diagnostics", () => {
     expect(diagnostic.location?.line).toBe(2);
   });
 });
+
+describe("the conditional operator", () => {
+  test("picks an arm, and only runs that one", async () => {
+    const result = await run(
+      "ternary-basic",
+      `function shout(text: string): string {
+         console.log(\`evaluated \${text}\`);
+         return text;
+       }
+
+       export function main(): i32 {
+         const n: i32 = 7;
+         console.log(n > 5 ? shout("big") : shout("small"));
+         return 0;
+       }\n`,
+    );
+    // Only one arm's call happens: a ternary is control flow, not an operator
+    // over two already-computed values.
+    expect(result.stdout).toBe("evaluated big\nbig\n");
+  });
+
+  test("both arms may be literals, taking their width from context", async () => {
+    const result = await run(
+      "ternary-poly",
+      `export function main(): i32 {
+         const n: i32 = 7;
+         const pick: u8 = n > 5 ? 100 : 200;
+         console.log(\`\${pick}\`);
+         return 0;
+       }\n`,
+    );
+    expect(result.stdout).toBe("100\n");
+  });
+
+  test("owning arms in a loop release what they made", async () => {
+    // The leak assertion is the test. Each arm builds a `string` that only
+    // exists on its own path, so getting this wrong is either a leak or a drop
+    // of something never constructed.
+    const result = await run(
+      "ternary-owning",
+      `export function main(): i32 {
+         let i: i32 = 0;
+         let total: usize = 0;
+         while (i < 4) {
+           const s: string = i === 1 ? "one" + "!" : "other" + "?";
+           total = total + s.length;
+           i = i + 1;
+         }
+         console.log(\`total=\${total}\`);
+         return 0;
+       }\n`,
+    );
+    expect(result.stdout).toBe("total=22\n");
+  });
+
+  test("arms of different types are tsc's business", async () => {
+    // And they always are, because the twelve widths are mutually unassignable
+    // brands: a mismatch makes the ternary's type a union, and no union is
+    // assignable to a width. The lowerer keeps its own check anyway —
+    // REWRITE-PLAN §8 says the backend must never be the thing that notices,
+    // and "tsc would have caught it" is an assumption, not a guarantee.
+    await expectRejected(
+      "ternary-mismatch",
+      `export function main(): i32 {
+         const n: i32 = 1;
+         const bad: i32 = n > 0 ? 1 : "two";
+         return 0;
+       }\n`,
+      "TS2322",
+    );
+  });
+});

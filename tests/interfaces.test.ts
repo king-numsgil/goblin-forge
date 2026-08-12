@@ -263,3 +263,106 @@ describe("contracts: what is rejected", () => {
     );
   });
 });
+
+describe("tryCast", () => {
+  const HIERARCHY = `interface Speaker { speak(): string; }
+       class Animal { legs(): i32 { return 4; } }
+       class Dog extends Animal implements Speaker {
+         speak(): string { return "woof"; }
+       }
+       class Rock extends Animal { }\n`;
+
+  test("answers yes and no", async () => {
+    const result = await run(
+      "trycast-yes-no",
+      `${HIERARCHY}
+       export function main(): i32 {
+         const d = tryCast<Speaker>(new Dog());
+         if (d !== null) { console.log("dog: yes"); } else { console.log("dog: no"); }
+         const r = tryCast<Speaker>(new Rock());
+         if (r !== null) { console.log("rock: yes"); } else { console.log("rock: no"); }
+         return 0;
+       }\n`,
+    );
+    expect(result.stdout).toBe("dog: yes\nrock: no\n");
+  });
+
+  test("the result dispatches once it has been checked", async () => {
+    const result = await run(
+      "trycast-dispatch",
+      `${HIERARCHY}
+       export function main(): i32 {
+         const s = tryCast<Speaker>(new Dog());
+         if (s !== null) { console.log(s.speak()); }
+         return 0;
+       }\n`,
+    );
+    expect(result.stdout).toBe("woof\n");
+  });
+
+  test("each class in a hierarchy gets its own final overriders", async () => {
+    // The bug this exists to catch: if a derived class inherited its base's
+    // itab rather than getting its own, every one of these would print "base".
+    // Right shape, wrong bodies — and nothing about the program would look
+    // wrong while it happened.
+    const result = await run(
+      "trycast-overriders",
+      `interface Speaker { speak(): string; }
+       class Base implements Speaker { speak(): string { return "base"; } }
+       class Middle extends Base { override speak(): string { return "middle"; } }
+       class Leaf extends Middle { }
+
+       export function main(): i32 {
+         const b = tryCast<Speaker>(new Base());
+         const m = tryCast<Speaker>(new Middle());
+         const l = tryCast<Speaker>(new Leaf());
+         if (b !== null && m !== null && l !== null) {
+           console.log(\`\${b.speak()}/\${m.speak()}/\${l.speak()}\`);
+         }
+         return 0;
+       }\n`,
+    );
+    // `Leaf` overrides nothing, so it reaches `Middle`'s body and not `Base`'s.
+    expect(result.stdout).toBe("base/middle/middle\n");
+  });
+
+  test("`null ===` on the left is the same question", async () => {
+    const result = await run(
+      "trycast-null-left",
+      `${HIERARCHY}
+       export function main(): i32 {
+         const r = tryCast<Speaker>(new Rock());
+         if (null === r) { console.log("no"); } else { console.log("yes"); }
+         return 0;
+       }\n`,
+    );
+    expect(result.stdout).toBe("no\n");
+  });
+
+  test("using the result unchecked is tsc's business", async () => {
+    // The reason `| null` was chosen over a boolean type guard: a guard can be
+    // ignored, and this cannot. tsc refuses it before the compiler is involved.
+    await expectRejected(
+      "trycast-unchecked",
+      `${HIERARCHY}
+       export function main(): i32 {
+         console.log(tryCast<Speaker>(new Dog()).speak());
+         return 0;
+       }\n`,
+      "TS2531",
+    );
+  });
+
+  test("casting to a class is not implemented yet", async () => {
+    const diagnostic = await expectRejected(
+      "trycast-to-class",
+      `${HIERARCHY}
+       export function main(): i32 {
+         const d = tryCast<Dog>(new Rock());
+         return 0;
+       }\n`,
+      "GF0001",
+    );
+    expect(diagnostic.message).toContain("class");
+  });
+});

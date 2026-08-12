@@ -45,11 +45,15 @@ pub enum RuntimeFn {
     Print,
     /// `gf_eprint(s)` — one line to stderr.
     EPrint,
+    /// `gf_find_itab(descriptor, key) -> *const Itab` — the dynamic half of
+    /// `tryCast`. Null when the type does not satisfy the interface.
+    FindItab,
 }
 
 impl RuntimeFn {
     pub fn symbol(self) -> &'static str {
         match self {
+            RuntimeFn::FindItab => "gf_find_itab",
             RuntimeFn::StringClone => "gf_string_clone",
             RuntimeFn::StringFree => "gf_string_free",
             RuntimeFn::StringLen => "gf_string_len",
@@ -78,6 +82,9 @@ impl RuntimeFn {
             RuntimeFn::StringFromF64 => (vec![types::F64], Some(pointer)),
             RuntimeFn::StringFromBool => (vec![types::I8], Some(pointer)),
             RuntimeFn::Print | RuntimeFn::EPrint => (vec![pointer], None),
+            // The key is always 64 bits, so a 32-bit target agrees with the
+            // runtime about the interface name's hash rather than truncating it.
+            RuntimeFn::FindItab => (vec![pointer, types::I64], Some(pointer)),
         }
     }
 }

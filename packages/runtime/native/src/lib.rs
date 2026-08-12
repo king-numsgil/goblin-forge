@@ -367,3 +367,52 @@ pub unsafe extern "C" fn gf_eprint(s: GfStr) {
     let _ = err.write_all(b"\n");
     let _ = err.flush();
 }
+
+// -- dynamic casts ----------------------------------------------------------
+//
+// `tryCast<T>(value)` asks "is this really a `T`", and for a contract the
+// answer is an itab. The search happens here rather than inline because it is a
+// loop, and a loop is much clearer as ordinary Rust than as hand-built
+// Cranelift blocks.
+//
+// The type descriptor a class carries at `[vptr - 8]` is laid out by
+// `goblin-codegen::vtable`:
+//
+// ```text
+//   +0   name        *const u8, nul-terminated
+//   +8   base        *const Descriptor, or null
+//   +16  count       usize
+//   +24  entries     [ { key: u64, itab: *const Itab } ; count ]
+// ```
+//
+// The entry list is **flattened**, not inherited: a derived class carries its
+// own itab for every interface any of its bases satisfies, holding *its* final
+// overriders. Walking the base chain instead would find the base's itab and
+// call the base's methods, which is the wrong answer and a quiet one.
+//
+// `key` is a hash of the interface's *name*, not a module-local id. Ids are
+// numbered per compilation and two modules would disagree about them the moment
+// `static-lib` exists; a name hash is the same everywhere.
+
+/// Look up an interface's itab on a type descriptor. Null when absent.
+///
+/// # Safety
+///
+/// `descriptor` must be a descriptor this compiler emitted, or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gf_find_itab(descriptor: *const u8, key: u64) -> *const u8 {
+    if descriptor.is_null() {
+        return std::ptr::null();
+    }
+    let words = descriptor as *const usize;
+    unsafe {
+        let count = *words.add(2);
+        let entries = words.add(3);
+        for index in 0..count {
+            if *entries.add(index * 2) as u64 == key {
+                return *entries.add(index * 2 + 1) as *const u8;
+            }
+        }
+    }
+    std::ptr::null()
+}

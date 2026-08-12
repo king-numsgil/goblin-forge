@@ -248,6 +248,12 @@ function rvalue(module: Module, value: Rvalue): string {
         .join(", ")} }`;
     case "Len":
       return `len(${place(value.value)})`;
+    case "TryInterface":
+      return `tryCast<${sym(module, module.interfaces[value.interface]?.name ?? 0)}>(${place(
+        value.source,
+      )})`;
+    case "InterfaceIsNull":
+      return `isNull(${place(value.value)})`;
     case "MakeInterface":
       return `(${sym(module, module.interfaces[value.interface]?.name ?? 0)}) ${place(
         value.source,

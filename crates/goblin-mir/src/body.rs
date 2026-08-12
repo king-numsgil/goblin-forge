@@ -271,6 +271,27 @@ pub enum Rvalue {
         class: ClassId,
         source: Place,
     },
+    /// `tryCast<I>(place)`: the same pair, but looked up at **run time**.
+    ///
+    /// Unlike [`Rvalue::MakeInterface`] there is no class here, because the
+    /// point is that the static type does not answer the question. The object's
+    /// vtable pointer leads to its *dynamic* type descriptor, which carries a
+    /// table of the itabs that type satisfies, and the runtime searches it.
+    ///
+    /// The itab word is zero when the answer is no — which is exactly the null
+    /// the frontend's `Reference<I> | null` promises, so nullability never
+    /// becomes a separate representation.
+    TryInterface {
+        interface: InterfaceId,
+        source: Place,
+    },
+    /// `place === null` for a `Reference<I>`: whether its itab word is zero.
+    ///
+    /// A node of its own rather than a `BinOp::Eq`, because the pair is an
+    /// aggregate and the comparison is of one word inside it. Naming it also
+    /// keeps `Reference<I> | null` from needing a null *constant* to compare
+    /// against — there is no such value, only a zero itab.
+    InterfaceIsNull(Place),
 }
 
 /// What happens if a call unwinds out of this point.

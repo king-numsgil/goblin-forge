@@ -381,6 +381,36 @@ declare function alloc<T extends object, A extends readonly unknown[]>(
  */
 declare function move<T>(value: T): T;
 
+/**
+ * A checked downcast: `Reference<T>` if the value really is a `T`, `null` if not.
+ *
+ * ```ts
+ * const pet = tryCast<Pet>(animal);
+ * if (pet !== null) {
+ *   pet.feed();
+ * }
+ * ```
+ *
+ * The `| null` is doing real work. TypeScript's `strictNullChecks` **rejects**
+ * `tryCast<Pet>(animal).feed()`, so the check is not something you are trusted
+ * to remember — it is the only way to reach the value. A boolean type guard
+ * would have left ignoring the answer possible.
+ *
+ * There is no unchecked form and no throwing form. C++ has both (`dynamic_cast`
+ * to a pointer, and to a reference) and the second exists to make the first
+ * ergonomic in expressions; here the type system does that job instead.
+ *
+ * `T` may be a contract — an interface declaring methods — or a class. In both
+ * cases the question is the same, "is this really a `T`", and the compiler
+ * knows statically which mechanism answers it: an itable lookup on the object's
+ * type descriptor, or a walk of that descriptor's base chain.
+ *
+ * The argument is `object` rather than a type parameter because TypeScript has
+ * no partial type-argument inference: with two parameters, `tryCast<Pet>(x)`
+ * would be an error and every call site would have to spell the source type too.
+ */
+declare function tryCast<T>(value: object): Reference<T> | null;
+
 /** Allocate uninitialised storage for one `T`. Analogous to C++ `new T`. */
 declare function nativeNew<T>(): Pointer<T>;
 

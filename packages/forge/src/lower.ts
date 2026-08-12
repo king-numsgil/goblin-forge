@@ -96,6 +96,8 @@ const NATIVE_CAST = "nativeCast";
 const MOVE = "move";
 /** The intrinsic that builds a `FixedArray<T, N>`. */
 const FIXED_ARRAY = "fixedArray";
+/** `tryCast<T>(value)` — a checked downcast, `null` when the answer is no. */
+const TRY_CAST = "tryCast";
 
 /**
  * Runtime entry points the lowerer names directly.
@@ -599,7 +601,47 @@ class Lowerer {
       });
     }
 
+    // Declared `implements`, registered eagerly and **after** `defineClass`,
+    // which rewrites the list wholesale.
+    //
+    // A static conversion registers its own itab at the conversion site, so
+    // this is not what makes those work. It is what makes a *dynamic* cast
+    // work: `tryCast<Pet>(x)` searches the object's type descriptor, and a
+    // class whose only mention of `Pet` is in another module — or in no
+    // module, because nothing converted it statically — would have an empty
+    // table and answer "no" to a question whose answer is yes.
+    for (const info of this.#classes.values()) {
+      for (const clause of info.node.heritageClauses ?? []) {
+        if (clause.token !== ts.SyntaxKind.ImplementsKeyword) continue;
+        for (const expression of clause.types) {
+          const contract = this.#contractFrom(expression);
+          if (contract === undefined) continue;
+          this.tyOf(contract, expression);
+          this.implement(info.name, contract, expression);
+        }
+      }
+    }
+
     return bodies;
+  }
+
+  /** The contract named by an `implements` clause entry, if it is one. */
+  #contractFrom(
+    expression: ts.ExpressionWithTypeArguments,
+  ): Extract<MachineType, { kind: "interface" }> | undefined {
+    try {
+      const contract = contractOf(
+        this.#checker,
+        this.#checker.getTypeAtLocation(expression),
+      );
+      return contract?.kind === "interface" ? contract : undefined;
+    } catch (error) {
+      if (error instanceof ErasureError) {
+        this.error(expression, error.code, error.message);
+        return undefined;
+      }
+      throw error;
+    }
   }
 
   #classFnParams(
@@ -1098,7 +1140,16 @@ class Lowerer {
    * for each of the interface's methods, in the interface's own slot order. No
    * search happens at run time and none happens in the backend.
    */
+  readonly #implemented = new Set<string>();
+
   implement(className: string, contract: Extract<MachineType, { kind: "interface" }>, at: ts.Node): boolean {
+    // Idempotent, and it has to be: the propagation below re-enters this for
+    // every derived class, and a three-deep hierarchy would otherwise walk
+    // itself forever.
+    const key = `${className} ${contract.name}`;
+    if (this.#implemented.has(key)) return true;
+    this.#implemented.add(key);
+
     const classId = this.#classIds.get(className);
     const info = this.#classes.get(className);
     const interfaceId = this.#interfaces.get(contract.name);
@@ -1126,6 +1177,26 @@ class Lowerer {
     }
 
     this.#mir.implementInterface(classId, interfaceId, methods);
+
+    // Every class derived from this one satisfies the contract too, and needs
+    // **its own** itab holding **its own** final overriders. Inheriting the
+    // base's would make a dynamic cast on a `Derived` hand back `Base`'s
+    // methods — the right shape and the wrong bodies, which is the quiet kind
+    // of wrong. So the table is flattened here, the same way fields and vtable
+    // slots are flattened in `classes.ts`.
+    for (const [derivedName, derived] of this.#classes) {
+      if (derivedName === className) continue;
+      let base = derived.base;
+      let inherits = false;
+      while (base !== undefined) {
+        if (base.name === className) {
+          inherits = true;
+          break;
+        }
+        base = base.base;
+      }
+      if (inherits) this.implement(derivedName, contract, at);
+    }
     return true;
   }
 
@@ -1979,6 +2050,29 @@ class BodyLowerer {
       return typed(binding.type);
     }
 
+    // A ternary has whatever type its arms agree on. Either arm may be built
+    // only from literals and take its width from the other — or from context,
+    // when both are.
+    if (ts.isConditionalExpression(expression)) {
+      if (this.width(expression.condition).kind === "error") return ERROR;
+      const whenTrue = this.width(expression.whenTrue);
+      const whenFalse = this.width(expression.whenFalse);
+      if (whenTrue.kind === "error" || whenFalse.kind === "error") return ERROR;
+      if (whenTrue.kind === "poly") return whenFalse;
+      if (whenFalse.kind === "poly") return whenTrue;
+      if (!sameType(whenTrue.type, whenFalse.type)) {
+        this.#outer.error(
+          expression,
+          "GF0161",
+          `the two arms of this conditional are a \`${renderType(whenTrue.type)}\` and ` +
+            `a \`${renderType(whenFalse.type)}\`. Both arms have to produce the same ` +
+            "type, because the expression has one.",
+        );
+        return ERROR;
+      }
+      return whenTrue;
+    }
+
     if (ts.isPrefixUnaryExpression(expression)) {
       if (expression.operator === ts.SyntaxKind.ExclamationToken) {
         return typed({ kind: "bool" });
@@ -2131,6 +2225,14 @@ class BodyLowerer {
       return type === undefined ? ERROR : typed(type);
     }
 
+    // `tryCast<T>(x)` is a `Reference<T>`, nullable. The nullability is tsc's
+    // business and never reaches the machine type: the pair is the same
+    // sixteen bytes either way, with a zero itab meaning "no".
+    if (expression.expression.text === TRY_CAST) {
+      const type = this.#tryCastTarget(expression);
+      return type === undefined ? ERROR : typed(type);
+    }
+
     // `move(x)` has whatever type `x` has; it changes ownership, not type.
     if (expression.expression.text === MOVE) {
       const argument = expression.arguments[0];
@@ -2214,6 +2316,8 @@ class BodyLowerer {
   }
 
   #binaryWidth(expression: ts.BinaryExpression): Width {
+    if (this.#nullTestOf(expression) !== undefined) return typed({ kind: "bool" });
+
     const operator = OPERATOR_TOKENS[expression.operatorToken.kind];
     if (operator === undefined) {
       const kind = expression.operatorToken.kind;
@@ -2480,6 +2584,7 @@ class BodyLowerer {
 
     if (expression.kind === ts.SyntaxKind.ThisKeyword) return this.#thisTyped(expression);
     if (ts.isNewExpression(expression)) return this.#new(expression);
+    if (ts.isConditionalExpression(expression)) return this.#conditional(expression, natural);
     if (ts.isPrefixUnaryExpression(expression)) return this.#unary(expression, natural);
     if (ts.isBinaryExpression(expression)) return this.#binary(expression, natural);
     if (ts.isCallExpression(expression)) return this.#call(expression, natural);
@@ -3106,6 +3211,9 @@ class BodyLowerer {
   }
 
   #binary(expression: ts.BinaryExpression, natural: MachineType): Typed | undefined {
+    const nullTest = this.#nullTestOf(expression);
+    if (nullTest !== undefined) return this.#nullTest(expression, nullTest);
+
     const kind = expression.operatorToken.kind;
     if (kind === ts.SyntaxKind.AmpersandAmpersandToken || kind === ts.SyntaxKind.BarBarToken) {
       return this.#shortCircuit(expression, kind === ts.SyntaxKind.AmpersandAmpersandToken);
@@ -3194,6 +3302,64 @@ class BodyLowerer {
   }
 
   /**
+   * `c ? a : b`.
+   *
+   * Control flow, exactly like `&&` and `||`: only one arm runs, so only one
+   * arm's code may execute, and that is a branch rather than an operator. The
+   * MIR has no ternary node for the same reason it has no `BinOp::And`.
+   *
+   * Each arm releases **its own** temporaries before the join. C++ keeps a
+   * temporary alive to the end of the enclosing full-expression, and the
+   * difference is unobservable here: the arm's value has already been copied
+   * into the result by then, and a temporary that was *moved* into the result
+   * has had its handle nulled, so releasing it is a no-op. Doing it per-arm
+   * avoids a temporary that is live on one path and not the other, which is
+   * otherwise a drop flag for no benefit.
+   */
+  #conditional(
+    expression: ts.ConditionalExpression,
+    natural: MachineType,
+  ): Typed | undefined {
+    const result = this.#f.addLocal({
+      ty: this.#outer.tyOf(natural, expression),
+      storage: "Temporary",
+      span: this.#outer.span(expression),
+    });
+
+    const mark = this.#temporaries.length;
+    const cond = this.#condition(expression.condition);
+    if (cond === undefined) return undefined;
+
+    const thenBlock = this.#f.block();
+    const elseBlock = this.#f.block();
+    const joinBlock = this.#f.block();
+
+    this.#push({ kind: "StorageLive", value: result });
+    this.#branchEndingTemporaries(cond, mark, thenBlock, elseBlock);
+
+    for (const [block, arm] of [
+      [thenBlock, expression.whenTrue],
+      [elseBlock, expression.whenFalse],
+    ] as const) {
+      this.#current = block;
+      const armMark = this.#temporaries.length;
+      const value = this.#expressionTyped(arm, natural);
+      if (value === undefined) return undefined;
+      this.#push({
+        kind: "Init",
+        place: placeOf(result),
+        rvalue: { kind: "Use", value: this.#forStorage(value) },
+      });
+      this.#endTemporaries(armMark);
+      this.#seal({ kind: "Goto", value: joinBlock });
+    }
+
+    this.#current = joinBlock;
+    this.#temporaries.push(result);
+    return { operand: { kind: "Copy", value: placeOf(result) }, type: natural, temporary: result };
+  }
+
+  /**
    * `&&` and `||` are control flow, not operators.
    *
    * They short-circuit, so the right-hand side runs only on one path. That is a
@@ -3255,6 +3421,7 @@ class BodyLowerer {
     if (name === NATIVE_CAST) return this.#nativeCast(expression, natural);
     if (name === MOVE) return this.#move(expression);
     if (name === FIXED_ARRAY) return this.#fixedArray(expression, natural);
+    if (name === TRY_CAST) return this.#tryCast(expression);
 
     const target = this.#outer.functions.get(name);
     if (target === undefined) return undefined;
@@ -3391,6 +3558,169 @@ class BodyLowerer {
   }
 
   /**
+   * `pet === null` or `pet !== null`, where `pet` is a contract reference.
+   *
+   * Returns the non-null side and whether the test is for equality, or
+   * `undefined` when this is an ordinary comparison. Recognised on both sides,
+   * because `null !== pet` is the same question.
+   */
+  #nullTestOf(
+    expression: ts.BinaryExpression,
+  ): { subject: ts.Expression; equals: boolean } | undefined {
+    const kind = expression.operatorToken.kind;
+    const equals =
+      kind === ts.SyntaxKind.EqualsEqualsToken ||
+      kind === ts.SyntaxKind.EqualsEqualsEqualsToken;
+    const differs =
+      kind === ts.SyntaxKind.ExclamationEqualsToken ||
+      kind === ts.SyntaxKind.ExclamationEqualsEqualsToken;
+    if (!equals && !differs) return undefined;
+
+    const isNull = (node: ts.Expression): boolean =>
+      node.kind === ts.SyntaxKind.NullKeyword;
+    const subject = isNull(expression.right)
+      ? expression.left
+      : isNull(expression.left)
+        ? expression.right
+        : undefined;
+    if (subject === undefined) return undefined;
+    if (this.#contractAt(subject) === undefined) return undefined;
+    return { subject, equals };
+  }
+
+  /**
+   * Lower it: read the pair's itab word and compare it against zero.
+   *
+   * There is no null *constant* to compare against, and there does not need to
+   * be — `Reference<I> | null` is the same sixteen bytes as `Reference<I>`,
+   * with a zero itab meaning "no". So nullability never became a second
+   * representation, and it never reaches the backend as one.
+   */
+  #nullTest(
+    expression: ts.BinaryExpression,
+    test: { subject: ts.Expression; equals: boolean },
+  ): Typed | undefined {
+    const value = this.#value(test.subject, undefined);
+    if (value === undefined) return undefined;
+    const place = this.#placeOfSubject(test.subject, value);
+    if (place === undefined) return undefined;
+
+    const bool: MachineType = { kind: "bool" };
+    const isNull = this.#temporaryTyped(expression, bool, {
+      kind: "InterfaceIsNull",
+      value: place,
+    });
+    if (test.equals || isNull === undefined) return isNull;
+    return this.#temporaryTyped(expression, bool, {
+      kind: "Unary",
+      op: "Not",
+      operand: isNull.operand,
+    });
+  }
+
+  /** The contract `tryCast<T>(…)` was asked for, or `undefined`. */
+  #tryCastTarget(
+    expression: ts.CallExpression,
+  ): Extract<MachineType, { kind: "interface" }> | undefined {
+    const argument = expression.typeArguments?.[0];
+    if (expression.typeArguments?.length !== 1 || argument === undefined) {
+      this.#outer.error(
+        expression,
+        "GF0002",
+        "`tryCast` needs exactly one type argument: `tryCast<Pet>(value)`.",
+      );
+      return undefined;
+    }
+    // `tryCast<Pet>(…)`, not `tryCast<Reference<Pet>>(…)` — the type argument
+    // names the thing being asked about, and `Reference` is what comes back.
+    // So a bare contract is resolved here rather than through `erase`, which
+    // (rightly) refuses one used as a type.
+    const type = this.#outer.checker.getTypeFromTypeNode(argument);
+    let target: MachineType | undefined;
+    try {
+      target = contractOf(this.#outer.checker, type) ?? undefined;
+    } catch (error) {
+      if (error instanceof ErasureError) {
+        this.#outer.error(argument, error.code, error.message);
+        return undefined;
+      }
+      throw error;
+    }
+    target ??= this.#outer.erase(argument, type);
+    if (target === undefined) return undefined;
+    if (target.kind !== "interface") {
+      // A class downcast is the same question and a different mechanism — walk
+      // the descriptor's base chain rather than search its itab table. It needs
+      // `Reference<C>` to be a writable type first, which it is not yet.
+      this.#outer.unsupported(
+        argument,
+        `\`tryCast\` to \`${renderType(target)}\`. Casting to a class` +
+          " (rather than to an interface with methods)",
+      );
+      return undefined;
+    }
+    return target;
+  }
+
+  /**
+   * `tryCast<Pet>(animal)` — the dynamic half of interface dispatch.
+   *
+   * Unlike a static conversion there is no class here, because the static type
+   * is precisely what failed to answer the question. The object's vtable
+   * pointer leads to its *dynamic* type descriptor, and the runtime searches
+   * that descriptor's itab table.
+   *
+   * The result is an ordinary local, which is what makes this cheaper than a
+   * type guard would have been: no rebinding, no narrowed scope, nothing
+   * flow-sensitive. tsc's `strictNullChecks` does the rest, and it does it
+   * better than a guard — `tryCast<Pet>(x).feed()` is rejected outright rather
+   * than merely discouraged.
+   */
+  #tryCast(expression: ts.CallExpression): Typed | undefined {
+    const contract = this.#tryCastTarget(expression);
+    if (contract === undefined) return undefined;
+
+    const argument = expression.arguments[0];
+    if (expression.arguments.length !== 1 || argument === undefined) {
+      this.#outer.error(expression, "GF0002", "`tryCast` takes exactly one value.");
+      return undefined;
+    }
+
+    const value = this.#value(argument, undefined);
+    if (value === undefined) return undefined;
+    const asClass = this.#asClass(value);
+    if (asClass === undefined) {
+      this.#outer.unsupported(
+        argument,
+        "`tryCast` of anything but a class value or a reference to one",
+      );
+      return undefined;
+    }
+
+    const interfaceId = this.#outer.interfaceId(contract.name);
+    if (interfaceId === undefined) {
+      // Interning the type declares the interface, so asking for the type
+      // first is what makes the id exist.
+      this.#outer.tyOf(contract, expression);
+    }
+    const resolved = this.#outer.interfaceId(contract.name);
+    if (resolved === undefined) return undefined;
+
+    const local = this.#f.addLocal({
+      ty: this.#outer.tyOf(contract, expression),
+      storage: "Temporary",
+      span: this.#outer.span(expression),
+    });
+    this.#push({ kind: "StorageLive", value: local });
+    this.#push({
+      kind: "Init",
+      place: placeOf(local),
+      rvalue: { kind: "TryInterface", interface: resolved, source: asClass.place },
+    });
+    return { operand: { kind: "Copy", value: placeOf(local) }, type: contract };
+  }
+
+  /**
    * The contract an expression already holds, or `undefined`.
    *
    * Reports nothing, for the same reason `classNameAt` reports nothing: this
@@ -3403,7 +3733,13 @@ class BodyLowerer {
     const width = this.#widths.get(expression);
     if (width?.kind === "typed" && width.type.kind === "interface") return width.type;
 
-    const type = this.#outer.checker.getTypeAtLocation(expression);
+    // Stripped of `| null` first. Before the check that consumes it, a
+    // `tryCast` result is a union, and a union's property list is only what its
+    // members have in common — which for `Reference<Pet> | null` is nothing, so
+    // the brand would be invisible.
+    const type = this.#outer.checker.getNonNullableType(
+      this.#outer.checker.getTypeAtLocation(expression),
+    );
     const referent = referentOf(this.#outer.checker, type);
     if (referent === null) return undefined;
     try {

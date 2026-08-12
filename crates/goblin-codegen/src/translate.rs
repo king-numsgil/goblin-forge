@@ -529,6 +529,9 @@ impl<'a, 'm, M: ClifModule> FunctionTranslator<'a, 'm, M> {
                 {
                     return self.make_interface(place, *interface, *class, source);
                 }
+                if let Rvalue::TryInterface { interface, source } = rvalue {
+                    return self.try_interface(place, *interface, source);
+                }
                 // `default_init`, one of REWRITE-PLAN §4.3's four operations.
                 // For an aggregate it zeroes the bytes, which is what §10 asks
                 // for in so many words: constructing into a stack slot runs a
@@ -766,6 +769,64 @@ impl<'a, 'm, M: ClifModule> FunctionTranslator<'a, 'm, M> {
             self.builder.ins().iadd_imm_s(dest, i64::from(dest_offset))
         };
         let flags = MemFlagsData::trusted();
+        self.builder.ins().store(flags, itab, dest, 0);
+        self.builder
+            .ins()
+            .store(flags, object, dest, self.target.pointer_bytes as i32);
+        Ok(())
+    }
+
+    /// `tryCast<I>(place)`: the same pair, resolved at run time.
+    ///
+    /// Three loads and a call. The object's vtable pointer leads to its
+    /// **dynamic** type descriptor — the whole point, since the static type is
+    /// what failed to answer the question — and the runtime searches that
+    /// descriptor's itab table.
+    ///
+    /// The object address is stored either way. Null-ness lives in the itab
+    /// word alone, which is what lets `Reference<I> | null` be the same sixteen
+    /// bytes as `Reference<I>` and keeps a failed cast branchless.
+    fn try_interface(
+        &mut self,
+        place: &Place,
+        interface: InterfaceId,
+        source: &Place,
+    ) -> Result<()> {
+        let name = self
+            .module
+            .interface(interface)
+            .and_then(|def| self.module.sym(def.name))
+            .ok_or_else(|| InternalError::new(format!("interface {} is missing", interface.0)))?;
+        let key = crate::vtable::interface_key(name);
+
+        let (address, offset) = self.place_address(source)?;
+        let object = if offset == 0 {
+            address
+        } else {
+            self.builder.ins().iadd_imm_s(address, i64::from(offset))
+        };
+
+        let pointer = self.target.pointer_type();
+        let flags = MemFlagsData::trusted();
+        let vtable = self.builder.ins().load(pointer, flags, object, 0);
+        // The descriptor sits one pointer *before* the first method slot — see
+        // the module docs on `crate::vtable` for why the bias is that way round.
+        let descriptor =
+            self.builder
+                .ins()
+                .load(pointer, flags, vtable, -(self.target.pointer_bytes as i32));
+
+        let key = self.builder.ins().iconst(types::I64, key as i64);
+        let itab = self
+            .call_runtime(RuntimeFn::FindItab, &[descriptor, key])?
+            .ok_or_else(|| InternalError::new("`gf_find_itab` returned nothing"))?;
+
+        let (dest, dest_offset) = self.place_address(place)?;
+        let dest = if dest_offset == 0 {
+            dest
+        } else {
+            self.builder.ins().iadd_imm_s(dest, i64::from(dest_offset))
+        };
         self.builder.ins().store(flags, itab, dest, 0);
         self.builder
             .ins()
@@ -1364,7 +1425,7 @@ impl<'a, 'm, M: ClifModule> FunctionTranslator<'a, 'm, M> {
             Rvalue::Default => internal_error!("`default` outside an `Init`"),
             // Built into a destination, like an aggregate literal, because the
             // pair is two words that have nowhere to live as a single value.
-            Rvalue::MakeInterface { .. } => {
+            Rvalue::MakeInterface { .. } | Rvalue::TryInterface { .. } => {
                 internal_error!("a `Reference<I>` conversion outside an `Init`")
             }
             Rvalue::Binary { op, lhs, rhs } => Some(self.binary(*op, lhs, rhs)?),
@@ -1387,6 +1448,20 @@ impl<'a, 'm, M: ClifModule> FunctionTranslator<'a, 'm, M> {
             // one anywhere else means building it and then copying it.
             Rvalue::Aggregate { .. } => {
                 internal_error!("an aggregate literal outside an `Init`")
+            }
+            // One load and a compare. The pair's itab word is zero exactly when
+            // the cast that produced it failed.
+            Rvalue::InterfaceIsNull(place) => {
+                let (address, offset) = self.place_address(place)?;
+                let pointer = self.target.pointer_type();
+                let itab = self.builder.ins().load(
+                    pointer,
+                    MemFlagsData::trusted(),
+                    address,
+                    offset as i32,
+                );
+                let zero = self.builder.ins().iconst(pointer, 0);
+                Some(self.builder.ins().icmp(IntCC::Equal, itab, zero))
             }
             Rvalue::Len(place) => {
                 let ty = self.place_type(place)?;
@@ -2085,7 +2160,9 @@ fn rvalue_operands(rvalue: &Rvalue) -> Vec<&Operand> {
         | Rvalue::Len(_)
         // `source` is a place, not an operand: building a `Reference<I>` takes
         // the object's *address* and never reads it.
-        | Rvalue::MakeInterface { .. } => Vec::new(),
+        | Rvalue::MakeInterface { .. }
+        | Rvalue::TryInterface { .. }
+        | Rvalue::InterfaceIsNull(_) => Vec::new(),
     }
 }
 
