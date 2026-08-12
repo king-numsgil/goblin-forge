@@ -1,16 +1,18 @@
 # Implementation notes
 
-State of the build after milestone 8 — classes *and* interface dispatch —
-written so that milestones 9–10 can be picked up cold.
+State of the build with **all ten milestones complete**, written so the next
+person — or the next session — can pick it up cold.
 
 - [`REWRITE-PLAN.md`](REWRITE-PLAN.md) is the design. It does not change.
 - [`DECISIONS.md`](DECISIONS.md) is what was decided and why, including the §11
   answers. Read it before re-litigating anything.
 - This file is *where the code is* and *what it does not do yet*.
 
-Everything below is as of milestone 8 complete, both halves: 217 TS tests, 6
-Rust test binaries, `tsc --noEmit` clean, `cargo fmt --all --check` clean,
-`cargo clippy --workspace --all-targets -D warnings` clean.
+248 TS tests, 6 Rust test binaries, `tsc --noEmit` clean, `cargo fmt --all
+--check` clean, `cargo clippy --workspace --all-targets -D warnings` clean.
+
+REWRITE-PLAN §12's build order is finished. What is left is not a milestone: it
+is the list under "What it does not have yet", plus running System V for real.
 
 ---
 
@@ -104,9 +106,9 @@ backend failure:
 | calling through a `FnPtr` value | `translate.rs`, `Callee::Indirect` | later |
 | `switch` | lowerer `#statement` | — |
 | `main(argc, argv)` | `#checkEntryPoint` | needs `T[]` |
-| `static-lib` / `shared-lib` | `link.rs:50` | 9 |
-| multi-module | — | 10 |
-| `throw` / unwinding | `Terminator::Resume` errors | after 9 |
+| two classes with the same name in two modules | `classes.ts`, `collectClasses` — a stated restriction, see DECISIONS §11.8 | later |
+| incremental builds | `CompileOptions.incremental` is reserved and unread | later |
+| `throw` / unwinding | `Terminator::Resume` errors | later |
 
 `Rvalue::Ref` and `Rvalue::AddrOf` **are** implemented now — the lowerer emits a
 `Ref` for every `this` and every method receiver.
@@ -206,6 +208,8 @@ is not.
 | `tests/struct-abi.test.ts` | the C ABI vs a **real `extern "C"` library**, 24 cases |
 | `tests/classes.test.ts` | vtables, dispatch, slicing, destructor chains, and what is refused |
 | `tests/interfaces.test.ts` | contracts, itabs, structural conversion, slot ordering |
+| `tests/libraries.test.ts` | a **real C program** links a Goblin archive and calls it |
+| `tests/modules.test.ts` | many files, one compilation; private names that collide |
 | `tests/oracle.test.ts` | allocation traces vs **real C++**, 9 paired cases |
 | `packages/backend/test/roundtrip.test.ts` | the wire format, byte-for-byte |
 

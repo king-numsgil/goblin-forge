@@ -16,7 +16,8 @@ records the answers to the questions that plan left open, as they land.
 
 ## Status
 
-Milestone 8 of ten. What works today:
+All ten milestones of [`REWRITE-PLAN.md`](REWRITE-PLAN.md) are complete. What
+works today:
 
 ```ts
 // examples/hello/src/main.ts
@@ -386,3 +387,38 @@ produces.
 
 TypeScript is in the second list but does more than the others: `tsc` **is** the
 type checker, not a dependency the compiler happens to use.
+
+## Libraries and modules
+
+A program is many files and one compilation. tsc resolves the imports and
+type-checks them together, so there is no module-interface format to keep in
+step — the question REWRITE-PLAN §11.8 left open, answered by deleting it.
+
+```ts
+// math.ts
+export function add(a: i32, b: i32): i32 { return a + b; }
+
+// main.ts
+import { add } from "./math.ts";
+```
+
+Names are scoped to their modules: two files may each declare a private
+`helper`, and both are right. Exported symbols keep their bare name — that is
+the C ABI contract — while internal ones are qualified by a hash of the module's
+path *relative to the project root*, so the same sources produce the same
+symbols on two machines.
+
+A library boundary is the C ABI plus a generated header:
+
+```console
+$ bun test tests/libraries.test.ts
+ 7 pass  0 fail
+```
+
+That suite builds a **real C program**, includes the emitted header, links it
+against the Goblin archive and runs it. It found a crash on its first run: a
+small struct arriving packed in registers had nowhere to be reassembled to,
+because every aggregate parameter was assumed to be an address the caller owned.
+Unreachable until C could call *into* Goblin — the caller's half of the same
+classification is a different function, and `struct-abi.test.ts` only exercises
+that one.
