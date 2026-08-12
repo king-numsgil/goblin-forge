@@ -204,6 +204,16 @@ export const CODES = {
       "this means the build API and the backend disagree about the set, which " +
       "is a compiler bug.",
   },
+  GF9006: {
+    title: "an exported signature has no C spelling",
+    explanation:
+      "A library target emits a C header for everything it exports, and one of " +
+      "those signatures mentions a type C cannot name — something that owns a " +
+      "buffer, or carries a vtable.\n\n" +
+      "The ABI classifier refuses those at the boundary, so reaching this means " +
+      "the classifier and the header generator disagree about what may cross. " +
+      "That is a compiler bug rather than a problem with the program.",
+  },
   GF9005: {
     title: "linking failed",
     explanation:

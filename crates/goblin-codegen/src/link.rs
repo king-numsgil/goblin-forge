@@ -31,6 +31,14 @@ pub struct LinkRequest<'a> {
     /// System libraries, in the spelling the platform linker expects.
     pub system_libs: &'a [String],
     pub output: &'a Path,
+    /// Symbols a `shared-lib` publishes.
+    ///
+    /// Needed only on Windows, and needed absolutely: an ELF shared object
+    /// exports every symbol with default visibility, but a DLL exports
+    /// **nothing** unless it is told to. Without this a `.dll` links, loads,
+    /// and has no entry points — a failure that looks like a mystery at the
+    /// call site rather than an error at the link.
+    pub exports: &'a [String],
 }
 
 #[derive(Debug, Clone)]
@@ -46,8 +54,12 @@ pub fn link(request: &LinkRequest<'_>) -> Result<LinkReport> {
             .with_context(|| format!("creating {}", parent.display()))?;
     }
 
-    if request.kind != OutputKind::Bin {
-        bail!("library targets arrive with milestone 9");
+    // An archive is not a link. Nothing is resolved, nothing is discarded, and
+    // no runtime is pulled in — which is the point: two Goblin static libraries
+    // in one program must not each carry a copy of `gf_string_free`. The final
+    // executable link is what supplies the runtime, once.
+    if request.kind == OutputKind::StaticLib {
+        return archive(request);
     }
 
     let mut command = if cfg!(target_env = "msvc") {
@@ -64,6 +76,69 @@ pub fn link(request: &LinkRequest<'_>) -> Result<LinkReport> {
     if !output.status.success() {
         bail!(
             "linking failed:\n  {rendered}\n\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    Ok(LinkReport {
+        output: request.output.to_path_buf(),
+        command: rendered,
+    })
+}
+
+/// Bundle objects into a static library.
+///
+/// `lib.exe` on MSVC, `ar` everywhere else. Archives from `request.archives`
+/// are **not** merged in: an archive is a bag of objects, and a Goblin static
+/// library carries only its own. Its consumer links the runtime, and anything
+/// else it needs, exactly once at the executable.
+fn archive(request: &LinkRequest<'_>) -> Result<LinkReport> {
+    // `ar` and `lib.exe` both *append* to an existing archive, so a rebuild
+    // after deleting a function would keep the stale object. Removing first
+    // makes the output a function of the input.
+    if request.output.exists() {
+        std::fs::remove_file(request.output)
+            .with_context(|| format!("replacing {}", request.output.display()))?;
+    }
+
+    let mut command = if cfg!(target_env = "msvc") {
+        let target =
+            std::env::var("TARGET").unwrap_or_else(|_| "x86_64-pc-windows-msvc".to_owned());
+        let tool = cc::windows_registry::find_tool(&target, "lib.exe").ok_or_else(|| {
+            anyhow::anyhow!(
+                "could not find lib.exe for {target}. Install the Visual Studio Build Tools \
+                 with the \"Desktop development with C++\" workload."
+            )
+        })?;
+        let mut command = Command::new(tool.path());
+        for (key, value) in tool.env() {
+            command.env(key, value);
+        }
+        command.arg("/NOLOGO");
+        command.arg(format!("/OUT:{}", request.output.display()));
+        command
+    } else {
+        let ar = std::env::var("AR").unwrap_or_else(|_| "ar".to_owned());
+        let mut command = Command::new(ar);
+        // `c` create, `r` replace, `s` write an index — without the index some
+        // linkers will not look inside the archive at all.
+        command.arg("crs");
+        command.arg(request.output);
+        command
+    };
+
+    for object in request.objects {
+        command.arg(object);
+    }
+
+    let rendered = render(&command);
+    let output = command
+        .output()
+        .with_context(|| format!("running the archiver:\n  {rendered}"))?;
+    if !output.status.success() {
+        bail!(
+            "archiving failed:\n  {rendered}\n\n{}\n{}",
             String::from_utf8_lossy(&output.stdout).trim(),
             String::from_utf8_lossy(&output.stderr).trim()
         );
@@ -94,7 +169,23 @@ fn msvc_command(request: &LinkRequest<'_>) -> Result<Command> {
     }
 
     command.arg("/NOLOGO");
-    command.arg("/SUBSYSTEM:CONSOLE");
+    if request.kind == OutputKind::SharedLib {
+        command.arg("/DLL");
+        // The import library, beside the DLL. Windows has no equivalent of
+        // linking straight against a `.so`: a consumer links this stub, which
+        // is what turns a call into a jump through the import address table.
+        command.arg(format!(
+            "/IMPLIB:{}",
+            request.output.with_extension("lib").display()
+        ));
+        // A DLL exports **nothing** by default. Every symbol has to be named,
+        // either by `__declspec(dllexport)` at the definition — which this
+        // compiler does not emit — or here.
+        let def = write_def_file(request)?;
+        command.arg(format!("/DEF:{}", def.display()));
+    } else {
+        command.arg("/SUBSYSTEM:CONSOLE");
+    }
     command.arg(format!("/OUT:{}", request.output.display()));
     for object in request.objects {
         command.arg(object);
@@ -116,6 +207,23 @@ fn msvc_command(request: &LinkRequest<'_>) -> Result<Command> {
     Ok(command)
 }
 
+/// Write the `.def` file naming a DLL's exports, beside the output.
+///
+/// Kept on disk rather than piped, because a link failure is meant to be
+/// reproducible by hand from the command in the report — and the command names
+/// this file.
+fn write_def_file(request: &LinkRequest<'_>) -> Result<PathBuf> {
+    let path = request.output.with_extension("def");
+    let mut text = String::from("EXPORTS\n");
+    for symbol in request.exports {
+        text.push_str("    ");
+        text.push_str(symbol);
+        text.push('\n');
+    }
+    std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
+    Ok(path)
+}
+
 fn mentions_crt(system_libs: &[String]) -> bool {
     system_libs.iter().any(|lib| {
         let lib = lib.to_ascii_lowercase();
@@ -128,6 +236,18 @@ fn mentions_crt(system_libs: &[String]) -> bool {
 fn unix_command(request: &LinkRequest<'_>) -> Command {
     let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_owned());
     let mut command = Command::new(cc);
+    if request.kind == OutputKind::SharedLib {
+        command.arg("-shared");
+        // Position-independent code is already on by default in `make_isa`,
+        // but the *link* needs telling too, and a shared object that was not
+        // linked -fPIC fails at load with a relocation error rather than here.
+        command.arg("-fPIC");
+        // No export list: an ELF shared object publishes every symbol with
+        // default visibility, and Cranelift gives `Linkage::Export` exactly
+        // that. Windows is the platform that needs to be told (see the `.def`
+        // file in `msvc_command`), and the asymmetry is the platforms', not
+        // this compiler's.
+    }
     for object in request.objects {
         command.arg(object);
     }
@@ -184,6 +304,38 @@ mod tests {
         assert!(!mentions_crt(&[]));
     }
 
+    /// A shared object needs `-shared` at the *link*, not only PIC codegen.
+    #[test]
+    fn unix_shared_libs_are_linked_shared() {
+        let objects = vec![PathBuf::from("lib.o")];
+        let request = LinkRequest {
+            kind: OutputKind::SharedLib,
+            objects: &objects,
+            archives: &[],
+            system_libs: &[],
+            output: Path::new("libdemo.so"),
+            exports: &["greet".to_owned()],
+        };
+        let rendered = render(&unix_command(&request));
+        assert!(rendered.contains("-shared"), "{rendered}");
+        assert!(rendered.contains("-fPIC"), "{rendered}");
+        // No export list on ELF: default visibility already publishes them, and
+        // naming them here would be a second, divergent source of truth.
+        assert!(!rendered.contains("greet"), "{rendered}");
+    }
+
+    /// The extension table is what decides whether an import library sits
+    /// beside a DLL, so a wrong answer here is a missing file much later.
+    #[test]
+    fn extensions_match_the_platform() {
+        assert_eq!(extension_for(OutputKind::StaticLib, true), "lib");
+        assert_eq!(extension_for(OutputKind::StaticLib, false), "a");
+        assert_eq!(extension_for(OutputKind::SharedLib, true), "dll");
+        assert_eq!(extension_for(OutputKind::SharedLib, false), "so");
+        assert_eq!(extension_for(OutputKind::Bin, true), "exe");
+        assert_eq!(extension_for(OutputKind::Bin, false), "");
+    }
+
     #[test]
     fn unix_links_pass_system_libs_as_l_flags() {
         let objects = vec![PathBuf::from("main.o")];
@@ -193,6 +345,7 @@ mod tests {
             archives: &[],
             system_libs: &["m".to_owned(), "-pthread".to_owned()],
             output: Path::new("hello"),
+            exports: &[],
         };
         let rendered = render(&unix_command(&request));
         assert!(rendered.contains("-lm"), "{rendered}");

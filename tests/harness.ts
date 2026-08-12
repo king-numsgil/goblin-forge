@@ -58,6 +58,8 @@ export interface ProjectOptions {
   readonly emitIr?: boolean;
   /** Static libraries to link, for the struct-ABI suite. */
   readonly nativeLibs?: readonly string[];
+  /** What to build. Defaults to `bin`, which is what most tests want. */
+  readonly type?: "bin" | "static-lib" | "shared-lib";
 }
 
 export interface Project {
@@ -120,7 +122,7 @@ export async function compileSource(
     output: project.output,
     root: project.dir,
     outDir: join(project.dir, "build"),
-    type: "bin",
+    type: options.type ?? "bin",
     optLevel: options.optLevel ?? "none",
     debugInfo: options.debugInfo ?? false,
     checked: options.checked ?? false,

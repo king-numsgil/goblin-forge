@@ -265,6 +265,9 @@ impl<'a, 'm, M: ClifModule> FunctionTranslator<'a, 'm, M> {
     /// SSA for us.
     fn allocate_locals(&mut self, func: &Function) -> Result<()> {
         let addressed = addressed_locals(func);
+        // `None` for `Abi::Internal`, where an aggregate always travels by
+        // address and the question below never arises.
+        let shape = self.shape_of(func.sig)?;
         let param_count = self.module.sig(func.sig).map_or(0, |sig| sig.params.len());
         let pointer_ty = self.target.pointer_type();
 
@@ -272,11 +275,23 @@ impl<'a, 'm, M: ClifModule> FunctionTranslator<'a, 'm, M> {
             let local = LocalId(index as u32);
             self.local_types.push(decl.ty);
             let repr = self.layouts.repr(decl.ty)?;
-            // A parameter of aggregate type arrives as an address the caller
-            // owns, so the local *is* that address rather than storage of its
-            // own. Copying it into a fresh slot would be a second copy of an
-            // argument the caller already copied.
-            if matches!(repr, Repr::Aggregate) && (1..=param_count).contains(&index) {
+            // A parameter of aggregate type *usually* arrives as an address the
+            // caller owns, so the local is that address rather than storage of
+            // its own — copying it into a fresh slot would be a second copy of
+            // an argument the caller already copied.
+            //
+            // Not always, though. At the C boundary a small struct arrives
+            // **packed into registers**, and then there is no caller copy to
+            // point at: the callee has to reassemble it into storage of its
+            // own. Handing that case an `Indirect` gives `bind_parameters` a
+            // variable that was never defined to scatter through, which is an
+            // access violation at the first call — and one that only shows up
+            // when C calls *into* Goblin, because the caller's half of the same
+            // classification is a different function.
+            if matches!(repr, Repr::Aggregate)
+                && (1..=param_count).contains(&index)
+                && !arrives_in_registers(shape.as_ref(), index)
+            {
                 self.locals
                     .push(LocalSlot::Indirect(self.builder.declare_var(pointer_ty)));
                 continue;
@@ -2170,6 +2185,14 @@ fn rvalue_places(rvalue: &Rvalue) -> Vec<&Place> {
         // even though there is no projection to notice.
         _ => Vec::new(),
     }
+}
+
+/// Whether parameter `index` (1-based, as locals are numbered) arrives packed
+/// into registers rather than as an address.
+fn arrives_in_registers(shape: Option<&abi::Shape>, index: usize) -> bool {
+    shape
+        .and_then(|shape| shape.params.get(index - 1))
+        .is_some_and(|slot| matches!(slot, AbiSlot::Registers { .. }))
 }
 
 fn addressed_locals(func: &Function) -> std::collections::HashSet<LocalId> {

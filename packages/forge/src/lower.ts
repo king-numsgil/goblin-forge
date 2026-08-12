@@ -333,8 +333,9 @@ export function lower(
   program: ts.Program,
   checker: ts.TypeChecker,
   moduleName: string,
+  options: { readonly requireMain?: boolean } = {},
 ): LowerResult {
-  return new Lowerer(program, checker, moduleName).run();
+  return new Lowerer(program, checker, moduleName, options.requireMain ?? true).run();
 }
 
 interface FnSignature {
@@ -401,10 +402,18 @@ class Lowerer {
   readonly #diagnostics: Diagnostic[] = [];
   readonly #functions = new Map<string, FnRecord>();
 
-  constructor(program: ts.Program, checker: ts.TypeChecker, moduleName: string) {
+  readonly #requireMain: boolean;
+
+  constructor(
+    program: ts.Program,
+    checker: ts.TypeChecker,
+    moduleName: string,
+    requireMain: boolean,
+  ) {
     this.#program = program;
     this.#checker = checker;
     this.#mir = new ModuleBuilder(moduleName);
+    this.#requireMain = requireMain;
   }
 
   run(): LowerResult {
@@ -433,6 +442,24 @@ class Lowerer {
     for (const body of classBodies) this.#lowerClassBody(body);
     for (const { node, builder } of declared) {
       this.#lowerBody(node, builder);
+    }
+
+    // A `bin` needs `main`: the platform C runtime calls it by that symbol, and
+    // without it the failure is an unresolved-external from the linker with no
+    // file and no line — the shape of error REWRITE-PLAN §8 exists to prevent.
+    // A library needs no entry point at all, which is most of what makes it a
+    // library.
+    if (this.#requireMain && !this.#functions.has("main")) {
+      const first = sources[0];
+      if (first !== undefined) {
+        this.error(
+          first,
+          "GF0004",
+          "this is a `bin` target and it exports no `main`. Add " +
+            "`export function main(): i32`, or build it as a library with " +
+            "`type: \"static-lib\"` or `type: \"shared-lib\"`.",
+        );
+      }
     }
 
     if (this.#diagnostics.some((d) => d.severity === "error")) {

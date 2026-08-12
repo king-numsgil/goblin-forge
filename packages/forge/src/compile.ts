@@ -36,6 +36,7 @@ import {
 import { buildRuntime } from "@goblin-forge/runtime/build";
 
 import { elaborateDrops } from "./drop-elaboration.ts";
+import { emitHeader, HeaderError } from "./header.ts";
 import { lower } from "./lower.ts";
 
 export type OutputKind = "bin" | "static-lib" | "shared-lib";
@@ -98,6 +99,25 @@ export interface CompileResult {
   readonly linkCommand?: string;
   /** Where the MIR was written, when `emit.ir` asked for it. */
   readonly irPath?: string;
+  /** Where the C header was written, for a library target. */
+  readonly headerPath?: string;
+  /**
+   * The import library beside a Windows `shared-lib`.
+   *
+   * Windows has no equivalent of linking straight against a `.so`: a consumer
+   * links this stub instead. Absent on every other platform, and absent for
+   * every other target kind.
+   */
+  readonly importLibrary?: string;
+  /**
+   * The Goblin runtime archive a consumer of a `static-lib` must also link.
+   *
+   * A Goblin archive carries only its own objects, so that two of them in one
+   * program do not each bring a copy of `gf_string_free`. That makes this the
+   * consumer's job, and leaving it to be discovered from a linker error would
+   * be unkind.
+   */
+  readonly runtimeLibrary?: string;
 }
 
 /**
@@ -155,7 +175,10 @@ export class Compiler {
 
     // 2. Lower the checked AST to MIR.
     const moduleName = basenameWithoutExtension(this.#resolve(this.#options.entry));
-    const lowered = lower(checked.program, checked.checker, moduleName);
+    const kind = this.#options.type ?? "bin";
+    const lowered = lower(checked.program, checked.checker, moduleName, {
+      requireMain: kind === "bin",
+    });
     diagnostics.push(...lowered.diagnostics);
     if (lowered.module === undefined || hasErrors(diagnostics)) return failed(diagnostics);
 
@@ -185,19 +208,50 @@ export class Compiler {
       return { ...failed(diagnostics), ...(irPath !== undefined ? { irPath } : {}) };
     }
 
-    // 4. Link, against the runtime and whatever it needs.
-    const kind = this.#options.type ?? "bin";
+    // 4. A C header, for a library somebody else has to be able to call.
+    let headerPath: string | undefined;
+    if (kind !== "bin" && (this.#options.emit?.header ?? true)) {
+      headerPath = join(outDir, `${moduleName}.h`);
+      try {
+        writeFileSync(headerPath, emitHeader(lowered.module, { name: moduleName }));
+      } catch (error) {
+        if (!(error instanceof HeaderError)) throw error;
+        // The ABI classifier is meant to reject anything with no C spelling
+        // before this is asked, so the two disagreeing is a compiler bug.
+        diagnostics.push({
+          severity: "error",
+          code: "GF9006",
+          source: "goblin",
+          message: `could not write a C header for \`${moduleName}\`: ${error.message}`,
+        });
+        return { ...failed(diagnostics), objects: [artifact.objectPath] };
+      }
+    }
+
+    // 5. Link, against the runtime and whatever it needs.
+    //
+    // A `static-lib` is *archived* rather than linked, and gets neither the
+    // runtime nor any native library: an archive carries only its own objects,
+    // so that two Goblin libraries in one program do not each bring a copy of
+    // `gf_string_free`. Its consumer links the runtime once, at the executable
+    // — which is why `runtimeLibrary` comes back in the result.
     const output = this.#outputPath(kind);
     const runtime = buildRuntime(this.#options.target);
+    const selfContained = kind !== "static-lib";
     const report = this.#backend.link({
       kind,
       objects: [artifact.objectPath],
-      archives: [
-        ...(this.#options.nativeLibs ?? []).map((path) => this.#resolve(path)),
-        runtime.library,
-      ],
-      systemLibs: [...runtime.systemLibs],
+      archives: selfContained
+        ? [
+            ...(this.#options.nativeLibs ?? []).map((path) => this.#resolve(path)),
+            runtime.library,
+          ]
+        : [],
+      systemLibs: selfContained ? [...runtime.systemLibs] : [],
       output,
+      // Only Windows needs these, and only for a DLL: an ELF shared object
+      // publishes every default-visibility symbol on its own.
+      exports: kind === "shared-lib" ? [...artifact.defines] : [],
     });
     diagnostics.push(...report.diagnostics.map(fromBackend));
     if (!report.ok || report.output === undefined) {
@@ -210,7 +264,12 @@ export class Compiler {
       output: report.output,
       objects: [artifact.objectPath],
       ...(irPath !== undefined ? { irPath } : {}),
+      ...(headerPath !== undefined ? { headerPath } : {}),
       ...(report.command !== undefined ? { linkCommand: report.command } : {}),
+      ...(kind === "static-lib" ? { runtimeLibrary: runtime.library } : {}),
+      ...(kind === "shared-lib" && outputExtension("shared-lib") === "dll"
+        ? { importLibrary: output.replace(/\.dll$/i, ".lib") }
+        : {}),
     };
   }
 

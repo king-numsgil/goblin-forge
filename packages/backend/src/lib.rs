@@ -125,6 +125,9 @@ pub struct LinkRequest {
     /// System libraries, in the spelling the platform linker expects.
     pub system_libs: Vec<String>,
     pub output: String,
+    /// Symbols a `shared-lib` publishes. Windows only — see `LinkRequest` in
+    /// `goblin-codegen` for why the platforms differ here.
+    pub exports: Option<Vec<String>>,
 }
 
 #[napi(object)]
@@ -245,6 +248,7 @@ impl Backend {
             archives: &archives,
             system_libs: &request.system_libs,
             output: &output,
+            exports: request.exports.as_deref().unwrap_or(&[]),
         };
 
         match goblin_codegen::link(&link_request) {

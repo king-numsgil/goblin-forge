@@ -502,6 +502,67 @@ is ever wanted.
 
 ---
 
+## Library targets *(2026-08-12, milestone 9)*
+
+### `export` means "visible to the linker", and that is all it means
+
+REWRITE-PLAN §3 asks whether `export` in the source means "visible to other
+Goblin modules" or "visible to the dynamic linker". **The linker.** An exported
+function is `Abi::C`, gets `Linkage::Export`, appears in the generated header,
+and is named in a DLL's `.def` file.
+
+Cross-module *Goblin* visibility is milestone 10's problem and a different
+mechanism — a module interface, not a linkage attribute. Conflating them is what
+v1 did, and it got away with it only because it built nothing but executables.
+
+### A static library carries only its own objects
+
+Not the runtime, not the native libraries it was told about. Two Goblin
+archives in one program must not each bring a copy of `gf_string_free`, and an
+archive is a bag of objects rather than a link — nothing is resolved and nothing
+is discarded, so a duplicate is a duplicate symbol at the executable.
+
+The consumer links the runtime once, at the executable. `CompileResult`
+therefore reports `runtimeLibrary`, because leaving that to be discovered from
+an unresolved-external is unkind, and the generated header says so in its
+banner.
+
+A `shared-lib` is the opposite: it *is* a link, so it takes the runtime and
+everything else, and is self-contained.
+
+### Windows needs an export list; ELF does not
+
+An ELF shared object publishes every symbol with default visibility, which is
+what Cranelift's `Linkage::Export` already produces. A DLL exports **nothing**
+unless told, so `msvc_command` writes a `.def` file naming
+`ModuleArtifact::defines` and passes `/DEF:`.
+
+The asymmetry is the platforms', not this compiler's, and the code says so
+rather than inventing a uniform abstraction over it. Windows also gets an
+import library (`/IMPLIB:`), reported as `importLibrary`, because there is no
+equivalent of linking straight against a `.so`.
+
+### The header is generated from the MIR, not from the AST
+
+By the time a module reaches header emission every type is concrete and sized,
+the C ABI has already accepted it, and the struct layout is the one the backend
+actually used. Reading the AST again would be a second derivation of the same
+facts and a second thing to keep in step.
+
+Structs are emitted in **post-order** — a struct after everything it contains —
+because nested aggregates are inline, so C needs the full definition of a member
+and not a forward declaration. Marking on the way down instead produces the
+reverse order, which compiles fine for pointers and fails for exactly the case
+this language cares about. Caught by the first differential test.
+
+### A `bin` requires `main`; a library does not
+
+Without the check the failure is an unresolved external from the linker with no
+file and no line, which is the shape of error REWRITE-PLAN §8 exists to prevent.
+`lower` takes `requireMain`, set from the target kind.
+
+---
+
 ## Architecture notes settled by measurement
 
 ### The C ABI is classified, not passed our way *(2026-08-12)*
