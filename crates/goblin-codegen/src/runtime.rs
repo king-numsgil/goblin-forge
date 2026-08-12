@@ -33,6 +33,9 @@ pub enum RuntimeFn {
     StringFree,
     /// `gf_string_len(s) -> usize`.
     StringLen,
+    /// `gf_cstr_len(s) -> usize` — `strlen`, for a `CString`. A scan, where
+    /// `StringLen` is a load, which is what the two types are for.
+    CStrLen,
     /// `gf_string_concat(a, b) -> s`.
     StringConcat,
     /// `gf_string_eq(a, b) -> u8`.
@@ -55,6 +58,7 @@ pub enum RuntimeFn {
 impl RuntimeFn {
     pub fn symbol(self) -> &'static str {
         match self {
+            RuntimeFn::CStrLen => "gf_cstr_len",
             RuntimeFn::FindItab => "gf_find_itab",
             RuntimeFn::IsA => "gf_is_a",
             RuntimeFn::StringClone => "gf_string_clone",
@@ -77,7 +81,7 @@ impl RuntimeFn {
         match self {
             RuntimeFn::StringClone => (vec![pointer], Some(pointer)),
             RuntimeFn::StringFree => (vec![pointer], None),
-            RuntimeFn::StringLen => (vec![pointer], Some(pointer)),
+            RuntimeFn::StringLen | RuntimeFn::CStrLen => (vec![pointer], Some(pointer)),
             RuntimeFn::StringConcat => (vec![pointer, pointer], Some(pointer)),
             RuntimeFn::StringEq => (vec![pointer, pointer], Some(types::I8)),
             RuntimeFn::StringFromI64 => (vec![types::I64], Some(pointer)),

@@ -98,6 +98,8 @@ const MOVE = "move";
 const FIXED_ARRAY = "fixedArray";
 /** `tryCast<T>(value)` — a checked downcast, `null` when the answer is no. */
 const TRY_CAST = "tryCast";
+/** `cstring(s)` — borrow a `string`'s bytes as a raw `const char *`. */
+const CSTRING = "cstring";
 
 /**
  * Runtime entry points the lowerer names directly.
@@ -192,6 +194,7 @@ type Width =
   | { readonly kind: "error" };
 
 const STRING: MachineType = { kind: "string" };
+const CSTRING_TYPE: MachineType = { kind: "cstring" };
 const USIZE: MachineType = { kind: "scalar", name: "usize" };
 const VOID: MachineType = { kind: "void" };
 
@@ -1236,6 +1239,8 @@ class Lowerer {
         return this.#mir.ty({ kind: "Bool" });
       case "string":
         return this.#mir.ty({ kind: "Str" });
+      case "cstring":
+        return this.#mir.ty({ kind: "CStr" });
       case "struct":
         return this.#structTy(type, at);
       case "class": {
@@ -2406,9 +2411,12 @@ class BodyLowerer {
       return ERROR;
     }
 
-    if (subject.type.kind === "string") {
+    if (subject.type.kind === "string" || subject.type.kind === "cstring") {
       if (expression.name.text === "length") return typed(USIZE);
-      this.#outer.unsupported(expression, `\`string.${expression.name.text}\``);
+      this.#outer.unsupported(
+        expression,
+        `\`${renderType(subject.type)}.${expression.name.text}\``,
+      );
       return ERROR;
     }
 
@@ -2499,6 +2507,13 @@ class BodyLowerer {
     if (expression.expression.text === TRY_CAST) {
       const type = this.#tryCastTarget(expression);
       return type === undefined ? ERROR : typed(type);
+    }
+
+    // `cstring(s)` is a `CString` whatever it was handed.
+    if (expression.expression.text === CSTRING) {
+      const argument = expression.arguments[0];
+      if (argument !== undefined && this.width(argument).kind === "error") return ERROR;
+      return typed(CSTRING_TYPE);
     }
 
     // `move(x)` has whatever type `x` has; it changes ownership, not type.
@@ -3475,7 +3490,9 @@ class BodyLowerer {
     }
 
     if (
-      (subject.type.kind === "string" || subject.type.kind === "array") &&
+      (subject.type.kind === "string" ||
+        subject.type.kind === "array" ||
+        subject.type.kind === "cstring") &&
       expression.name.text === "length"
     ) {
       const read = this.#forRead(subject);
@@ -3784,6 +3801,7 @@ class BodyLowerer {
     if (name === MOVE) return this.#move(expression);
     if (name === FIXED_ARRAY) return this.#fixedArray(expression, natural);
     if (name === TRY_CAST) return this.#tryCast(expression);
+    if (name === CSTRING) return this.#cstring(expression);
 
     // Resolved through tsc's symbol, not by name: an imported function is the
     // same symbol as its declaration however it is spelled at the call site,
@@ -4003,6 +4021,69 @@ class BodyLowerer {
       kind: "Unary",
       op: "Not",
       operand: isNull.operand,
+    });
+  }
+
+  /**
+   * `cstring(s)` — borrow a `string`'s bytes as a raw `const char *`.
+   *
+   * No allocation and no conversion: a Goblin `string` is already
+   * nul-terminated, so this hands back the same pointer with a different type.
+   * What changes is who is responsible for it, and there are two answers:
+   *
+   * * **Borrowed** — the ordinary case. The `string` still owns the bytes and
+   *   still releases them at the end of its scope, so the `CString` is valid
+   *   for exactly as long as the `string` is. Borrowing a *temporary* is
+   *   `GF0234`: that one dies at the end of the statement, and the borrow could
+   *   not outlive it by a line.
+   * * **`cstring(move(s))`** — the compiler stops tracking the bytes entirely.
+   *   Nothing releases them. That is a leak in most programs and exactly right
+   *   in one: handing a buffer to a C library that will free it. This language
+   *   is unsafe on purpose, and `move` is how the intent gets written down.
+   */
+  #cstring(expression: ts.CallExpression): Typed | undefined {
+    const argument = expression.arguments[0];
+    if (expression.arguments.length !== 1 || argument === undefined) {
+      this.#outer.error(expression, "GF0002", "`cstring` takes exactly one `string`.");
+      return undefined;
+    }
+
+    const value = this.#value(argument, STRING);
+    if (value === undefined) return undefined;
+    if (value.type.kind !== "string") {
+      this.#outer.error(
+        argument,
+        "GF0002",
+        `\`cstring\` borrows a \`string\`'s bytes, and this is a ` +
+          `\`${renderType(value.type)}\`.`,
+      );
+      return undefined;
+    }
+
+    // A `Move` operand means the source has been made dead and nothing will
+    // release it — so a temporary is fine, because its drop is gone too.
+    const moving = value.operand.kind === "Move";
+    if (!moving && value.temporary !== undefined) {
+      this.#outer.error(
+        argument,
+        "GF0234",
+        "nothing owns this string, so it is released at the end of this " +
+          "statement and the `CString` would point at freed bytes. Bind it to a " +
+          "name first — or write `cstring(move(…))` if you meant to take the " +
+          "bytes out of the compiler's hands, which makes releasing them yours.",
+      );
+      return undefined;
+    }
+
+    // `Borrow`, never `Copy`: reading a `string` with `Copy` applies its copy
+    // operation and allocates a second buffer that nothing would free. The
+    // machine value is the pointer, and the pointer is all this needs.
+    const operand: Operand = moving ? value.operand : this.#forRead(value);
+    return this.#temporaryTyped(expression, CSTRING_TYPE, {
+      kind: "Cast",
+      op: "PtrToPtr",
+      operand,
+      to: this.#outer.tyOf(CSTRING_TYPE, expression),
     });
   }
 

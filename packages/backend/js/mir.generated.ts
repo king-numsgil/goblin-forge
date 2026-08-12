@@ -10,10 +10,10 @@
 // module, which is the failure mode this whole arrangement exists to remove.
 
 /** Fingerprint of the wire format these bindings were generated from. */
-export const SCHEMA_FINGERPRINT = 0x9b8b29216ec1603an;
+export const SCHEMA_FINGERPRINT = 0x233763f00c8f26d2n;
 
 /** The same value as hex, for comparing against the addon's report. */
-export const SCHEMA_FINGERPRINT_HEX = "9b8b29216ec1603a";
+export const SCHEMA_FINGERPRINT_HEX = "233763f00c8f26d2";
 
 // ---------------------------------------------------------------------------
 // postcard writer
@@ -190,6 +190,7 @@ export type TyKind =
   | { kind: "Reference"; value: TyId }
   | { kind: "FnPtr"; value: SigId }
   | { kind: "Str" }
+  | { kind: "CStr" }
   | { kind: "Array"; value: TyId }
   | { kind: "FixedArray"; element: TyId; length: bigint }
   | { kind: "Struct"; value: StructId }
@@ -580,29 +581,33 @@ export function writeTyKind(w: Writer, v: TyKind): void {
       w.varint(7);
       break;
     }
-    case "Array": {
+    case "CStr": {
       w.varint(8);
+      break;
+    }
+    case "Array": {
+      w.varint(9);
       writeTyId(w, v.value);
       break;
     }
     case "FixedArray": {
-      w.varint(9);
+      w.varint(10);
       writeTyId(w, v.element);
       w.varintBig(v.length);
       break;
     }
     case "Struct": {
-      w.varint(10);
+      w.varint(11);
       writeStructId(w, v.value);
       break;
     }
     case "Class": {
-      w.varint(11);
+      w.varint(12);
       writeClassId(w, v.value);
       break;
     }
     case "Interface": {
-      w.varint(12);
+      w.varint(13);
       writeInterfaceId(w, v.value);
       break;
     }

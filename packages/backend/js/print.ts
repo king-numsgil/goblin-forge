@@ -376,6 +376,8 @@ function tyKind(module: Module, kind: TyKind): string {
       return `fn${signature(module, kind.value)}`;
     case "Str":
       return "string";
+    case "CStr":
+      return "CString";
     case "Array":
       return `${ty(module, kind.value)}[]`;
     case "FixedArray":

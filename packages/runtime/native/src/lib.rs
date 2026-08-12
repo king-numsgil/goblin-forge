@@ -368,6 +368,31 @@ pub unsafe extern "C" fn gf_eprint(s: GfStr) {
     let _ = err.flush();
 }
 
+/// `strlen`, for a `CString`.
+///
+/// The other half of the string pair, and the reason it is a separate type: a
+/// `string` answers `length` with a load, and this one scans. Making that two
+/// types rather than one keeps the cost visible where it is paid instead of
+/// hiding it under `.length` on every string in the language.
+///
+/// # Safety
+///
+/// `s` must be null or point at nul-terminated bytes. There is no header, no
+/// length and no owner — that is the whole point of the type, and checking is
+/// not possible.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gf_cstr_len(s: *const u8) -> usize {
+    if s.is_null() {
+        return 0;
+    }
+    let mut len = 0usize;
+    // SAFETY: the caller promises nul-terminated bytes.
+    while unsafe { *s.add(len) } != 0 {
+        len += 1;
+    }
+    len
+}
+
 // -- dynamic casts ----------------------------------------------------------
 //
 // `tryCast<T>(value)` asks "is this really a `T`", and for a contract the

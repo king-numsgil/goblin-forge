@@ -1529,7 +1529,14 @@ impl<'a, 'm, M: ClifModule> FunctionTranslator<'a, 'm, M> {
                                 InternalError::new("`gf_string_len` returned nothing")
                             })?,
                     ),
-                    _ => internal_error!("`length` on this type arrives with milestone 6"),
+                    // A scan rather than a load, because there is no header to
+                    // read it from. Visible in the type, which is the reason
+                    // `CString` is a type.
+                    Some(TyKind::CStr) => Some(
+                        self.call_runtime(RuntimeFn::CStrLen, &[value])?
+                            .ok_or_else(|| InternalError::new("`gf_cstr_len` returned nothing"))?,
+                    ),
+                    _ => internal_error!("`length` is not defined on this type"),
                 }
             }
         })

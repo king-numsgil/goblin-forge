@@ -510,7 +510,73 @@ declare function nativeCast<T extends number>(value: number): T;
  * `argv` entries included. The result is owned by the binding you put it in;
  * the pointer is not touched again.
  */
-declare function stringFromCString(pointer: Pointer<u8>): string;
+declare function stringFromCString(pointer: Pointer<u8> | CString): string;
+
+// ---------------------------------------------------------------------------
+// CString
+//
+// The borrowed half of the string pair: a raw `const char *`, and nothing
+// else. No header, no length, no owner.
+//
+// `string` and `CString` are `String` and `&str`, or `std::string` and
+// `string_view` — the same split every language that takes C seriously ends up
+// making. What it buys here:
+//
+//   * **The C boundary can say which it means.** A returned `string` is always
+//     the caller's to release, because returning an owning value is a move and
+//     there is no way for a function to hand one back and keep it. A returned
+//     `CString` is the case where the signature has stopped talking and the
+//     documentation has to start — which is exactly what a C API does.
+//   * **The cost of `length` is in the type.** On a `string` it is a load; on a
+//     `CString` it is a `strlen` scan. One syntax, two costs, and you can see
+//     which one you have.
+//
+// A `CString` is **never** released by the scope that holds it. Nothing tracks
+// it — that is the point, and it is the unsafe escape hatch of this language.
+
+declare const CStringBrand: unique symbol;
+
+interface CString {
+  /**
+   * Unforgeable, and required rather than optional for the same reason
+   * `FixedArray`'s is: an optional brand is *absent* on other types, and
+   * optional-and-absent is assignable, so every pointer would silently become
+   * a `CString`.
+   */
+  readonly [CStringBrand]: void;
+
+  /**
+   * `strlen`. **O(n)** — it scans to the NUL, because there is no header to
+   * read a length out of.
+   *
+   * A `string`'s `length` is a single load. That difference is the reason
+   * these are two types.
+   */
+  readonly length: usize;
+}
+
+/**
+ * Borrow a `string`'s bytes as a `CString`.
+ *
+ * Free — a Goblin `string` is already NUL-terminated, so this hands back the
+ * same pointer. What it is *not* is free of consequence:
+ *
+ * ```ts
+ * const c: CString = cstring(name);   // valid while `name` is
+ * const d: CString = cstring(move(name));   // `name` is dead; `d` is yours now
+ * ```
+ *
+ * Without `move`, the `string` still owns the bytes and still releases them at
+ * the end of its scope; the `CString` is a borrow and dies with it. Borrowing a
+ * *temporary* is `GF0234`, because that one is released at the end of the
+ * statement and the borrow could not outlive it by even a line.
+ *
+ * With `move`, nothing releases the bytes any more — the compiler has been told
+ * to stop tracking them. That is a real thing to want when handing a buffer to
+ * a C library that will free it, and it is a leak in every other case. The
+ * language is unsafe here on purpose; `move` is how you say you meant it.
+ */
+declare function cstring(value: string): CString;
 
 // ---------------------------------------------------------------------------
 // console

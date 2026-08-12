@@ -157,6 +157,7 @@ impl<'m> Layouts<'m> {
             | TyKind::Reference(_)
             | TyKind::FnPtr(_)
             | TyKind::Str
+            | TyKind::CStr
             | TyKind::Array(_) => Layout::scalar(pointer),
             // `N` elements at stride intervals — stride, not size, because a
             // `{ i32, i8 }` occupies five bytes and strides by eight. Using the
@@ -252,6 +253,7 @@ impl<'m> Layouts<'m> {
             | TyKind::Reference(_)
             | TyKind::FnPtr(_)
             | TyKind::Str
+            | TyKind::CStr
             | TyKind::Array(_) => Repr::Register(self.target.pointer_type()),
             // Too big for a register, and it travels by address like any other
             // aggregate.
@@ -294,6 +296,7 @@ pub fn render_type(module: &Module, ty: TyId) -> String {
         TyKind::Reference(inner) => format!("Reference<{}>", render_type(module, *inner)),
         TyKind::FnPtr(_) => "fn".into(),
         TyKind::Str => "string".into(),
+        TyKind::CStr => "CString".into(),
         TyKind::Array(inner) => format!("{}[]", render_type(module, *inner)),
         TyKind::Class(id) => module
             .class(*id)

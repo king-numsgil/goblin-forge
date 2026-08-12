@@ -60,6 +60,7 @@ function tyKindKey(kind: TyKind): string {
     case "Void":
     case "Bool":
     case "Str":
+    case "CStr":
       return kind.kind;
     case "Int":
     case "Float":
@@ -150,9 +151,12 @@ export class ModuleBuilder {
       case "FnPtr":
         return "Trivial";
       // An address into somebody else's storage. Never destroyed — that is the
-      // entire content of `Reference<T>`.
+      // entire content of `Reference<T>`, and of `CString`: the compiler has
+      // been told not to track it, which is what makes it the borrowed half of
+      // the string pair.
       case "Pointer":
       case "Reference":
+      case "CStr":
         return "Borrow";
       // A one-word handle to a heap buffer it owns.
       case "Str":

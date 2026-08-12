@@ -85,6 +85,18 @@ pub enum TyKind {
     FnPtr(SigId),
     /// `string`: a one-word owning handle to a heap buffer.
     Str,
+    /// `CString`: a raw `const char *`, and nothing else.
+    ///
+    /// The borrowed half of the pair, and the type the compiler deliberately
+    /// does **not** track. No header, no length, no owner — so `length` is a
+    /// `strlen` scan rather than a load, and that cost is visible in the type
+    /// instead of hidden under `.length` on every string in the language.
+    ///
+    /// It exists so that a C boundary can say which of the two it means. A
+    /// returned [`TyKind::Str`] is always the caller's to release, because
+    /// returning an owning value is a move; a returned `CStr` is the case where
+    /// the signature has stopped talking and a doc comment has to start.
+    CStr,
     /// `T[]`: a one-word owning handle to a heap buffer of *inline* elements.
     /// The element occupies its stride, not a pointer (REWRITE-PLAN §5.2).
     Array(TyId),

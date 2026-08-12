@@ -46,6 +46,13 @@ export type MachineType =
   | { readonly kind: "bool" }
   | { readonly kind: "scalar"; readonly name: ScalarName }
   | { readonly kind: "string" }
+  | {
+      /**
+       * `CString`: a raw `const char *`. The borrowed half of the string pair,
+       * and the type the compiler deliberately does not track.
+       */
+      readonly kind: "cstring";
+    }
   | { readonly kind: "array"; readonly element: MachineType }
   | {
       /** `FixedArray<T, N>`: `N` elements, inline, no allocation. */
@@ -192,6 +199,13 @@ export function erase(checker: ts.TypeChecker, type: ts.Type): MachineType {
 
   const scalar = scalarName(checker, type);
   if (scalar) return { kind: "scalar", name: scalar };
+
+  // Before the `StringLike` check, because a `CString` is an interface and not
+  // string-like — but before the object case too, so it never falls through to
+  // structural erasure and becomes a nameless struct with a `length` field.
+  if (brandedProperty(checker, type, "CStringBrand") !== null) {
+    return { kind: "cstring" };
+  }
 
   if (flags & ts.TypeFlags.StringLike) return { kind: "string" };
 
@@ -512,6 +526,8 @@ export function renderType(type: MachineType): string {
       return type.name;
     case "string":
       return "string";
+    case "cstring":
+      return "CString";
     case "array":
       return `${renderType(type.element)}[]`;
     case "pointer":

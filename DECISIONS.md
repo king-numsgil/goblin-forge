@@ -593,6 +593,66 @@ One surface per build, which is what a library is. Found by a test that tried to
 call a `string`-returning helper across a module boundary and was told it could
 not, which was the compiler being wrong rather than the program.
 
+### `CString`: the borrowed half of the string pair *(2026-08-12)*
+
+The user's call, after weighing the alternative of **removing the string header
+entirely** so that a `string` would just be a `char *`. That was tempting — it
+would have made `.length` a `strlen`, let C `free()` Goblin strings, and deleted
+a whole category of boundary friction.
+
+It was rejected for one reason above the others: the header's `owned` flag is
+what makes `const a = "hello"` and `const b = x + y` the **same type**. A
+literal is static data with `owned = 0`, so releasing it is a no-op; a heap
+string has `owned = 1`. Take the flag away and a destructor cannot answer "do I
+free this?" — free everything and a literal kills the program, free nothing and
+every string leaks and the live-allocation counter stops meaning anything.
+Deciding it statically is `&str` versus `String`, which is the *other* design.
+
+So: keep the header, and add the borrowed type instead.
+
+| | `string` | `CString` |
+|---|---|---|
+| Representation | header behind a nul-terminated pointer | a raw `const char *` |
+| `length` | a **load** | a **`strlen` scan** |
+| Ownership | tracked; the scope releases it | **not tracked**, ever |
+| In a C header | `GoblinString` (a typedef, as a warning) | `const char*` |
+
+Two things this buys, and they are the argument for two types over one:
+
+- **A C signature can say which it means.** A returned `string` is *always* the
+  caller's to release — returning an owning value is a move, and there is no way
+  for a function to hand one back and keep it. A returned `CString` is the case
+  where the signature has stopped talking and a doc comment has to start, which
+  is what a C API does anyway.
+- **The cost of `length` lives in the type.** Under the header-removal design
+  every `.length` in the language would silently have become O(n), and
+  `for (i = 0; i < s.length; i++)` O(n²). Here you can see which you have.
+
+### `cstring(s)`, and what `move` means to it
+
+Borrowing is free — a Goblin `string` is already nul-terminated, so this is the
+same pointer with a different type. What changes is who is responsible:
+
+```ts
+const c: CString = cstring(name);         // borrowed: valid while `name` is
+const d: CString = cstring(move(name));   // `name` is dead; the bytes are yours
+```
+
+Borrowing a **temporary** is `GF0234` — it dies at the end of the statement and
+the borrow could not outlive it by a line. With `move` that check does not fire,
+and **should not**: the move makes the source dead, so no destructor runs and
+there is nothing to dangle past.
+
+The consequence is a leak in most programs and exactly right in one — handing a
+buffer to a C library that will free it. **This language is unsafe on purpose**,
+and `move` is how the intent gets written down rather than assumed. The
+diagnostic for the temporary case names `move` for that reason: the alternative
+should not have to be guessed at.
+
+Releasing such a string is `gf_string_free`, never `free`, because the
+allocation starts at the header. The generated C header declares it beside
+`gf_string_from_cstr` and `gf_string_clone`.
+
 ### A `string` crosses; ownership becomes documentation
 
 The user's call, and the right one: in C a string is a `char *` and who frees it

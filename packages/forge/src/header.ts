@@ -237,6 +237,11 @@ function spell(module: Module, kind: TyKind): string {
     // wrong rather than loudly. The name is the only warning available.
     case "Str":
       return "GoblinString";
+    // The other half of the pair, and the whole reason the pair exists: a
+    // signature can now say which of the two it means. This one really is a
+    // plain `const char *`, and whether the caller owns it is documentation.
+    case "CStr":
+      return "const char*";
     // These own something, or carry a vtable. `require_plain_data` in the ABI
     // classifier refuses them at the boundary, so reaching here means the two
     // halves disagree about what may cross.
