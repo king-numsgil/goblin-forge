@@ -47,7 +47,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy, rustfmt
 
       # The compiler's own crates and the runtime are separate workspaces, and
       # the runtime is rebuilt per target, so both are worth caching.
@@ -65,6 +65,13 @@ jobs:
 
       - name: Type-check the compiler
         run: bunx tsc --noEmit
+
+      # Checked rather than left to habit, because a formatter run by hand
+      # rewrites whatever it was last pointed at and mixes the churn into
+      # whatever change was actually being made. Once it is enforced, `cargo
+      # fmt` is always a no-op and never a surprise.
+      - name: Rust formatting
+        run: cargo fmt --all --check
 
       - name: Lint the Rust
         run: cargo clippy --workspace --all-targets -- -D warnings
