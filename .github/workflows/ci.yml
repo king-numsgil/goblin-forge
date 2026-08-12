@@ -13,10 +13,18 @@
 
 name: CI
 
+# PARKED, deliberately. Manual-only until the rewrite is done.
+#
+# This is a two-person project with no pull requests to gate, hosted CI costs
+# money, and its security model is worth understanding before granting a runner
+# a token rather than after. The System V half will be checked on a real Linux
+# machine once milestones 9 and 10 land, which is the point at which the answer
+# actually matters.
+#
+# The file stays because it is the *record* of how to check this, and the note
+# below about why the Linux job is not routine coverage is the part worth
+# keeping. Turn it back on by restoring the push/pull_request triggers.
 on:
-  push:
-    branches: [main]
-  pull_request:
   workflow_dispatch:
 
 concurrency:

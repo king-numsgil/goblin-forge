@@ -224,13 +224,23 @@ is the point of having it.
 
 ## Known unverified
 
-**The Linux CI job has never run.** `.github/workflows/ci.yml` runs everything on
-`windows-latest` and `ubuntu-latest`, and the Linux half is what makes System V
-real rather than read — but development has been on Windows throughout. Expect
-friction on the first push in the runtime's Unix link path
-(`link.rs::unix_command`, which drives `cc`) and in the CMake C library. The
-System V *classification* is unit-tested from Windows, so a failure there would
-be plumbing rather than rules.
+**System V has never been executed.** The classification is unit-tested from
+Windows — 12 tests in `abi.rs` pinning both conventions — but no System V binary
+has ever run, and REWRITE-PLAN §6 is blunt about what that is worth: "the
+classification is the part of a compiler where 'looks right' is worth nothing."
+
+`.github/workflows/ci.yml` would check it and is **parked, manual-only**, by
+decision: hosted CI costs money on a two-person project with no pull requests to
+gate. The plan is a real Linux machine once milestones 9 and 10 land.
+
+Expect friction in `link.rs::unix_command` (which drives `cc` and has never
+executed), in the CMake oracle picking up gcc or clang instead of MSVC, and in
+building the addon on a fresh box. A failure in those is plumbing. A failure in
+`tests/struct-abi.test.ts` is not — that one is a real disagreement with the
+platform about registers, and it is the reason to run this at all.
+
+Nothing enforces `cargo fmt --all --check` while CI is parked. Run it before a
+commit, or a later formatter run folds churn into an unrelated diff.
 
 **Exit codes are 8 bits** through Bun on every platform. A compiled program
 returning 300 really does exit 300; `RunResult.exitCode` still says 44. Observe
