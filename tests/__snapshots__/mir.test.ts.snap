@@ -250,7 +250,7 @@ exports[`golden MIR short-circuiting is control flow, not an operator 1`] = `
 `;
 
 exports[`golden MIR a call is a terminator, and temporaries end with the statement 1`] = `
-"fn twice: (i32) -> i32 {
+"fn twice$0e5bb6b6: (i32) -> i32 {
   let _0: i32  [Owned/Trivial]
   let _1: i32  [Owned/Trivial]
   let _2: i32  [Temporary/Trivial]
@@ -274,12 +274,12 @@ export fn main: extern "C" () -> i32 {
 
   bb0: {
     StorageLive(_2);
-    _2 = twice(3_i32) -> [return: bb1];
+    _2 = twice$0e5bb6b6(3_i32) -> [return: bb1];
   }
 
   bb1: {
     StorageLive(_3);
-    _3 = twice(4_i32) -> [return: bb2];
+    _3 = twice$0e5bb6b6(4_i32) -> [return: bb2];
   }
 
   bb2: {
@@ -466,7 +466,7 @@ fn Cat$speak: (Reference<Cat>) -> string {
   }
 }
 
-fn announce: (Speaker) -> void {
+fn announce$0e5bb6b6: (Speaker) -> void {
   let _0: void  [Owned/Trivial]
   let _1: Speaker  [Owned/Borrow]
   let _2: string  [Temporary/Owning]
@@ -507,7 +507,7 @@ export fn main: extern "C" () -> i32 {
   bb1: {
     StorageLive(_4);
     _4 = (Speaker) _1;
-    _0 = announce(copy _4) -> [return: bb2];
+    _0 = announce$0e5bb6b6(copy _4) -> [return: bb2];
   }
 
   bb2: {

@@ -333,9 +333,15 @@ export function lower(
   program: ts.Program,
   checker: ts.TypeChecker,
   moduleName: string,
-  options: { readonly requireMain?: boolean } = {},
+  options: { readonly requireMain?: boolean; readonly root?: string } = {},
 ): LowerResult {
-  return new Lowerer(program, checker, moduleName, options.requireMain ?? true).run();
+  return new Lowerer(
+    program,
+    checker,
+    moduleName,
+    options.requireMain ?? true,
+    options.root ?? "",
+  ).run();
 }
 
 interface FnSignature {
@@ -351,8 +357,23 @@ interface FnSignature {
  * call, because the recorded signature is the only thing the two sides share.
  */
 type FnRecord =
-  | { readonly kind: "defined"; readonly id: FuncId; readonly sig: SigId; readonly signature: FnSignature }
-  | { readonly kind: "imported"; readonly id: ExternId; readonly sig: SigId; readonly signature: FnSignature };
+  | {
+      readonly kind: "defined";
+      readonly id: FuncId;
+      readonly sig: SigId;
+      readonly signature: FnSignature;
+      /** The name as written, before any qualification. */
+      readonly name: string;
+      readonly exported: boolean;
+    }
+  | {
+      readonly kind: "imported";
+      readonly id: ExternId;
+      readonly sig: SigId;
+      readonly signature: FnSignature;
+      readonly name: string;
+      readonly exported: boolean;
+    };
 
 /** One member of a class, waiting for its body to be lowered. */
 type ClassBody =
@@ -380,6 +401,22 @@ type ClassBody =
  * asked the same question of an expression's *node kind* and got it wrong at
  * one site out of every six (REWRITE-PLAN §4.1).
  */
+/**
+ * A short, stable tag for a module, from its path.
+ *
+ * FNV-1a over the file name. Used to qualify the symbols of *internal*
+ * functions, which nothing outside this compilation may name — so the tag needs
+ * to be unique and an assembler-legal identifier, and needs to be nothing else.
+ */
+function moduleTag(fileName: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < fileName.length; index += 1) {
+    hash ^= fileName.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(16).padStart(8, "0");
+}
+
 function needsDrop(type: MachineType): boolean {
   switch (type.kind) {
     case "string":
@@ -402,18 +439,86 @@ class Lowerer {
   readonly #diagnostics: Diagnostic[] = [];
   readonly #functions = new Map<string, FnRecord>();
 
+  /**
+   * A key that is unique across the whole program.
+   *
+   * Two files may each declare a private `helper`, and both are legal — the
+   * names are scoped to their modules, and tsc says so. Keying the function
+   * table by the bare name makes the second overwrite the first, and emitting
+   * both under that name is a duplicate-symbol error from Cranelift with no
+   * file and no line, which is precisely the failure REWRITE-PLAN §8 forbids.
+   */
+  #keyOf(node: ts.Node, name: string): string {
+    return `${node.getSourceFile().fileName}#${name}`;
+  }
+
+  /**
+   * The symbol a function is emitted under.
+   *
+   * An **exported** function keeps its bare name: that is the C ABI contract,
+   * it is what the generated header declares, and it is what a `.def` file
+   * names. An **internal** one is qualified by its module, because nothing
+   * outside this compilation may refer to it and two modules may each have one.
+   *
+   * The qualifier is a hash rather than the path: a path contains characters no
+   * assembler accepts, and its length is unbounded.
+   */
+  #symbolOf(node: ts.Node, name: string, exported: boolean): string {
+    if (exported) return name;
+    return `${name}$${moduleTag(this.#relative(node.getSourceFile().fileName))}`;
+  }
+
+  /**
+   * A file's path relative to the project root.
+   *
+   * The tag is derived from this rather than from the absolute path, so that
+   * the same sources produce the same symbols on two machines and in two
+   * checkouts. An absolute path would make the golden MIR churn on every move
+   * and a build unreproducible for no reason.
+   */
+  #relative(fileName: string): string {
+    const path = fileName.replaceAll("\\", "/");
+    if (this.#root !== "" && path.startsWith(`${this.#root}/`)) {
+      return path.slice(this.#root.length + 1);
+    }
+    return path;
+  }
+
+  /**
+   * Resolve a called name to the function it names, through **tsc**.
+   *
+   * By symbol rather than by string, which is what makes an import work: the
+   * name at the call site and the name at the declaration are the same symbol
+   * even when they are spelled differently, and two same-named privates in
+   * different files are different symbols even though they are spelled alike.
+   */
+  resolveCallee(expression: ts.Expression): FnRecord | undefined {
+    let symbol = this.#checker.getSymbolAtLocation(expression);
+    if (symbol === undefined) return undefined;
+    // An imported name is an *alias* for the thing it imports.
+    if ((symbol.flags & ts.SymbolFlags.Alias) !== 0) {
+      symbol = this.#checker.getAliasedSymbol(symbol);
+    }
+    const declaration = symbol.declarations?.find(ts.isFunctionDeclaration);
+    if (declaration?.name === undefined) return undefined;
+    return this.#functions.get(this.#keyOf(declaration, declaration.name.text));
+  }
+
   readonly #requireMain: boolean;
+  readonly #root: string;
 
   constructor(
     program: ts.Program,
     checker: ts.TypeChecker,
     moduleName: string,
     requireMain: boolean,
+    root: string,
   ) {
     this.#program = program;
     this.#checker = checker;
     this.#mir = new ModuleBuilder(moduleName);
     this.#requireMain = requireMain;
+    this.#root = root.replaceAll("\\", "/");
   }
 
   run(): LowerResult {
@@ -449,7 +554,10 @@ class Lowerer {
     // file and no line — the shape of error REWRITE-PLAN §8 exists to prevent.
     // A library needs no entry point at all, which is most of what makes it a
     // library.
-    if (this.#requireMain && !this.#functions.has("main")) {
+    const hasMain = [...this.#functions.values()].some(
+      (record) => record.kind === "defined" && record.exported && record.name === "main",
+    );
+    if (this.#requireMain && !hasMain) {
       const first = sources[0];
       if (first !== undefined) {
         this.error(
@@ -728,6 +836,8 @@ class Lowerer {
       kind: "defined",
       id: builder.id,
       sig,
+      name: symbol,
+      exported: false,
       signature: {
         params: params.map((type, index) => ({ name: index === 0 ? "this" : `p${index}`, type })),
         returns,
@@ -802,13 +912,20 @@ class Lowerer {
     }
 
     const builder = this.#mir.declareFunction({
-      name,
+      name: this.#symbolOf(statement, name, exported),
       sig,
       linkage: exported ? "Export" : "Internal",
       span: this.span(statement),
     });
 
-    this.#functions.set(name, { kind: "defined", id: builder.id, sig, signature });
+    this.#functions.set(this.#keyOf(statement, name), {
+      kind: "defined",
+      id: builder.id,
+      sig,
+      signature,
+      name,
+      exported,
+    });
     return { node: statement, builder };
   }
 
@@ -823,7 +940,8 @@ class Lowerer {
   #declareImport(node: ts.FunctionDeclaration): void {
     if (node.name === undefined) return;
     const name = node.name.text;
-    if (this.#functions.has(name)) return;
+    const key = this.#keyOf(node, name);
+    if (this.#functions.has(key)) return;
 
     const signature = this.#signature(node);
     if (signature === undefined) return;
@@ -837,7 +955,7 @@ class Lowerer {
       abi: "C",
     });
     const id = this.#mir.extern({ name, sig, span: this.span(node) });
-    this.#functions.set(name, { kind: "imported", id, sig, signature });
+    this.#functions.set(key, { kind: "imported", id, sig, signature, name, exported: true });
   }
 
   #signature(node: ts.FunctionDeclaration): FnSignature | undefined {
@@ -985,7 +1103,7 @@ class Lowerer {
   }
 
   #lowerBody(node: ts.FunctionDeclaration, builder: FunctionBuilder): void {
-    const record = this.#functions.get(node.name!.text);
+    const record = this.#functions.get(this.#keyOf(node, node.name!.text));
     if (record === undefined || node.body === undefined) return;
 
     const scopes = new Scopes();
@@ -2298,7 +2416,7 @@ class BodyLowerer {
       return this.width(argument);
     }
 
-    const target = this.#outer.functions.get(expression.expression.text);
+    const target = this.#outer.resolveCallee(expression.expression);
     if (target === undefined) {
       this.#outer.unsupported(expression, `a call to \`${expression.expression.text}\``);
       return ERROR;
@@ -3572,7 +3690,10 @@ class BodyLowerer {
     if (name === FIXED_ARRAY) return this.#fixedArray(expression, natural);
     if (name === TRY_CAST) return this.#tryCast(expression);
 
-    const target = this.#outer.functions.get(name);
+    // Resolved through tsc's symbol, not by name: an imported function is the
+    // same symbol as its declaration however it is spelled at the call site,
+    // and two same-named privates in different files are different symbols.
+    const target = this.#outer.resolveCallee(expression.expression);
     if (target === undefined) return undefined;
     if (expression.arguments.length !== target.signature.params.length) {
       // tsc has already rejected a genuine arity mismatch, so reaching this

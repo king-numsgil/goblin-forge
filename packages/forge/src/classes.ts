@@ -102,6 +102,27 @@ export function collectClasses(
         report.unsupported(statement, "an anonymous class");
         continue;
       }
+      // Two classes with the same name in different modules are legal
+      // TypeScript, and this compiler cannot lower them: a class's name is what
+      // its vtable, its type descriptor and its methods are emitted under, so
+      // two of them collide at the linker with no file and no line — the shape
+      // of failure REWRITE-PLAN §8 exists to prevent.
+      //
+      // Rejected rather than qualified, deliberately. Qualifying is the right
+      // fix and is not free: a class would need a *symbol* distinct from its
+      // *name*, so that a descriptor still carries the readable one for
+      // `instanceof` and diagnostics. That is a wire-format change, and this
+      // restriction is cheap to lift once it is wanted.
+      const existing = declarations.get(statement.name.text);
+      if (existing !== undefined) {
+        report.refuse(
+          statement,
+          `there is already a class called \`${statement.name.text}\`, in ` +
+            `${existing.getSourceFile().fileName}. Class names are global to a ` +
+            "build, because a class is emitted under its name. Rename one of them.",
+        );
+        continue;
+      }
       declarations.set(statement.name.text, statement);
     }
   }

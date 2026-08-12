@@ -40,6 +40,14 @@
     "moduleResolution": "bundler",
     "moduleDetection": "force",
 
+    // `import { add } from "./math.ts"` — with the extension, because that is
+    // the file. Nothing here emits JavaScript, so there is no rewriting step
+    // for an extensionless specifier to survive and no bundler to guess for
+    // you: the compiler reads the source tsc resolved, and the specifier names
+    // it exactly. tsc allows this only when it is not emitting, which is
+    // permanently true here.
+    "allowImportingTsExtensions": true,
+
     "strict": true,
     "noImplicitOverride": true,
     "noFallthroughCasesInSwitch": true,

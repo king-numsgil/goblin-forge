@@ -408,12 +408,78 @@ own.
 
 ---
 
+## §11.8 — Multi-module linking, and `.gbi` *(settled, 2026-08-12)*
+
+**Answer: `.gbi` does not survive. A Goblin module is a TypeScript program:
+many files, one compilation, one object file.**
+
+Most of what a module-interface file was for turned out to be somebody else's
+job already:
+
+- **tsc resolves the imports.** A `ts.Program` already contains every file
+  reachable from the entry, in dependency order, type-checked together. A
+  bespoke interface format would be a second and weaker copy of that, kept in
+  step by hand — which is the mistake §2 calls out about v1's wire contract.
+- **The lowerer already walks all of them.** It always did; multi-file worked
+  the day classes did, and nobody had noticed because no test had two files.
+- **A real library boundary already has a format**, and milestone 9 built it:
+  the C ABI plus a generated header. Two Goblin libraries meet the way a Goblin
+  library and a C one do, which is one mechanism instead of two.
+
+REWRITE-PLAN §11.8 guessed at this — "if the frontend and backend are one
+process, a lot of what `.gbi` was for is now just holding state in memory" —
+and the guess was right, minus the part about holding state: nothing needs to
+be held, because there is only one compilation.
+
+**Incremental builds are a separate question**, deliberately unanswered. They
+would want a cache keyed by content, not an interface file, and `CompileOptions`
+already reserves `incremental` for whoever answers it.
+
+### What it cost: names had to stop being global
+
+Two modules may each declare a private `helper`, and both are right — the names
+are scoped to their modules and tsc says so. The function table was keyed by the
+bare name, so the second overwrote the first, and both were emitted under that
+name: a duplicate-symbol error from Cranelift with no file and no line.
+
+Two changes fix it, and they are the substance of this milestone:
+
+- **Calls resolve through tsc's symbol**, not through a name string. An
+  imported function is the same symbol as its declaration however it is spelled
+  at the call site, and two same-named privates in different files are different
+  symbols even though they are spelled alike. `resolveCallee` follows an import
+  alias to get there.
+- **Internal symbols are qualified** by a hash of the module's path *relative to
+  the project root*. Relative, so the same sources produce the same symbols on
+  two machines — an absolute path would make a build unreproducible and the
+  golden MIR churn on every move. Exported symbols keep their bare name, because
+  that is the C ABI contract and what the header declares.
+
+### Known restriction: class names are global to a build
+
+Two classes with the same name in different modules are legal TypeScript and are
+rejected here (`GF0002`, naming both files). A class is emitted under its name —
+its vtable, its descriptor, its methods — so two of them collide.
+
+Qualifying is the right fix and is not free: a class would need a **symbol**
+distinct from its **name**, so a descriptor still carries the readable one for
+`instanceof` and for diagnostics. That is a wire-format change, and the
+restriction is cheap to lift once somebody wants it.
+
+### `allowImportingTsExtensions` is on
+
+`import { add } from "./math.ts"` — with the extension, because that is the file.
+Nothing here emits JavaScript, so there is no rewriting step for an
+extensionless specifier to survive and no bundler to guess for you. tsc permits
+this only when it is not emitting, which is permanently true.
+
+---
+
 ## Still open
 
 | § | Question | Needed by |
 |---|---|---|
 | 11.7 | Generics: monomorphisation or nothing. Either way the MIR is monomorphic, so this is a frontend decision. Milestone 3 turned out not to need it — see below. | milestone 8 at the earliest |
-| 11.8 | Multi-module linking, and whether `.gbi` survives now that the frontend and backend share a process and can hold state in memory across `compileModule` calls. | milestone 10 |
 | — | **`free()` and `freeArray()` are callable on a `FixedArray<T, N>`.** They come with the `CorePointer<T>` that makes array-to-pointer decay work, and calling either is undefined behaviour — exactly as `free(buf)` is in C, and for the same reason. Taken deliberately over adding a second pointer type whose only difference is which mistakes it permits, but it is a real unsafety rather than an oversight, and it is the kind that a diagnostic could close cheaply: the compiler knows statically that the receiver is a fixed array. Revisit once classes settle what `Pointer<T>`'s member surface actually needs to be. | revisit at milestone 8 |
 
 ---
