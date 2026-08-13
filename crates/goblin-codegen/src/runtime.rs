@@ -53,6 +53,23 @@ pub enum RuntimeFn {
     FindItab,
     /// `gf_is_a(descriptor, target) -> u8` — the class half of `tryCast`.
     IsA,
+    /// `gf_array_new(len, stride, align) -> a` — storage for `len`
+    /// **uninitialised** elements. The caller fills them, applying each one's
+    /// own copy operation, because only the backend knows what that is.
+    ArrayNew,
+    /// `gf_array_empty() -> a` — the shared static empty array. No allocation.
+    ArrayEmpty,
+    /// `gf_array_len(a) -> usize` — a load, like a string's.
+    ArrayLen,
+    /// `gf_array_push_slot(&a, stride, align) -> *mut T` — make room for one
+    /// more and hand back its address, reseating the handle.
+    ArrayPushSlot,
+    /// `gf_array_pop(a)` — forget the last element, after it has been
+    /// destroyed. The capacity is kept, as `std::vector::pop_back` keeps it.
+    ArrayPop,
+    /// `gf_array_free(a, stride, align)` — release the buffer. The elements are
+    /// destroyed by emitted code first.
+    ArrayFree,
 }
 
 impl RuntimeFn {
@@ -72,6 +89,12 @@ impl RuntimeFn {
             RuntimeFn::StringFromBool => "gf_string_from_bool",
             RuntimeFn::Print => "gf_print",
             RuntimeFn::EPrint => "gf_eprint",
+            RuntimeFn::ArrayNew => "gf_array_new",
+            RuntimeFn::ArrayEmpty => "gf_array_empty",
+            RuntimeFn::ArrayLen => "gf_array_len",
+            RuntimeFn::ArrayPushSlot => "gf_array_push_slot",
+            RuntimeFn::ArrayPop => "gf_array_pop",
+            RuntimeFn::ArrayFree => "gf_array_free",
         }
     }
 
@@ -93,6 +116,17 @@ impl RuntimeFn {
             // runtime about the interface name's hash rather than truncating it.
             RuntimeFn::FindItab => (vec![pointer, types::I64], Some(pointer)),
             RuntimeFn::IsA => (vec![pointer, pointer], Some(types::I8)),
+            // Lengths, strides and alignments are 64 bits on every target, so
+            // a 32-bit build agrees with the runtime about an array bigger than
+            // 4GB rather than truncating the count on the way in.
+            RuntimeFn::ArrayNew => (vec![types::I64, types::I64, types::I64], Some(pointer)),
+            RuntimeFn::ArrayEmpty => (Vec::new(), Some(pointer)),
+            RuntimeFn::ArrayLen => (vec![pointer], Some(pointer)),
+            RuntimeFn::ArrayPushSlot => {
+                (vec![pointer, types::I64, types::I64], Some(pointer))
+            }
+            RuntimeFn::ArrayPop => (vec![pointer], None),
+            RuntimeFn::ArrayFree => (vec![pointer, types::I64, types::I64], None),
         }
     }
 }

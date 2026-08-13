@@ -216,19 +216,18 @@ instance. Drawing the line there keeps C's struct-of-callbacks a plain struct,
 and means adding contracts to the language changed the meaning of no existing
 declaration.
 
-### Arrays come in C's three kinds
+### Arrays come in two kinds, and the type says which
 
 ```ts
 // inline — no allocation, length in the type, `sizeof` is 128
 const buf: FixedArray<u8, 128> = fixedArray(128, 0);
 buf[0] = 1;
 
-// decays to a pointer, one way only, as in C
-const p: Pointer<u8> = buf;
-
-// heap, runtime length, yours to release
-const heap: Pointer<u8> = allocArray<u8>(n);
-heap.freeArray();       // `delete[]`, distinct from `free`
+// owning and growable — this language's `std::vector`
+const xs: i32[] = [1, 2, 3];
+xs.push(4);
+const ys = xs;          // a copy: a second buffer, not a second name
+const last = xs.pop();
 ```
 
 A `FixedArray<T, N>` **is** the bytes rather than a pointer to them: as a struct
@@ -236,8 +235,26 @@ field it occupies its whole layout, and copying the struct copies the elements
 with it. `FixedArray<u8, 8>` and `FixedArray<u8, 4>` are different types and tsc
 says so; a bare pointer never becomes either, because it carries no length.
 
-`T[]` is declared and deliberately unimplemented — it is the owning,
-runtime-length array, this language's `std::vector`.
+`T[]` — the same type as `Array<T>`, as in TypeScript — is a *handle* to
+elements it owns, which is the whole difference: it can grow, copying one
+allocates, and reaching an element is one indirection further down. Elements are
+inline at their stride either way, so the bytes match what a C compiler produces.
+
+Copying copies every element with **that element's** own copy operation, so a
+`string[]` deep-copies its strings and an `i32[]` is a single `memcpy` — the same
+rule that makes a struct holding a `string` work. An empty array holds no buffer
+and allocates nothing, exactly as an empty `std::vector` does, and growth is
+amortised so a loop of `push` is linear. Passing one by value copies the whole
+buffer, which is `std::vector<T>` by value; `Reference<T[]>` is how you say not
+to.
+
+```console
+$ bun test tests/vector.test.ts
+ 31 pass  0 fail
+```
+
+The third kind C has — a bare `T*` from `malloc` — is still to come: `Pointer<T>`
+is declared and not yet a type you can write.
 
 ### Calling C
 

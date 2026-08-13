@@ -162,15 +162,16 @@ describe("the intrinsics the prelude declares and the lowerer does not have", ()
     expect(diagnostic.message).toContain("Reference");
   });
 
-  test("`T[]` is declared and deliberately unimplemented", async () => {
-    await expectRejected(
+  test("`T[]` is implemented — see `tests/arrays.test.ts`", async () => {
+    const result = await run(
       "intr-array-type",
       `export function main(): i32 {
          const a: i32[] = [1, 2, 3];
-         return 0;
+         a.push(4);
+         return a[3];
        }\n`,
-      "GF0001",
     );
+    expect(result.exitCode).toBe(4);
   });
 });
 

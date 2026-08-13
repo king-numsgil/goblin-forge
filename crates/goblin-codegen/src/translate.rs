@@ -534,6 +534,12 @@ impl<'a, 'm, M: ClifModule> FunctionTranslator<'a, 'm, M> {
                 // decision is spelled — `Init` of an `Aggregate`, not a pattern
                 // the backend recognises after the fact.
                 if let Rvalue::Aggregate { ty, fields } = rvalue {
+                    // An array literal shares the node and not the code: the
+                    // destination is a one-word handle rather than storage the
+                    // caller already has, so the buffer has to be made first.
+                    if matches!(self.module.ty(*ty).map(|def| &def.kind), Some(TyKind::Array(_))) {
+                        return self.build_array(place, *ty, fields);
+                    }
                     return self.build_aggregate(place, *ty, fields);
                 }
                 if let Rvalue::MakeInterface {
@@ -656,6 +662,9 @@ impl<'a, 'm, M: ClifModule> FunctionTranslator<'a, 'm, M> {
                 self.call_runtime(RuntimeFn::StringFree, &[value])?;
                 Ok(())
             }
+            // Every element, then the buffer. Unlike a `FixedArray` the array's
+            // storage *is* its own to reclaim: it came from the allocator.
+            TyKind::Array(_) => self.destroy_array(ty, value),
             // Every element, in reverse. The array's own storage is its
             // parent's to reclaim; an inline value is never handed back to the
             // allocator on its own (REWRITE-PLAN §4.2).
@@ -912,6 +921,9 @@ impl<'a, 'm, M: ClifModule> FunctionTranslator<'a, 'm, M> {
             TyKind::Str => self
                 .call_runtime(RuntimeFn::StringClone, &[value])?
                 .ok_or_else(|| InternalError::new("`gf_string_clone` returned nothing")),
+            // A deep copy, as `std::vector`'s copy constructor is: a fresh
+            // buffer, and every element copied with its own operation.
+            TyKind::Array(_) => self.clone_array(ty, value),
             // An aggregate is copied *into* a destination rather than copied to
             // a value, so this hands back the address and lets `write_place`
             // do the field-wise work. `memcpy` here would shallow-copy every
@@ -1252,10 +1264,9 @@ impl<'a, 'm, M: ClifModule> FunctionTranslator<'a, 'm, M> {
                             InternalError::new(format!("field {} is missing", field.0))
                         })?;
                 }
-                (
-                    Projection::ConstIndex(index),
-                    TyKind::FixedArray { element, .. } | TyKind::Array(element),
-                ) => {
+                // A `FixedArray` **is** the bytes, so an element is an offset
+                // from the array's own address and nothing is loaded.
+                (Projection::ConstIndex(index), TyKind::FixedArray { element, .. }) => {
                     let stride = self.layouts.layout(*element)?.stride();
                     offset += stride * (*index as u32);
                     ty = *element;
@@ -1263,9 +1274,15 @@ impl<'a, 'm, M: ClifModule> FunctionTranslator<'a, 'm, M> {
                 // `p[i]` is `*(p + i)`, as in C: load the pointer, then scale.
                 // A pointer to one `T` and a pointer to the first of many are
                 // the same thing here, exactly as they are in C.
+                //
+                // A `T[]` belongs here and not above because it is a *handle*:
+                // the local holds the address of the elements, not the elements
+                // themselves. Folding the offset into the local's own address
+                // instead would read the handle as element zero — the same
+                // shape of mistake as dereferencing one level short.
                 (
                     Projection::Index(_) | Projection::ConstIndex(_),
-                    TyKind::Pointer(element) | TyKind::Reference(element),
+                    TyKind::Pointer(element) | TyKind::Reference(element) | TyKind::Array(element),
                 ) => {
                     let element = *element;
                     let stride = self.layouts.layout(element)?.stride();
@@ -1291,10 +1308,9 @@ impl<'a, 'm, M: ClifModule> FunctionTranslator<'a, 'm, M> {
                     offset = 0;
                     ty = element;
                 }
-                (
-                    Projection::Index(local),
-                    TyKind::FixedArray { element, .. } | TyKind::Array(element),
-                ) => {
+                // `Array` is not here: it is a handle, and the arm above walks
+                // through it. Only a `FixedArray` is the bytes themselves.
+                (Projection::Index(local), TyKind::FixedArray { element, .. }) => {
                     let stride = self.layouts.layout(*element)?.stride();
                     let raw = self.read_raw(&Place::local(*local))?;
                     let widened = self.widen_to_pointer(raw)?;
@@ -1346,6 +1362,205 @@ impl<'a, 'm, M: ClifModule> FunctionTranslator<'a, 'm, M> {
             /* non_overlapping */ true,
             MemFlagsData::trusted(),
         );
+    }
+
+    // -- `T[]` --------------------------------------------------------------
+    //
+    // An array's buffer belongs to the runtime and its *elements* belong here,
+    // because only the backend knows an element's copy and drop operations.
+    // That split is why the loops below exist rather than a pair of runtime
+    // calls: `gf_array_free` releases bytes, and a `string[]` needs every
+    // string released first.
+    //
+    // These are the first loops the backend emits at run time. A `FixedArray`
+    // is unrolled instead, and can be, because its length is in its type; an
+    // array's length is a value, so the loop has to be real.
+
+    /// The element type of a `T[]`, with its stride and alignment as constants.
+    ///
+    /// Two widths of each: the runtime takes 64-bit counts on every target so
+    /// that a 32-bit build agrees with it about a large array, while address
+    /// arithmetic has to happen at pointer width.
+    fn array_element(&mut self, ty: TyId) -> Result<ArrayInfo> {
+        let Some(TyKind::Array(element)) = self.module.ty(ty).map(|def| def.kind.clone()) else {
+            internal_error!("an array operation on something that is not an array");
+        };
+        let layout = self.layouts.layout(element)?;
+        let pointer = self.target.pointer_type();
+        Ok(ArrayInfo {
+            element,
+            stride_call: self.builder.ins().iconst(types::I64, i64::from(layout.stride())),
+            align_call: self.builder.ins().iconst(types::I64, i64::from(layout.align)),
+            stride_addr: self.builder.ins().iconst(pointer, i64::from(layout.stride())),
+        })
+    }
+
+    /// `gf_array_len`, widened to the 64 bits the runtime's counts use.
+    fn array_len(&mut self, value: Value) -> Result<(Value, Value)> {
+        let len = self
+            .call_runtime(RuntimeFn::ArrayLen, &[value])?
+            .ok_or_else(|| InternalError::new("`gf_array_len` returned nothing"))?;
+        let pointer = self.target.pointer_type();
+        let widened = if pointer == types::I64 {
+            len
+        } else {
+            self.builder.ins().uextend(types::I64, len)
+        };
+        Ok((len, widened))
+    }
+
+    /// The copy operation for `T[]`: a fresh buffer, then every element copied
+    /// with *its* copy operation.
+    ///
+    /// Value semantics, as `std::vector`'s copy constructor has. A byte copy of
+    /// the buffer would be right for `i32[]` and a double free for `string[]`,
+    /// which is the same trap `copy_aggregate` exists to avoid for structs — so
+    /// the fast path is taken from the element's category, never from how the
+    /// array was built.
+    fn clone_array(&mut self, ty: TyId, value: Value) -> Result<Value> {
+        let info = self.array_element(ty)?;
+        let (len, len64) = self.array_len(value)?;
+        let fresh = self
+            .call_runtime(RuntimeFn::ArrayNew, &[len64, info.stride_call, info.align_call])?
+            .ok_or_else(|| InternalError::new("`gf_array_new` returned nothing"))?;
+
+        if !self.category(info.element)?.needs_drop() {
+            // Nothing inside owns anything, so the bytes are the whole value.
+            let bytes = self.builder.ins().imul(len, info.stride_addr);
+            let config = self.frontend_config;
+            self.builder.call_memcpy(config, fresh, value, bytes);
+            return Ok(fresh);
+        }
+
+        let pointer = self.target.pointer_type();
+        let index = self.builder.declare_var(pointer);
+        let zero = self.builder.ins().iconst(pointer, 0);
+        self.builder.def_var(index, zero);
+
+        let header = self.builder.create_block();
+        let body = self.builder.create_block();
+        let exit = self.builder.create_block();
+
+        self.builder.ins().jump(header, &[]);
+        self.builder.switch_to_block(header);
+        let i = self.builder.use_var(index);
+        let more = self.builder.ins().icmp(IntCC::UnsignedLessThan, i, len);
+        self.builder.ins().brif(more, body, &[], exit, &[]);
+
+        self.builder.switch_to_block(body);
+        let i = self.builder.use_var(index);
+        let offset = self.builder.ins().imul(i, info.stride_addr);
+        let src = self.builder.ins().iadd(value, offset);
+        let dest = self.builder.ins().iadd(fresh, offset);
+        if matches!(self.layouts.repr(info.element)?, Repr::Aggregate) {
+            self.copy_aggregate(dest, src, info.element)?;
+        } else {
+            let element = self.field_value(src, 0, info.element)?;
+            let copied = self.copy_of(info.element, element)?;
+            self.builder
+                .ins()
+                .store(MemFlagsData::trusted(), copied, dest, 0);
+        }
+        let i = self.builder.use_var(index);
+        let one = self.builder.ins().iconst(pointer, 1);
+        let next = self.builder.ins().iadd(i, one);
+        self.builder.def_var(index, next);
+        self.builder.ins().jump(header, &[]);
+
+        self.builder.switch_to_block(exit);
+        Ok(fresh)
+    }
+
+    /// The destroy operation for `T[]`: every element, then the buffer.
+    ///
+    /// Reverse order, because destruction is construction backwards — the same
+    /// rule a struct's fields and a `FixedArray`'s elements already follow. The
+    /// buffer goes back last, so an element's destructor is still reading live
+    /// memory when it runs.
+    fn destroy_array(&mut self, ty: TyId, value: Value) -> Result<()> {
+        let info = self.array_element(ty)?;
+
+        if self.category(info.element)?.needs_drop() {
+            let (len, _) = self.array_len(value)?;
+            let pointer = self.target.pointer_type();
+            let index = self.builder.declare_var(pointer);
+            self.builder.def_var(index, len);
+
+            let header = self.builder.create_block();
+            let body = self.builder.create_block();
+            let exit = self.builder.create_block();
+
+            self.builder.ins().jump(header, &[]);
+            self.builder.switch_to_block(header);
+            let i = self.builder.use_var(index);
+            let zero = self.builder.ins().iconst(pointer, 0);
+            let more = self.builder.ins().icmp(IntCC::UnsignedGreaterThan, i, zero);
+            self.builder.ins().brif(more, body, &[], exit, &[]);
+
+            // Counting down, so the index is decremented *before* it is used
+            // and the last element is the first destroyed.
+            self.builder.switch_to_block(body);
+            let i = self.builder.use_var(index);
+            let one = self.builder.ins().iconst(pointer, 1);
+            let at = self.builder.ins().isub(i, one);
+            self.builder.def_var(index, at);
+            let offset = self.builder.ins().imul(at, info.stride_addr);
+            let slot = self.builder.ins().iadd(value, offset);
+            let element = self.field_value(slot, 0, info.element)?;
+            self.destroy(info.element, element)?;
+            self.builder.ins().jump(header, &[]);
+
+            self.builder.switch_to_block(exit);
+        }
+
+        self.call_runtime(
+            RuntimeFn::ArrayFree,
+            &[value, info.stride_call, info.align_call],
+        )?;
+        Ok(())
+    }
+
+    /// `[a, b, c]` — a buffer of exactly the right size, then the elements.
+    ///
+    /// Built into a destination like any other aggregate literal, and for the
+    /// same reason: an element may itself be an aggregate, which has nowhere to
+    /// live as a single value.
+    fn build_array(&mut self, place: &Place, ty: TyId, elements: &[Operand]) -> Result<()> {
+        let info = self.array_element(ty)?;
+        let count = self
+            .builder
+            .ins()
+            .iconst(types::I64, elements.len() as i64);
+        let array = self
+            .call_runtime(RuntimeFn::ArrayNew, &[count, info.stride_call, info.align_call])?
+            .ok_or_else(|| InternalError::new("`gf_array_new` returned nothing"))?;
+
+        let stride = self.layouts.layout(info.element)?.stride();
+        for (index, operand) in elements.iter().enumerate() {
+            let Some(value) = self.operand(operand)? else {
+                continue;
+            };
+            let at = stride * (index as u32);
+            let element_ty = self.operand_type(operand)?;
+            if matches!(self.layouts.repr(element_ty)?, Repr::Aggregate) {
+                let offset = self.builder.ins().iconst(self.target.pointer_type(), i64::from(at));
+                let dest = self.builder.ins().iadd(array, offset);
+                if matches!(operand, Operand::Move(_)) {
+                    let layout = self.layouts.layout(element_ty)?;
+                    self.copy_bytes(dest, value, layout.size, layout.align);
+                } else {
+                    self.copy_aggregate(dest, value, element_ty)?;
+                }
+            } else {
+                self.builder
+                    .ins()
+                    .store(MemFlagsData::trusted(), value, array, at as i32);
+            }
+        }
+
+        // The handle is a move into the place: the buffer was made here and
+        // there is exactly one of it.
+        self.write_place_with(place, Some(array), true)
     }
 
     // -- rvalues ------------------------------------------------------------
@@ -1464,6 +1679,32 @@ impl<'a, 'm, M: ClifModule> FunctionTranslator<'a, 'm, M> {
             Rvalue::Aggregate { .. } => {
                 internal_error!("an aggregate literal outside an `Init`")
             }
+            // `push`, minus the store. The handle is passed **by address**
+            // because growing reallocates, so the caller's variable is reseated
+            // by the call rather than by anything emitted here.
+            Rvalue::ArrayPushSlot(place) => {
+                let ty = self.place_type(place)?;
+                let info = self.array_element(ty)?;
+                let (address, offset) = self.place_address(place)?;
+                let handle = if offset == 0 {
+                    address
+                } else {
+                    let delta = self
+                        .builder
+                        .ins()
+                        .iconst(self.target.pointer_type(), i64::from(offset));
+                    self.builder.ins().iadd(address, delta)
+                };
+                Some(
+                    self.call_runtime(
+                        RuntimeFn::ArrayPushSlot,
+                        &[handle, info.stride_call, info.align_call],
+                    )?
+                    .ok_or_else(|| {
+                        InternalError::new("`gf_array_push_slot` returned nothing")
+                    })?,
+                )
+            }
             // The class half of `tryCast`, and unlike the interface half this
             // one *is* an ordinary value: a `Reference<C>` is one word, so the
             // result is the object's address or null, with no pair to build.
@@ -1535,6 +1776,13 @@ impl<'a, 'm, M: ClifModule> FunctionTranslator<'a, 'm, M> {
                     Some(TyKind::CStr) => Some(
                         self.call_runtime(RuntimeFn::CStrLen, &[value])?
                             .ok_or_else(|| InternalError::new("`gf_cstr_len` returned nothing"))?,
+                    ),
+                    // A load, like a string's, and for the same reason: the
+                    // count is in a header behind the pointer rather than found
+                    // by looking.
+                    Some(TyKind::Array(_)) => Some(
+                        self.call_runtime(RuntimeFn::ArrayLen, &[value])?
+                            .ok_or_else(|| InternalError::new("`gf_array_len` returned nothing"))?,
                     ),
                     _ => internal_error!("`length` is not defined on this type"),
                 }
@@ -2190,12 +2438,28 @@ fn rvalue_places(rvalue: &Rvalue) -> Vec<&Place> {
         | Rvalue::MakeInterface { source: place, .. }
         | Rvalue::TryInterface { source: place, .. }
         | Rvalue::TryClass { source: place, .. }
+        | Rvalue::ArrayPushSlot(place)
         | Rvalue::InterfaceIsNull(place) => vec![place],
         // `Ref` and `AddrOf` are handled by the caller, which inserts them
         // unconditionally — taking the address of a bare local needs a slot
         // even though there is no projection to notice.
         _ => Vec::new(),
     }
+}
+
+/// An array's element type and the two constants every operation on one needs.
+///
+/// Two widths of each, deliberately: the runtime's counts are 64-bit on every
+/// target so that a 32-bit build agrees with it about a large array, while
+/// address arithmetic has to happen at pointer width.
+struct ArrayInfo {
+    element: TyId,
+    /// Stride, for a runtime call.
+    stride_call: Value,
+    /// Alignment, for a runtime call.
+    align_call: Value,
+    /// Stride, for `base + i * stride`.
+    stride_addr: Value,
 }
 
 /// Whether parameter `index` (1-based, as locals are numbered) arrives packed
@@ -2220,7 +2484,13 @@ fn addressed_locals(func: &Function) -> std::collections::HashSet<LocalId> {
                 Statement::Init { place, rvalue } | Statement::Assign { place, rvalue } => {
                     note(&mut set, place);
                     match rvalue {
-                        Rvalue::Ref(inner) | Rvalue::AddrOf(inner) => {
+                        // `ArrayPushSlot` is here because growing reallocates:
+                        // the runtime writes the new buffer back through the
+                        // handle's address, so the handle cannot live only in a
+                        // register.
+                        Rvalue::Ref(inner)
+                        | Rvalue::AddrOf(inner)
+                        | Rvalue::ArrayPushSlot(inner) => {
                             set.insert(inner.local);
                         }
                         _ => {}
@@ -2238,12 +2508,27 @@ fn addressed_locals(func: &Function) -> std::collections::HashSet<LocalId> {
                 _ => {}
             }
         }
+        // A call's **arguments** as well as its destination. An argument that
+        // is a projected place needs an address exactly as one in a statement
+        // does, and missing it leaves the local in a register for a projection
+        // to walk into — which is a panic in `place_address` rather than a
+        // wrong answer, but only because that path checks.
+        //
+        // Reachable first through `T[]`: `console.log(xs[0])` hands the element
+        // straight to the runtime, where other types materialise a temporary on
+        // the way and get noticed by the statement scan above.
         if let Terminator::Call {
-            destination: Some(dest),
-            ..
+            args, destination, ..
         } = &block.terminator
         {
-            note(&mut set, &dest.place);
+            if let Some(dest) = destination {
+                note(&mut set, &dest.place);
+            }
+            for operand in args {
+                if let Operand::Copy(p) | Operand::Move(p) | Operand::Borrow(p) = operand {
+                    note(&mut set, p);
+                }
+            }
         }
     }
     set
@@ -2259,6 +2544,10 @@ fn rvalue_operands(rvalue: &Rvalue) -> Vec<&Operand> {
         | Rvalue::Ref(_)
         | Rvalue::AddrOf(_)
         | Rvalue::Len(_)
+        // The array is a place too: `push` grows it and reseats the handle,
+        // and the *element* is stored afterwards through the pointer this
+        // produces, so there is no operand here either.
+        | Rvalue::ArrayPushSlot(_)
         // `source` is a place, not an operand: building a `Reference<I>` takes
         // the object's *address* and never reads it.
         | Rvalue::MakeInterface { .. }

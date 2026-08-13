@@ -202,21 +202,20 @@ describe("what fixed arrays are not", () => {
     expect(errorCodes(result)).toContain("TS2339");
   });
 
-  test("`T[]` is declared but not implemented yet", async () => {
-    // It is the language's `std::vector`, and it is honest about not being
-    // here rather than half-present.
-    const diagnostic = await expectRejected(
-      "array-vector",
-      `function takesVector(xs: i32[]): i32 { return 0; }
-
-       export function main(): i32 {
+  test("`T[]` is a different type, and the two do not convert", async () => {
+    // Both are arrays and neither is the other: a `FixedArray` *is* its
+    // elements and allocates nothing, a `T[]` is a handle to a heap buffer it
+    // owns. tsc keeps them apart, which is where a user meets the distinction.
+    const { result } = await compileSource(
+      "array-fixed-vs-vector",
+      `export function main(): i32 {
+         const fixed: FixedArray<i32, 2> = fixedArray(2, 0);
+         const heap: i32[] = fixed;
          return 0;
        }\n`,
-      "GF0001",
     );
-    // And it says what to use instead, rather than just refusing.
-    expect(diagnostic.message).toContain("FixedArray");
-    expect(diagnostic.message).toContain("allocArray");
+    expect(result.ok).toBe(false);
+    expect(errorCodes(result).some((code) => code.startsWith("TS"))).toBe(true);
   });
 });
 

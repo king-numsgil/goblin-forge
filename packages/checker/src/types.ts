@@ -246,6 +246,15 @@ export function erase(checker: ts.TypeChecker, type: ts.Type): MachineType {
     // erases to the `(itab, data)` pair rather than to a reference-to-something.
     const referent = referentOf(checker, type);
     if (referent !== null) {
+      // Before `contractOf`, which would look at `Array<T>`'s declaration and
+      // see an interface holding both methods and a data member — the shape
+      // that is rejected as ambiguous. `Array` is neither a shape nor a
+      // contract; it is a built-in with its own representation, and the same
+      // early check `erase` makes for a bare `T[]` has to happen here too.
+      if (checker.isArrayType(referent)) {
+        return { kind: "reference", referent: erase(checker, referent) };
+      }
+
       const contract = contractOf(checker, referent);
       if (contract !== null) return contract;
       // `Reference<C>` for a class: one machine word holding the object's
@@ -272,18 +281,19 @@ export function erase(checker: ts.TypeChecker, type: ts.Type): MachineType {
     );
   }
 
-  // `T[]` is declared in the prelude and is the language's `std::vector` — an
-  // owning, runtime-length array. It is not implemented, and saying so is the
-  // point: without this it falls through to struct erasure and becomes a
-  // nameless aggregate called `Array`, which is a confusing way to be told no.
+  // `T[]` and `Array<T>` are one type in TypeScript and one type here: the
+  // language's `std::vector`. An owning, growable handle whose elements live
+  // inline in a single heap buffer.
+  //
+  // Checked before the general object path, which would otherwise erase it to a
+  // nameless aggregate called `Array` and lay the *interface's* members out as
+  // fields.
   if (checker.isArrayType(type)) {
-    throw new ErasureError(
-      "`T[]` is not implemented yet. It is the owning, runtime-length array — " +
-        "the `std::vector` of this language. For a length known at compile time " +
-        "use `FixedArray<T, N>`, which allocates nothing; for a runtime length " +
-        "use `allocArray<T>(n)` and release it with `freeArray()`.",
-      "GF0001",
-    );
+    const element = checker.getIndexTypeOfType(type, ts.IndexKind.Number);
+    if (element === undefined) {
+      throw new ErasureError("this array has no element type.", "GF0001");
+    }
+    return { kind: "array", element: erase(checker, element) };
   }
 
   if (flags & ts.TypeFlags.Object) return eraseObject(checker, type);

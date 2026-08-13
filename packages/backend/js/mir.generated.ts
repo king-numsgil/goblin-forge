@@ -10,10 +10,10 @@
 // module, which is the failure mode this whole arrangement exists to remove.
 
 /** Fingerprint of the wire format these bindings were generated from. */
-export const SCHEMA_FINGERPRINT = 0x233763f00c8f26d2n;
+export const SCHEMA_FINGERPRINT = 0x4a604933e6cf95d1n;
 
 /** The same value as hex, for comparing against the addon's report. */
-export const SCHEMA_FINGERPRINT_HEX = "233763f00c8f26d2";
+export const SCHEMA_FINGERPRINT_HEX = "4a604933e6cf95d1";
 
 // ---------------------------------------------------------------------------
 // postcard writer
@@ -402,6 +402,7 @@ export type Rvalue =
   | { kind: "TryInterface"; interface: InterfaceId; source: Place }
   | { kind: "TryClass"; class: ClassId; source: Place }
   | { kind: "InterfaceIsNull"; value: Place }
+  | { kind: "ArrayPushSlot"; value: Place }
 ;
 
 export type BlockId = number & { readonly [GfIdBrand]: "BlockId" };
@@ -1000,6 +1001,11 @@ export function writeRvalue(w: Writer, v: Rvalue): void {
     }
     case "InterfaceIsNull": {
       w.varint(12);
+      writePlace(w, v.value);
+      break;
+    }
+    case "ArrayPushSlot": {
+      w.varint(13);
       writePlace(w, v.value);
       break;
     }

@@ -103,22 +103,68 @@ declare function fixedArray<T, N extends number>(length: N, fill: T): FixedArray
  * shape a string has. One machine word, `length` is a load, and the pointer is
  * a plain `T*` as far as a native function is concerned.
  *
+ * This is the language's `std::vector`: owning, growable, and a **value**.
+ *
+ *     const xs: i32[] = [1, 2, 3];
+ *     xs.push(4);
+ *     xs[0] = 9;
+ *     const ys = xs;        // a copy — a second buffer, not a second name
+ *     const last = xs.pop();
+ *
  * Elements are stored **inline**: an element occupies its own stride, not a
  * pointer to itself. That is what makes the bytes match what a C compiler
  * produces for the same declaration, and it is not negotiable.
  *
- * **Not implemented yet.** This is the language's `std::vector`: an owning,
- * runtime-length array. Until it lands, a fixed length is `FixedArray<T, N>`
- * and a runtime length is `allocArray` and a `Pointer<T>`.
+ * `T[]` and `Array<T>` are the same type, as they are in TypeScript.
  *
- * Indexing is unchecked, like every other memory access here.
+ * Copying one copies every element with that element's own copy operation, so
+ * a `string[]` deep-copies its strings and an `i32[]` is a single `memcpy`.
+ * That is `std::vector`'s copy constructor, and the reason passing one to a
+ * function costs an allocation — take a `Reference<T[]>` where it should not.
+ *
+ * An empty array holds no buffer and allocates nothing, exactly as an empty
+ * `std::vector` does. Growth is amortised: the buffer doubles, from a floor of
+ * four, so a loop of `push` is linear.
+ *
+ * Indexing is unchecked, like every other memory access here, and `length` is
+ * a `usize` — so a loop counter has to be one too, or converted with
+ * `nativeCast<usize>(…)`.
  *
  * An array is released when its binding leaves scope, and it releases its
  * elements first if the element type owns anything.
  */
 interface Array<T> {
+  /** Element count. A load from the header, not a scan. */
   readonly length: usize;
-  readonly [index: number]: T;
+  /**
+   * Mutable, unlike `length`: `xs[0] = 1` is the point of the type. A
+   * `readonly` index signature is what TypeScript's own `ReadonlyArray` has,
+   * and it would make this a different container.
+   */
+  [index: number]: T;
+
+  /**
+   * Append one element, growing the buffer if it is full.
+   *
+   * The element is **copied** in, by the same rule every other assignment
+   * follows — so pushing a `string` allocates a second one. `push(move(s))`
+   * hands the buffer over instead.
+   *
+   * Growing reallocates, which moves the elements. Anything holding a
+   * `Pointer<T>` into this array is dangling afterwards, exactly as it is with
+   * `std::vector::push_back`.
+   */
+  push(value: T): void;
+
+  /**
+   * Remove the last element and hand it back.
+   *
+   * A move, not a copy: the element is leaving the array. The buffer is kept,
+   * as `std::vector::pop_back` keeps its capacity.
+   *
+   * Popping an empty array is unchecked, like indexing one.
+   */
+  pop(): T;
 }
 
 /**

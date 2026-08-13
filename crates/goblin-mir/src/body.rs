@@ -303,6 +303,20 @@ pub enum Rvalue {
     /// keeps `Reference<I> | null` from needing a null *constant* to compare
     /// against — there is no such value, only a zero itab.
     InterfaceIsNull(Place),
+    /// Grow a `T[]` by one and produce a `Pointer<T>` to the new last slot.
+    ///
+    /// This is `push` split in two, and the split is why it is an rvalue rather
+    /// than a statement carrying the value. Making room is the *runtime's* job
+    /// and needs the element's stride and alignment, which only the backend
+    /// knows; storing the element is an ordinary `Init` through the returned
+    /// pointer, which means it goes through the same copy and move machinery as
+    /// every other write in the language. A statement holding an operand would
+    /// have had to reimplement that, and would have been the one place an
+    /// element's copy operation could quietly go missing.
+    ///
+    /// `place` is the array itself, and it is **reseated**: growing reallocates,
+    /// so the handle the caller holds is written back through.
+    ArrayPushSlot(Place),
 }
 
 /// What happens if a call unwinds out of this point.

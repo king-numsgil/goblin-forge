@@ -258,6 +258,8 @@ function rvalue(module: Module, value: Rvalue): string {
       )})`;
     case "InterfaceIsNull":
       return `isNull(${place(value.value)})`;
+    case "ArrayPushSlot":
+      return `push_slot(${place(value.value)})`;
     case "MakeInterface":
       return `(${sym(module, module.interfaces[value.interface]?.name ?? 0)}) ${place(
         value.source,

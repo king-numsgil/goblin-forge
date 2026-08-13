@@ -246,6 +246,186 @@ pub unsafe extern "C" fn gf_string_free(s: GfStr) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// `T[]`
+//
+// The same shape as a string, and deliberately: one machine word pointing at
+// the first element, with a header behind it.
+//
+//   [ len: u64 ][ cap: u64 ][ elem0 ][ elem1 ] …
+//                           ^ the `T[]` value points here
+//
+// Elements are stored **inline** — an element occupies its own stride, not a
+// pointer to itself — which is what makes the bytes match what a C compiler
+// produces for the same declaration, and what lets the backend address element
+// `i` as `base + i * stride`.
+//
+// The runtime owns the buffer and the bookkeeping, and nothing else. Per-element
+// construction and destruction belong to the *backend*, because only it knows an
+// element's copy and drop operations — the same split that makes a struct
+// holding a `string` work. So `gf_array_free` releases the buffer and never
+// looks inside it: whoever calls it has already destroyed the elements.
+//
+// Stride and alignment are passed in at each call rather than stored, because
+// the backend knows both as compile-time constants. That keeps the header two
+// words, exactly like a string's.
+// ---------------------------------------------------------------------------
+
+/// A `T[]`: a pointer to the first element, with an [`ArrayHeader`] behind it.
+pub type GfArray = *mut u8;
+
+#[repr(C)]
+struct ArrayHeader {
+    len: u64,
+    /// Elements the buffer has room for. **Zero means static**: the shared
+    /// empty array below, which is not the allocator's and must not go back to
+    /// it. That is the same trick a string literal plays with `owned = 0`, and
+    /// it buys the same thing — `[]` allocates nothing, as an empty
+    /// `std::vector` does not, so an allocation trace can be compared with C++.
+    cap: u64,
+}
+
+const ARRAY_HEADER: usize = core::mem::size_of::<ArrayHeader>();
+
+/// The empty array every `[]` points at, and the reason one costs nothing.
+///
+/// `cap = 0`, so pushing onto it allocates a fresh buffer and freeing it is a
+/// no-op. Sharing one between every empty array in the program is safe because
+/// nothing can be written through it: there is no element zero to write.
+static EMPTY_ARRAY: ArrayHeader = ArrayHeader { len: 0, cap: 0 };
+
+unsafe fn array_header(a: GfArray) -> *mut ArrayHeader {
+    unsafe { a.sub(ARRAY_HEADER) as *mut ArrayHeader }
+}
+
+fn array_layout(cap: u64, stride: u64, align: u64) -> Layout {
+    let size = ARRAY_HEADER + (cap as usize) * (stride as usize);
+    // The header is two words, so it is a multiple of every alignment an
+    // element can have — which is what keeps the first element correctly
+    // aligned while the header sits immediately in front of it.
+    let align = (align as usize).max(ALIGN);
+    Layout::from_size_align(size, align).expect("array layout")
+}
+
+/// The shared empty array. Allocates nothing.
+#[unsafe(no_mangle)]
+pub extern "C" fn gf_array_empty() -> GfArray {
+    install_reporter();
+    unsafe { (&EMPTY_ARRAY as *const ArrayHeader as *mut u8).add(ARRAY_HEADER) }
+}
+
+/// Storage for `len` elements, with `len` already set and the elements
+/// **uninitialised** — the caller fills them, applying each one's own copy.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gf_array_new(len: u64, stride: u64, align: u64) -> GfArray {
+    if len == 0 {
+        return gf_array_empty();
+    }
+    install_reporter();
+    let raw = unsafe { alloc(array_layout(len, stride, align)) };
+    if raw.is_null() {
+        std::process::abort();
+    }
+    unsafe {
+        (raw as *mut ArrayHeader).write(ArrayHeader { len, cap: len });
+        LIVE.fetch_add(1, Ordering::SeqCst);
+        trace("alloc");
+        raw.add(ARRAY_HEADER)
+    }
+}
+
+/// The element count, in O(1).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gf_array_len(a: GfArray) -> usize {
+    if a.is_null() {
+        return 0;
+    }
+    unsafe { (*array_header(a)).len as usize }
+}
+
+/// Make room for one more element and hand back the address of it.
+///
+/// `slot` is the address of the *handle*, not the handle: growing reallocates,
+/// which moves the buffer, so the caller's variable has to be reseated. The
+/// element itself is stored by the backend through the returned address, so
+/// that `push` copies or moves according to the element's own type.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gf_array_push_slot(
+    slot: *mut GfArray,
+    stride: u64,
+    align: u64,
+) -> *mut u8 {
+    unsafe {
+        let current = *slot;
+        let header = array_header(current);
+        let len = (*header).len;
+        let cap = (*header).cap;
+
+        if len == cap {
+            // Doubling, from a floor of four. Amortised constant, and the same
+            // growth strategy every `std::vector` implementation uses — the
+            // exponent is what makes a loop of pushes linear rather than
+            // quadratic.
+            let grown = if cap == 0 { 4 } else { cap * 2 };
+            let raw = alloc(array_layout(grown, stride, align));
+            if raw.is_null() {
+                std::process::abort();
+            }
+            (raw as *mut ArrayHeader).write(ArrayHeader { len, cap: grown });
+            let elements = raw.add(ARRAY_HEADER);
+            // A byte copy is right here and only here: the elements are being
+            // *relocated*, not duplicated. Each one keeps whatever it owns and
+            // there is exactly one of it afterwards, so no copy operation runs
+            // and nothing is freed twice.
+            core::ptr::copy_nonoverlapping(current, elements, (len * stride) as usize);
+            LIVE.fetch_add(1, Ordering::SeqCst);
+            trace("alloc");
+            if cap != 0 {
+                LIVE.fetch_sub(1, Ordering::SeqCst);
+                dealloc(header as *mut u8, array_layout(cap, stride, align));
+                trace("free");
+            }
+            *slot = elements;
+        }
+
+        let base = *slot;
+        (*array_header(base)).len = len + 1;
+        base.add((len * stride) as usize)
+    }
+}
+
+/// Drop the last element's *slot*, after the backend has destroyed it.
+///
+/// The buffer is kept, exactly as `std::vector::pop_back` keeps its capacity.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gf_array_pop(a: GfArray) {
+    unsafe {
+        let header = array_header(a);
+        if (*header).len != 0 {
+            (*header).len -= 1;
+        }
+    }
+}
+
+/// Release the buffer. The elements are the backend's to destroy first.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gf_array_free(a: GfArray, stride: u64, align: u64) {
+    if a.is_null() {
+        return;
+    }
+    unsafe {
+        let header = array_header(a);
+        let cap = (*header).cap;
+        // Static, so there is nothing to give back — the empty array.
+        if cap == 0 {
+            return;
+        }
+        LIVE.fetch_sub(1, Ordering::SeqCst);
+        dealloc(header as *mut u8, array_layout(cap, stride, align));
+        trace("free");
+    }
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gf_string_concat(a: GfStr, b: GfStr) -> GfStr {
     unsafe {

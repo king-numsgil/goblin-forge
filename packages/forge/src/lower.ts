@@ -134,6 +134,13 @@ const RUNTIME = {
   fromF64: "gf_string_from_f64",
   fromBool: "gf_string_from_bool",
   stringFree: "gf_string_free",
+  /**
+   * `gf_array_pop(a)` — forget the last element, after it has been taken.
+   *
+   * The one array operation with no node of its own: shortening needs neither
+   * a stride nor an alignment, so the frontend can name it directly.
+   */
+  arrayPop: "gf_array_pop",
 } as const;
 
 /** `console` methods, and which stream each writes to. */
@@ -658,6 +665,25 @@ class Lowerer {
    * can use it to decide *whether* a construct is about a class before
    * committing to lowering it as one.
    */
+  /**
+   * The element type, when this expression is a `T[]` or a reference to one.
+   *
+   * A *probe*: it answers `undefined` rather than reporting, because the caller
+   * is deciding whether a property access is an array call at all and most of
+   * them are not.
+   */
+  arrayElementAt(expression: ts.Expression): MachineType | undefined {
+    const type = this.#checker.getTypeAtLocation(expression);
+    const candidates = type.isIntersection() ? type.types : [type];
+    for (const part of candidates) {
+      if (!this.#checker.isArrayType(part)) continue;
+      const element = this.#checker.getIndexTypeOfType(part, ts.IndexKind.Number);
+      if (element === undefined) continue;
+      return this.erase(expression, element);
+    }
+    return undefined;
+  }
+
   classNameAt(expression: ts.Expression): string | undefined {
     const type = this.#checker.getTypeAtLocation(expression);
     const direct = classNameOf(type);
@@ -1343,6 +1369,8 @@ class Lowerer {
           element: this.tyOf(type.element, at),
           length: BigInt(type.length),
         });
+      case "array":
+        return this.#mir.ty({ kind: "Array", value: this.tyOf(type.element, at) });
       case "scalar":
         if (type.name === "f32" || type.name === "f64") {
           return this.#mir.ty({
@@ -2609,6 +2637,25 @@ class BodyLowerer {
       return typed({ kind: "class", name });
     }
 
+    // `[a, b, c]` — the type comes from tsc, not from the elements, because
+    // `[]` has no element to ask and the annotation is what says what it is.
+    if (ts.isArrayLiteralExpression(expression)) {
+      const type = this.#outer.erase(
+        expression,
+        this.#outer.checker.getContextualType(expression) ??
+          this.#outer.checker.getTypeAtLocation(expression),
+      );
+      if (type === undefined) return ERROR;
+      if (type.kind !== "array") {
+        this.#outer.unsupported(expression, `an array literal of \`${renderType(type)}\``);
+        return ERROR;
+      }
+      for (const element of expression.elements) {
+        if (this.width(element).kind === "error") return ERROR;
+      }
+      return typed(type);
+    }
+
     if (ts.isCallExpression(expression)) return this.#callWidth(expression);
     if (ts.isBinaryExpression(expression)) return this.#binaryWidth(expression);
 
@@ -2650,7 +2697,9 @@ class BodyLowerer {
       return ERROR;
     }
 
-    if (subject.type.kind === "array" || subject.type.kind === "fixedArray") {
+    const array =
+      subject.type.kind === "reference" ? subject.type.referent : subject.type;
+    if (array.kind === "array" || array.kind === "fixedArray") {
       if (expression.name.text === "length") return typed(USIZE);
       this.#outer.unsupported(expression, `\`${expression.name.text}\` on an array`);
       return ERROR;
@@ -2677,7 +2726,9 @@ class BodyLowerer {
       this.#outer.unsupported(expression, "indexing this");
       return ERROR;
     }
-    const element = elementTypeOf(subject.type);
+    const through =
+      subject.type.kind === "reference" ? subject.type.referent : subject.type;
+    const element = elementTypeOf(through);
     if (element === undefined) {
       this.#outer.unsupported(
         expression,
@@ -2692,6 +2743,48 @@ class BodyLowerer {
   /** The index of a field in its struct, which is its position in the layout. */
   #fieldIndex(type: Extract<MachineType, { kind: "struct" }>, name: string): number {
     return type.fields.findIndex((field) => field.name === name);
+  }
+
+  /**
+   * Whether `xs.m(…)` is a call on a `T[]`, and what `T` is.
+   *
+   * Asked of **tsc**, never of the width pass, for the reason the method-call
+   * path already documents about `console`: the width pass *reports*, so
+   * running it over a receiver that turns out not to be an array raises a
+   * diagnostic about a name before anything has decided this was not an array
+   * call at all. `console.log` is a property access too.
+   */
+  #arrayElementAt(access: ts.PropertyAccessExpression): MachineType | undefined {
+    return this.#outer.arrayElementAt(access.expression);
+  }
+
+  /**
+   * The array a value denotes, seeing through one `Reference<T[]>`.
+   *
+   * The same job `#asClass` does for objects, and it exists for the same
+   * reason: a reference is the *address of the handle*, so reaching the
+   * elements is one `Deref` further down than it is from the array itself.
+   * Nothing is ever retyped — the projection says which indirection is which.
+   */
+  #asArray(at: ts.Node, subject: Typed): { place: Place; element: MachineType } | undefined {
+    const type = subject.type;
+    const array =
+      type.kind === "array"
+        ? type
+        : type.kind === "reference" && type.referent.kind === "array"
+          ? type.referent
+          : undefined;
+    if (array === undefined) return undefined;
+
+    const place = this.#placeOfSubject(at, subject);
+    if (place === undefined) return undefined;
+    return {
+      place:
+        type.kind === "reference"
+          ? { local: place.local, projection: [...place.projection, { kind: "Deref" }] }
+          : place,
+      element: array.element,
+    };
   }
 
   #callWidth(expression: ts.CallExpression): Width {
@@ -2775,6 +2868,28 @@ class BodyLowerer {
     expression: ts.CallExpression,
     access: ts.PropertyAccessExpression,
   ): Width | "not-a-method" {
+    // `xs.push(v)` and `xs.pop()`. Before the class and contract paths because
+    // an array is neither, and its two methods are the compiler's rather than
+    // any declaration's.
+    const element = this.#arrayElementAt(access);
+    if (element !== undefined) {
+      for (const argument of expression.arguments) {
+        if (this.width(argument).kind === "error") return ERROR;
+      }
+      switch (access.name.text) {
+        case "push":
+          return typed(VOID);
+        case "pop":
+          return typed(element);
+        default:
+          this.#outer.unsupported(
+            expression,
+            `\`${access.name.text}\` on a \`${renderType(element)}[]\``,
+          );
+          return ERROR;
+      }
+    }
+
     const contract = this.#contractAt(access.expression);
     if (contract !== undefined) {
       const method = contract.methods.find((m) => m.name === access.name.text);
@@ -2996,6 +3111,22 @@ class BodyLowerer {
     // whoever owned it and the pair is never destroyed.
     if (expected.kind === "interface" && value.type.kind === "class") {
       return this.#toInterface(at, value, expected);
+    }
+    // `xs` → `Reference<T[]>`: borrow the array rather than copy it. A borrow
+    // and not a conversion, so the buffer stays the caller's and no element is
+    // cloned — which is the whole reason to write the reference. Passing the
+    // array itself is `std::vector<T>` by value: correct, and a whole buffer.
+    if (
+      expected.kind === "reference" &&
+      expected.referent.kind === "array" &&
+      value.type.kind === "array"
+    ) {
+      const place = this.#placeOfSubject(at, value);
+      if (place === undefined) return undefined;
+      const operand = this.#refTo(at, place, value.type);
+      return value.temporary === undefined
+        ? { operand, type: expected }
+        : { operand, type: expected, borrowsTemporary: true };
     }
     if (expected.kind === "reference" && expected.referent.kind === "class") {
       return this.#toClassReference(at, value, expected.referent.name);
@@ -3225,6 +3356,9 @@ class BodyLowerer {
     if (ts.isPropertyAccessExpression(expression)) return this.#property(expression);
     if (ts.isObjectLiteralExpression(expression)) {
       return this.#objectLiteral(expression, natural);
+    }
+    if (ts.isArrayLiteralExpression(expression)) {
+      return this.#arrayLiteral(expression, natural);
     }
     if (ts.isElementAccessExpression(expression)) return this.#elementAccess(expression);
 
@@ -3537,6 +3671,168 @@ class BodyLowerer {
   }
 
   /**
+   * `[a, b, c]` — one heap buffer of exactly this length, elements inline.
+   *
+   * The same `Aggregate` node an object literal builds, because it is the same
+   * operation: a sequence of values written into storage in order. What differs
+   * is where the storage comes from, and the backend decides that from the type
+   * — a struct's is the destination the caller already has, an array's is
+   * allocated. Keeping one node means an element gets the same copy treatment a
+   * field does, without a second implementation to keep in step.
+   *
+   * `[]` is not a special case here and does not allocate: the runtime hands
+   * back a shared static empty, as an empty `std::vector` holds no buffer.
+   */
+  #arrayLiteral(
+    expression: ts.ArrayLiteralExpression,
+    natural: MachineType,
+  ): Typed | undefined {
+    if (natural.kind !== "array") {
+      this.#outer.error(
+        expression,
+        "GF0161",
+        `an array literal cannot be a \`${renderType(natural)}\`.`,
+      );
+      return undefined;
+    }
+
+    const values: Operand[] = [];
+    for (const element of expression.elements) {
+      if (ts.isSpreadElement(element)) {
+        this.#outer.unsupported(element, "a spread element in an array literal");
+        return undefined;
+      }
+      const value = this.#expressionTyped(element, natural.element);
+      if (value === undefined) return undefined;
+      values.push(this.#forStorage(value));
+    }
+
+    return this.#temporaryTyped(expression, natural, {
+      kind: "Aggregate",
+      ty: this.#outer.tyOf(natural, expression),
+      fields: values,
+    });
+  }
+
+  /**
+   * `xs.push(v)` — grow by one, then store the element into the new slot.
+   *
+   * Two steps because they belong to two halves of the compiler. Making room
+   * needs the element's stride and alignment, which only the backend knows, so
+   * it is `ArrayPushSlot`. Storing the element is an ordinary `Init` through the
+   * `Pointer<T>` that comes back — which means `push` copies or moves by exactly
+   * the same rules as every other write, and a `string[]` deep-copies its
+   * argument without this function knowing what a string is.
+   */
+  #arrayPush(
+    expression: ts.CallExpression,
+    array: Typed,
+    element: MachineType,
+  ): Typed | undefined {
+    const argument = expression.arguments[0];
+    if (expression.arguments.length !== 1 || argument === undefined) {
+      this.#outer.error(expression, "GF0002", "`push` takes exactly one element.");
+      return undefined;
+    }
+    const resolved = this.#asArray(expression, array);
+    if (resolved === undefined) return undefined;
+    const place = resolved.place;
+
+    const value = this.#expressionTyped(argument, element);
+    if (value === undefined) return undefined;
+
+    const pointer: MachineType = { kind: "pointer", pointee: element };
+    const slot = this.#f.addLocal({
+      ty: this.#outer.tyOf(pointer, expression),
+      storage: "Temporary",
+      span: this.#outer.span(expression),
+    });
+    this.#push({ kind: "StorageLive", value: slot });
+    this.#push({
+      kind: "Init",
+      place: placeOf(slot),
+      rvalue: { kind: "ArrayPushSlot", value: place },
+    });
+    // `Init`, not `Assign`: the slot is fresh storage the runtime just made
+    // room for, so there is no previous element in it to destroy.
+    this.#push({
+      kind: "Init",
+      place: { local: slot, projection: [{ kind: "Deref" }] },
+      rvalue: { kind: "Use", value: this.#forStorage(value) },
+    });
+    this.#push({ kind: "StorageDead", value: slot });
+    return { operand: { kind: "Const", value: this.#boolConst(true) }, type: VOID };
+  }
+
+  /**
+   * `xs.pop()` — take the last element out and shorten the array.
+   *
+   * A **move**, not a copy: the element is leaving the array, and there is
+   * exactly one of it afterwards. Copying instead would allocate for no reason
+   * and leave the array's own copy to be destroyed by the length change, which
+   * nothing would do.
+   *
+   * Needs no node of its own — the element is read through an ordinary `Index`
+   * projection, and shortening takes no stride, so it is a plain runtime call.
+   */
+  #arrayPop(
+    expression: ts.CallExpression,
+    array: Typed,
+    element: MachineType,
+  ): Typed | undefined {
+    if (expression.arguments.length !== 0) {
+      this.#outer.error(expression, "GF0002", "`pop` takes no arguments.");
+      return undefined;
+    }
+    const resolved = this.#asArray(expression, array);
+    if (resolved === undefined) return undefined;
+    const place = resolved.place;
+
+    // `length - 1`, in a local, because a projection indexes by local.
+    const length = this.#temporaryTyped(expression, USIZE, { kind: "Len", value: place });
+    if (length === undefined) return undefined;
+    const last = this.#temporaryTyped(expression, USIZE, {
+      kind: "Binary",
+      op: "Sub",
+      lhs: length.operand,
+      rhs: {
+        kind: "Const",
+        value: { kind: "Int", bits: 1n, ty: this.#outer.tyOf(USIZE, expression) },
+      },
+    });
+    if (last === undefined) return undefined;
+    const index = this.#f.addLocal({
+      ty: this.#outer.tyOf(USIZE, expression),
+      storage: "Temporary",
+      span: this.#outer.span(expression),
+    });
+    this.#push({ kind: "StorageLive", value: index });
+    this.#push({
+      kind: "Init",
+      place: placeOf(index),
+      rvalue: { kind: "Use", value: last.operand },
+    });
+
+    const slot = { local: place.local, projection: [...place.projection, { kind: "Index" as const, value: index }] };
+    const taken = this.#temporaryTyped(expression, element, {
+      kind: "Use",
+      value: { kind: "Move", value: slot },
+    });
+    if (taken === undefined) return undefined;
+
+    // After the element has been taken, never before: shortening first would
+    // leave the last slot outside the array while it is still being read.
+    this.#callRuntime(
+      expression,
+      RUNTIME.arrayPop,
+      [{ operand: { kind: "Copy", value: place }, type: array.type }],
+      VOID,
+    );
+    this.#push({ kind: "StorageDead", value: index });
+    return taken;
+  }
+
+  /**
    * `fixedArray(N, fill)` — `N` elements, inline, every one a copy of `fill`.
    *
    * Zeroed first, then filled. The zeroing is not belt-and-braces: an element of
@@ -3684,13 +3980,16 @@ class BodyLowerer {
     const subject = this.#value(expression.expression, undefined);
     if (subject === undefined) return undefined;
 
-    const element = elementTypeOf(subject.type);
+    // An array first, so that a `Reference<T[]>` gets the `Deref` that reaches
+    // its elements rather than being indexed as though it were the handle.
+    const array = this.#asArray(expression, subject);
+    const element = array?.element ?? elementTypeOf(subject.type);
     if (element === undefined) {
       this.#outer.unsupported(expression, `indexing a \`${renderType(subject.type)}\``);
       return undefined;
     }
 
-    const base = this.#placeOfSubject(expression, subject);
+    const base = array?.place ?? this.#placeOfSubject(expression, subject);
     if (base === undefined) return undefined;
 
     const argument = expression.argumentExpression;
@@ -3792,18 +4091,21 @@ class BodyLowerer {
       };
     }
 
-    if (
-      (subject.type.kind === "string" ||
-        subject.type.kind === "array" ||
-        subject.type.kind === "cstring") &&
-      expression.name.text === "length"
-    ) {
-      const read = this.#forRead(subject);
-      if (read.kind === "Const") {
-        this.#outer.unsupported(expression, "`length` of a literal");
-        return undefined;
+    if (expression.name.text === "length") {
+      // An array — possibly behind a reference — reads its length from the
+      // handle, so the place is the one `#asArray` resolves.
+      const array = this.#asArray(expression, subject);
+      if (array !== undefined) {
+        return this.#temporaryTyped(expression, USIZE, { kind: "Len", value: array.place });
       }
-      return this.#temporaryTyped(expression, USIZE, { kind: "Len", value: read.value });
+      if (subject.type.kind === "string" || subject.type.kind === "cstring") {
+        const read = this.#forRead(subject);
+        if (read.kind === "Const") {
+          this.#outer.unsupported(expression, "`length` of a literal");
+          return undefined;
+        }
+        return this.#temporaryTyped(expression, USIZE, { kind: "Len", value: read.value });
+      }
     }
 
     this.#outer.unsupported(expression, "this property access");
@@ -4178,6 +4480,24 @@ class BodyLowerer {
   ): Typed | undefined | "not-a-method" {
     if (access.expression.kind === ts.SyntaxKind.SuperKeyword) {
       return this.#superMethodCall(expression, access);
+    }
+
+    // `xs.push(v)` and `xs.pop()`, before the class and contract paths for the
+    // same reason the width pass takes them first: an array is neither, and
+    // these two methods are the compiler's rather than any declaration's.
+    const element = this.#arrayElementAt(access);
+    if (element !== undefined) {
+      const array = this.#value(access.expression, undefined);
+      if (array === undefined) return undefined;
+      switch (access.name.text) {
+        case "push":
+          return this.#arrayPush(expression, array, element);
+        case "pop":
+          return this.#arrayPop(expression, array, element);
+        default:
+          this.#outer.unsupported(expression, `\`${access.name.text}\` on an array`);
+          return undefined;
+      }
     }
 
     const contract = this.#contractAt(access.expression);

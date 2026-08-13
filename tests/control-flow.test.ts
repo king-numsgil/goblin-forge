@@ -204,10 +204,9 @@ describe("statements the language does not have yet", () => {
   const cases: [string, string][] = [
     ["do/while", "  let i: i32 = 0;\n  do { i = i + 1; } while (i < 3);\n  return i;"],
     ["switch", "  const a: i32 = 1;\n  switch (a) { case 1: return 1; default: return 0; }"],
-    [
-      "for-of",
-      "  const buf: FixedArray<u8, 2> = fixedArray(2, 1);\n  for (const b of buf) { }\n  return 0;",
-    ],
+    // Over a `T[]`, which tsc *does* accept as iterable — a `FixedArray` it
+    // rejects itself (TS2495), so it would not reach the compiler at all.
+    ["for-of", "  const xs: i32[] = [1, 2];\n  for (const x of xs) { }\n  return 0;"],
     ["a labelled statement", "  outer: while (true) { break outer; }\n  return 0;"],
     ["try/catch", "  try { return 0; } catch (e) { return 1; }"],
     ["throw", '  throw "x";'],
