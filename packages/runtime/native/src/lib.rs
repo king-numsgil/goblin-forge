@@ -94,12 +94,31 @@ fn trace(event: &str) {
 
 static REPORTER_INSTALLED: AtomicBool = AtomicBool::new(false);
 
+/// The runtime's initialisation, called once at the top of `main`.
+///
+/// A `bin` target's entry point calls this before its first statement, which is
+/// the whole reason it exists as a function rather than as a constructor: a
+/// constructor in a static library is a per-platform arrangement *and* is only
+/// linked in when something else in its object is referenced, so a program that
+/// allocates nothing would silently not have one. A call from `main` is
+/// portable and unconditional.
+///
+/// It matters that it is unconditional. The leak reporter used to be installed
+/// on the first allocation, which meant a missing report was ambiguous —
+/// either the program never allocated, or it died before `atexit` handlers ran.
+/// The harness read both as zero, so a program that crashed on a double free
+/// scored a clean leak check. Now the report is missing only if the program
+/// did not reach a normal exit, and the harness says so.
+#[unsafe(no_mangle)]
+pub extern "C" fn gf_runtime_init() {
+    install_reporter();
+}
+
 /// Print the live count on the way out, when asked to.
 ///
-/// Registered lazily on the first allocation rather than from a constructor,
-/// because a constructor in a static library is a per-platform arrangement and
-/// this is not. A program that never allocates never registers it — and never
-/// leaks either, so the harness reads a missing line as zero.
+/// Idempotent: [`gf_runtime_init`] is the ordinary caller, and the allocator
+/// calls it too so that a `static-lib` linked into someone else's `main` still
+/// reports. Whichever gets there first wins and the other is a no-op.
 fn install_reporter() {
     if REPORTER_INSTALLED.swap(true, Ordering::SeqCst) {
         return;

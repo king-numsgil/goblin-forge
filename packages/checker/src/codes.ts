@@ -118,7 +118,12 @@ export const CODES = {
       "is checked after any leading minus sign has been folded into the " +
       "literal, so `-128` is a valid `i8` even though `128` is not. Hex, " +
       "octal and binary literals may fill the unsigned range and are " +
-      "reinterpreted, so `0xff` is a valid `i8` meaning `-1`.",
+      "reinterpreted, so `0xff` is a valid `i8` meaning `-1`.\n\n" +
+      "A literal written with a fraction or an exponent does not fit an " +
+      "integer width at all, whatever its value: `1e3` is exactly a thousand " +
+      "and is still refused, because accepting it would be the silent " +
+      "float-to-integer conversion every other part of the language makes you " +
+      "write. `nativeCast<i32>(1.5)` is that written form, and truncates.",
   },
   GF0165: {
     title: "unary minus on an unsigned type",
@@ -142,11 +147,16 @@ export const CODES = {
     explanation:
       "`move` hands ownership somewhere else and leaves the source empty. " +
       "Reading it afterwards would read something that is no longer there.\n\n" +
-      "The check is lexical: a move is seen for the rest of the block it is in " +
-      "and every block inside that. A move under an `if`, read after the `if`, " +
-      "is not caught — and to make that gap harmless rather than dangerous, a " +
-      "move nulls its source, so the value read back is empty rather than " +
-      "dangling.",
+      "**Assigning to the binding clears this.** A moved-from value is empty " +
+      "rather than invalid — the same state C++ leaves one in — so putting a " +
+      "value back makes it readable again, which is what lets a `let` be moved " +
+      "out of inside a loop and refilled before the next pass.\n\n" +
+      "The check is not flow-sensitive: a move is seen for the rest of the " +
+      "function, so a move under an `if` that does not refill the binding is " +
+      "reported after the `if` even where the branch might not have run. That " +
+      "is the conservative direction, and the cost of being wrong the other way " +
+      "is bounded anyway — a move nulls its source, so an unreported read finds " +
+      "an empty value rather than a dangling one.",
   },
   GF0236: {
     title: "a by-value parameter cannot be moved out of",
@@ -160,7 +170,12 @@ export const CODES = {
       "holds a different local: emptying it does nothing to the caller's copy.\n\n" +
       "Assigning the parameter somewhere is already a copy, which is usually " +
       "what was meant. If the caller should keep ownership and the callee " +
-      "should only read, take a `Reference<T>` instead.",
+      "should only read, take a `Reference<T>` instead.\n\n" +
+      "`return parameter` is the same operation without the word, and it is a " +
+      "**copy** rather than an error: returning a local is normally an implicit " +
+      "move because the local is about to go out of scope, and a parameter is " +
+      "the one local that rule does not hold for. Only the written `move` is " +
+      "refused, because only it is asking for something that cannot be done.",
   },
   GF0234: {
     title: "a reference cannot borrow a temporary",

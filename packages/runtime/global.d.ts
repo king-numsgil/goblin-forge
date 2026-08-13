@@ -372,12 +372,25 @@ declare function alloc<T extends object, A extends readonly unknown[]>(
  * quietly become a move because a later line was deleted.
  *
  * Returning a local is the one move you do not have to write, because there is
- * nothing else it could mean — the local is about to go out of scope.
+ * nothing else it could mean — the local is about to go out of scope. A
+ * *parameter* is the exception: the caller releases a by-value argument, so
+ * `return param` is a copy and `return move(param)` is `GF0236`.
  *
- * Reading a moved-from value is an error (`GF0235`). Where the compiler cannot
- * prove it — a move under an `if`, read after the `if` — the value is left
- * empty rather than dangling, so the failure is a wrong answer and never memory
- * corruption.
+ * Reading a moved-from value is an error (`GF0235`), and **assigning to the
+ * binding clears it** — a moved-from value is empty rather than invalid, so
+ * putting one back makes it readable again:
+ *
+ * ```ts
+ * let s = `hello, ${name}`;
+ * take(move(s));
+ * s = "next";               // `s` holds a value again
+ * console.log(s);           // fine
+ * ```
+ *
+ * The check is not flow-sensitive: a move under an `if` that does not refill
+ * the binding is reported after the `if`. Where it is wrong in the other
+ * direction the value is left empty rather than dangling, so the failure is a
+ * wrong answer and never memory corruption.
  */
 declare function move<T>(value: T): T;
 

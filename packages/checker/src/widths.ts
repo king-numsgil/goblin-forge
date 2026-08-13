@@ -219,26 +219,60 @@ export interface OperatorInfo {
   readonly shift: boolean;
   /** Produces a `bool` rather than a value of the operand type. */
   readonly comparison: boolean;
+  /**
+   * `<`, `<=`, `>`, `>=` — asks which of two values comes first, where
+   * `===` and `!==` only ask whether they are the same.
+   *
+   * The two questions have different answers about which types may be asked.
+   * Every `string` can be compared for equality, because two of them are equal
+   * when their bytes are; ordering one against another needs a lexicographic
+   * comparison that does not exist yet.
+   */
+  readonly ordered: boolean;
 }
 
 export const OPERATORS: Readonly<Record<Operator, OperatorInfo>> = {
-  "+": { integerOnly: false, shift: false, comparison: false },
-  "-": { integerOnly: false, shift: false, comparison: false },
-  "*": { integerOnly: false, shift: false, comparison: false },
-  "/": { integerOnly: false, shift: false, comparison: false },
-  "%": { integerOnly: true, shift: false, comparison: false },
-  "&": { integerOnly: true, shift: false, comparison: false },
-  "|": { integerOnly: true, shift: false, comparison: false },
-  "^": { integerOnly: true, shift: false, comparison: false },
-  "<<": { integerOnly: true, shift: true, comparison: false },
-  ">>": { integerOnly: true, shift: true, comparison: false },
-  "<": { integerOnly: false, shift: false, comparison: true },
-  "<=": { integerOnly: false, shift: false, comparison: true },
-  ">": { integerOnly: false, shift: false, comparison: true },
-  ">=": { integerOnly: false, shift: false, comparison: true },
-  "===": { integerOnly: false, shift: false, comparison: true },
-  "!==": { integerOnly: false, shift: false, comparison: true },
+  "+": { integerOnly: false, shift: false, comparison: false, ordered: false },
+  "-": { integerOnly: false, shift: false, comparison: false, ordered: false },
+  "*": { integerOnly: false, shift: false, comparison: false, ordered: false },
+  "/": { integerOnly: false, shift: false, comparison: false, ordered: false },
+  "%": { integerOnly: true, shift: false, comparison: false, ordered: false },
+  "&": { integerOnly: true, shift: false, comparison: false, ordered: false },
+  "|": { integerOnly: true, shift: false, comparison: false, ordered: false },
+  "^": { integerOnly: true, shift: false, comparison: false, ordered: false },
+  "<<": { integerOnly: true, shift: true, comparison: false, ordered: false },
+  ">>": { integerOnly: true, shift: true, comparison: false, ordered: false },
+  "<": { integerOnly: false, shift: false, comparison: true, ordered: true },
+  "<=": { integerOnly: false, shift: false, comparison: true, ordered: true },
+  ">": { integerOnly: false, shift: false, comparison: true, ordered: true },
+  ">=": { integerOnly: false, shift: false, comparison: true, ordered: true },
+  "===": { integerOnly: false, shift: false, comparison: true, ordered: false },
+  "!==": { integerOnly: false, shift: false, comparison: true, ordered: false },
 };
+
+/**
+ * Whether a value of this type is one machine word the hardware can compare.
+ *
+ * The twelve widths and `boolean` are the obvious half. The address types are
+ * the other: comparing two of them is comparing two addresses, which is what
+ * `p !== null` means and what C has always allowed.
+ *
+ * Everything else — a `string`, a struct, a class, a fixed array — is either
+ * more than a word or needs a runtime call, and the operators that apply to it
+ * are named one at a time rather than assumed.
+ */
+export function isMachineComparable(type: MachineType): boolean {
+  switch (type.kind) {
+    case "scalar":
+    case "bool":
+    case "pointer":
+    case "reference":
+    case "cstring":
+      return true;
+    default:
+      return false;
+  }
+}
 
 export function isFloatType(type: MachineType): boolean {
   return type.kind === "scalar" && WIDTHS[type.name].float;
@@ -310,4 +344,36 @@ export function checkLiteral(
 /** Whether a numeric literal's text was written in an explicit radix. */
 export function hasExplicitRadix(text: string): boolean {
   return /^[+-]?0[xob]/i.test(text);
+}
+
+/**
+ * A numeric literal's text, with JavaScript's digit separators removed.
+ *
+ * `1_000_000` is ordinary TypeScript and means a million. Neither `BigInt` nor
+ * `Number` accepts the underscores, so the text has to be cleaned before either
+ * is asked — and the two failures look nothing alike, which is what made this
+ * worth a named function rather than a `.replace` at each site: `BigInt` throws
+ * a `SyntaxError` that escapes the compiler entirely, and `Number` quietly
+ * answers `NaN` and emits it.
+ */
+export function literalDigits(text: string): string {
+  return text.replace(/_/g, "");
+}
+
+/**
+ * Whether a literal's text denotes a whole number.
+ *
+ * An integer width can only be given a literal written as an integer. `1.5` is
+ * the obvious case; `1e3` is the one worth stating, because it *is* a thousand
+ * and is still rejected — a literal with a fraction or an exponent is a
+ * floating-point literal, and letting one become an `i32` is the silent
+ * float-to-integer conversion the language refuses everywhere else.
+ *
+ * A literal in an explicit radix is always an integer: there is no `0x1.8p3`
+ * here, and TypeScript has no hexadecimal float literal to inherit.
+ */
+export function isIntegerLiteral(text: string): boolean {
+  const digits = literalDigits(text);
+  if (hasExplicitRadix(digits)) return true;
+  return /^[+-]?\d+$/.test(digits);
 }

@@ -63,9 +63,24 @@ export interface ClassInfo {
   /** Every method callable on this class, own and inherited, by name. */
   readonly methods: ReadonlyMap<string, ClassMethod>;
   readonly ctor: ts.ConstructorDeclaration | undefined;
+  /**
+   * Whether this class has a constructor to run, declared or generated.
+   *
+   * A field initialiser is a constructor's work — C++ calls one a *default
+   * member initialiser* and runs it as part of construction — so a class with
+   * initialisers and no `constructor` still needs a `Class$new` for them to run
+   * in. So does a class that has neither but derives from one that does,
+   * because something has to call the base's.
+   */
+  readonly needsConstructor: boolean;
+  /**
+   * This class's own fields that were declared with `= …`, in declaration
+   * order, which is the order C++ runs them in.
+   */
+  readonly initialisedFields: readonly ClassField[];
   /** `Class$drop`, the compiler-generated destructor. */
   readonly destructorSymbol: string;
-  /** `Class$new`, or `undefined` when the class declares no constructor. */
+  /** `Class$new`, or `undefined` when there is no construction to do. */
   readonly constructorSymbol: string | undefined;
   /** Interfaces named in an `implements` clause, by name. */
   readonly declaredInterfaces: readonly string[];
@@ -297,6 +312,15 @@ function build(
     return undefined;
   }
 
+  // A field initialiser is construction, so a class that has one needs a
+  // constructor whether or not it declares one — and so does a class whose base
+  // needs one, because something has to call it.
+  const initialisedFields = fields
+    .slice(ownFieldsAt)
+    .filter((field) => field.declaration.initializer !== undefined);
+  const needsConstructor =
+    ctor !== undefined || initialisedFields.length > 0 || (base?.needsConstructor ?? false);
+
   return {
     node,
     name,
@@ -306,8 +330,10 @@ function build(
     slots,
     methods,
     ctor,
+    needsConstructor,
+    initialisedFields,
     destructorSymbol,
-    constructorSymbol: ctor === undefined ? undefined : `${name}$new`,
+    constructorSymbol: needsConstructor ? `${name}$new` : undefined,
     declaredInterfaces,
   };
 }

@@ -60,6 +60,14 @@ export interface ProjectOptions {
   readonly nativeLibs?: readonly string[];
   /** What to build. Defaults to `bin`, which is what most tests want. */
   readonly type?: "bin" | "static-lib" | "shared-lib";
+  /**
+   * `compilerOptions` written into the project's tsconfig, over the base.
+   *
+   * Only `GF0003` needs this — the diagnostic exists precisely because a
+   * project *can* extend the base and then override a setting the language
+   * depends on, and there is no other way to build one that does.
+   */
+  readonly compilerOptions?: Readonly<Record<string, unknown>>;
 }
 
 export interface Project {
@@ -94,6 +102,9 @@ export function writeProject(name: string, source: string, options: ProjectOptio
     `${JSON.stringify(
       {
         extends: posix(TSCONFIG_BASE),
+        ...(options.compilerOptions !== undefined
+          ? { compilerOptions: options.compilerOptions }
+          : {}),
         files: [
           posix(GLOBAL_DECLARATIONS),
           "src/main.ts",
@@ -186,11 +197,35 @@ export async function run(
 
   const { stderr, leaked } = takeLeakReport(child.stderr ?? "");
 
+  // A missing report means the program did not reach a normal exit.
+  //
+  // `gf_runtime_init` runs at the top of every `bin`'s `main` and registers the
+  // reporter unconditionally, so the line is printed by every program that gets
+  // as far as returning from `main` — including one that allocates nothing.
+  // Absent, it did not: an abort, a fault, or a `_exit`.
+  //
+  // This is worth catching loudly rather than reading as zero, and the reason
+  // is the shape of the failure it hides. A double free aborts the process, and
+  // the exit code a test would see is eight bits of an NTSTATUS or a signal —
+  // 116 for Windows' heap corruption, a number indistinguishable from one a
+  // program computed. A crashed run used to score a clean leak check and a
+  // plausible exit code at the same time.
+  if (leaked === undefined) {
+    throw new Error(
+      `\`${name}\` did not exit normally — it produced no live-allocation ` +
+        `report, which every program that returns from \`main\` does.\n\n` +
+        `The exit status was ${describeExit(child)}. A crash inside the ` +
+        `runtime — a double free, a use-after-free — looks like this, and the ` +
+        `exit code is not a value the program computed.\n\n` +
+        `stdout was:\n${child.stdout ?? ""}\nstderr was:\n${stderr}`,
+    );
+  }
+
   // REWRITE-PLAN §9 calls this non-negotiable, and v1's experience is the
   // reason: the automatic check "found more real bugs than every deliberate
   // assertion combined". It runs on every single run test, without anyone
   // having to remember to ask for it.
-  if (leaked !== undefined && leaked !== 0) {
+  if (leaked !== 0) {
     throw new Error(
       `\`${name}\` leaked ${leaked} allocation${leaked === 1 ? "" : "s"}.\n\n` +
         `Every value a Goblin program allocates is released by the scope that ` +
@@ -208,6 +243,21 @@ export async function run(
 }
 
 /**
+ * How a child process ended, in the terms that are actually available.
+ *
+ * On POSIX a crash arrives as a signal and the name says what happened. On
+ * Windows there are no signals and the status is the low eight bits of an
+ * NTSTATUS, so the hexadecimal is printed beside it — `0x74` is the tail of
+ * `0xC0000374`, `STATUS_HEAP_CORRUPTION`, which is what a double free looks
+ * like from out here.
+ */
+function describeExit(child: { status: number | null; signal: NodeJS.Signals | null }): string {
+  if (child.signal !== null) return `signal ${child.signal}`;
+  if (child.status === null) return "unknown";
+  return `${child.status} (0x${child.status.toString(16)}, as its low eight bits)`;
+}
+
+/**
  * Split the runtime's leak report off the program's own stderr.
  *
  * The program's stderr is asserted by tests, so the report must not appear in
@@ -218,9 +268,11 @@ function takeLeakReport(stderr: string): { stderr: string; leaked?: number } {
   const marker = /^##goblin-live-allocations:(-?\d+)$/m;
   const match = marker.exec(stderr);
   if (match === null) {
-    // The runtime registers its reporter on the first allocation. A program
-    // that never allocated never registered one — and never leaked either.
-    return { stderr, leaked: 0 };
+    // No report at all, which {@link run} treats as abnormal termination —
+    // `gf_runtime_init` registers the reporter from `main` whether or not the
+    // program ever allocates, so the only way to be missing one is to not have
+    // reached the end.
+    return { stderr };
   }
   return {
     stderr: stderr.replace(marker, "").replace(/\n{2,}/g, "\n").replace(/^\n/, ""),
@@ -254,6 +306,67 @@ export async function expectRejected(
     );
   }
   return match;
+}
+
+/**
+ * What a compile did, watched from outside the process it ran in.
+ *
+ * `survived` is the interesting field: a backend panic aborts the process, so a
+ * compile that did not get far enough to say anything is one the addon crashed
+ * on. See {@link compileOutOfProcess}.
+ */
+export interface OutOfProcessResult {
+  /** The compiler ran to a verdict rather than aborting. */
+  readonly survived: boolean;
+  /** The verdict, when there was one. */
+  readonly ok?: boolean;
+  /** Error codes, when there was a verdict. */
+  readonly codes?: readonly string[];
+  /** Whatever the process wrote to stderr — the panic message, if it panicked. */
+  readonly stderr: string;
+  readonly exitCode: number;
+}
+
+/**
+ * Compile a program in a child process, and report whether the compiler lived.
+ *
+ * REWRITE-PLAN §8's hard rule is that the backend never reports a user error:
+ * anything reachable from source tsc accepted is a missing *frontend* check,
+ * and it panics rather than returning so that a test cannot read a compiler
+ * crash as the compiler correctly saying no. The rule is only enforceable if
+ * something can watch it, and a panic in the addon kills the runner — so the
+ * watching is done from out here.
+ */
+export function compileOutOfProcess(
+  name: string,
+  source: string,
+  options: ProjectOptions = {},
+): OutOfProcessResult {
+  const request = join(scratchRoot(), `${sanitise(name)}-request-${(counter += 1)}.json`);
+  writeFileSync(
+    request,
+    JSON.stringify({
+      name,
+      source,
+      ...(options.files !== undefined ? { files: options.files } : {}),
+    }),
+    "utf8",
+  );
+
+  const runner = join(HERE, "support", "compile-once.ts");
+  const child = spawnSync(process.execPath, ["run", runner, request], {
+    encoding: "utf8",
+    cwd: resolve(HERE, ".."),
+  });
+  if (child.error) throw child.error;
+
+  const marker = /^##goblin-compile-once:(.*)$/m.exec(child.stdout ?? "");
+  const stderr = child.stderr ?? "";
+  const exitCode = child.status ?? -1;
+  if (marker === null) return { survived: false, stderr, exitCode };
+
+  const verdict = JSON.parse(marker[1]!) as { ok: boolean; codes: string[] };
+  return { survived: true, ok: verdict.ok, codes: verdict.codes, stderr, exitCode };
 }
 
 /** Every error code a compile produced, for asserting the whole set. */

@@ -248,3 +248,157 @@ describe("`export` versus the public ABI", () => {
     expect(diagnostic.message).toContain("vtable");
   });
 });
+
+describe("import and export forms", () => {
+  test("a re-export makes a name importable through a second module", async () => {
+    const result = await run(
+      "mod-reexport",
+      `export { add } from "./math.ts";
+       import { add } from "./math.ts";
+
+       export function main(): i32 {
+         return add(1, 2);
+       }\n`,
+      { files: { "math.ts": `export function add(a: i32, b: i32): i32 { return a + b; }\n` } },
+    );
+    expect(result.exitCode).toBe(3);
+  });
+
+  test("a default export is called like any other", async () => {
+    const result = await run(
+      "mod-default",
+      `import twice from "./math.ts";
+
+       export function main(): i32 {
+         return twice(4);
+       }\n`,
+      { files: { "math.ts": `export default function twice(a: i32): i32 { return a * 2; }\n` } },
+    );
+    expect(result.exitCode).toBe(8);
+  });
+
+  test("a type-only import is erased, not lowered", async () => {
+    const result = await run(
+      "mod-type-only",
+      `import type { S } from "./shapes.ts";
+
+       export function main(): i32 {
+         const s: S = { a: 5 };
+         return s.a;
+       }\n`,
+      { files: { "shapes.ts": `export interface S { a: i32; }\n` } },
+    );
+    expect(result.exitCode).toBe(5);
+  });
+
+  test("two modules may each export a name the other does not import", async () => {
+    const result = await run(
+      "mod-parallel-exports",
+      `import { one } from "./a.ts";
+
+       export function two(): i32 { return 2; }
+
+       export function main(): i32 {
+         return one() * 10 + two();
+       }\n`,
+      { files: { "a.ts": `export function one(): i32 { return 1; }\n` } },
+    );
+    expect(result.exitCode).toBe(12);
+  });
+
+  test("a namespace import is GF0001", async () => {
+    // `import * as m` makes the call target a property access on a module
+    // object, and there is no module object at runtime here.
+    await expectRejected(
+      "mod-namespace-import",
+      `import * as math from "./math.ts";
+
+       export function main(): i32 {
+         return math.add(1, 2);
+       }\n`,
+      "GF0001",
+      { files: { "math.ts": `export function add(a: i32, b: i32): i32 { return a + b; }\n` } },
+    );
+  });
+
+  test("an exported `const` is GF0001, as a top-level binding is anywhere", async () => {
+    await expectRejected(
+      "mod-const-export",
+      `import { N } from "./consts.ts";
+
+       export function main(): i32 {
+         return N;
+       }\n`,
+      "GF0001",
+      { files: { "consts.ts": `export const N: i32 = 5;\n` } },
+    );
+  });
+});
+
+describe("declarations and the linker", () => {
+  test("a `declare function` nobody calls does not have to be linked", async () => {
+    // A body-less declaration is an `extern "C"` import, and an extern in the
+    // module is an undefined symbol in the object file. Making one eagerly at
+    // the declaration meant declaring a library's surface and calling half of
+    // it failed to link on the half you did not call — nothing like the C
+    // header it is modelled on. The extern is made at the first call site now.
+    const result = await run(
+      "mod-extern-uncalled",
+      `declare function c_never_called(v: i32): i32;
+       declare function c_also_unused(a: f64, b: f64): f64;
+
+       export function main(): i32 {
+         return 0;
+       }\n`,
+    );
+    expect(result.exitCode).toBe(0);
+  });
+
+  test("a TypeScript overload signature is not an extern declaration", async () => {
+    // `function f(a: i32): i32;` followed by an implementation is one function
+    // with a declared signature — ordinary TypeScript. Reading the body-less
+    // half as an `extern "C"` import dropped the implementation and asked the
+    // linker for a symbol the program was about to define itself, so the error
+    // named the user's own function.
+    const result = await run(
+      "mod-overload",
+      `function f(a: i32): i32;
+       function f(a: i32): i32 { return a * 2; }
+
+       export function main(): i32 {
+         return f(4);
+       }\n`,
+    );
+    expect(result.exitCode).toBe(8);
+  });
+
+  test("a declaration and a definition of the same name still link once", async () => {
+    // The declaration is skipped and the definition stands, so the symbol is
+    // defined exactly once — the failure mode on the other side of the fix.
+    const result = await run(
+      "mod-overload-exported",
+      `export function twice(a: i32): i32;
+       export function twice(a: i32): i32 { return a * 2; }
+
+       export function main(): i32 {
+         return twice(21);
+       }\n`,
+    );
+    expect(result.exitCode).toBe(42);
+  });
+
+  test("a `declare function` that is called and not defined is GF9005", async () => {
+    // The honest case, and the one GF9005 is written for: the message carries
+    // the whole linker command so the failure can be reproduced by hand.
+    const diagnostic = await expectRejected(
+      "mod-extern-missing",
+      `declare function c_absent(v: i32): i32;
+
+       export function main(): i32 {
+         return c_absent(1);
+       }\n`,
+      "GF9005",
+    );
+    expect(diagnostic.message).toContain("c_absent");
+  });
+});

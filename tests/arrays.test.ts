@@ -219,3 +219,112 @@ describe("what fixed arrays are not", () => {
     expect(diagnostic.message).toContain("allocArray");
   });
 });
+
+describe("fixed array edges", () => {
+  test("a zero-length array is legal and has length zero", async () => {
+    const result = await run(
+      "array-zero",
+      `export function main(): i32 {
+         const a: FixedArray<u8, 0> = fixedArray(0, 0);
+         return nativeCast<i32>(a.length);
+       }\n`,
+    );
+    expect(result.exitCode).toBe(0);
+  });
+
+  test("an index has to be a `usize`, and an `i32` counter does not qualify", async () => {
+    // `length` is a `usize`, so a loop written against it indexes fine. A loop
+    // counter declared `i32` — the width most people reach for — does not, and
+    // the diagnostic is a width error rather than anything about arrays.
+    const diagnostic = await expectRejected(
+      "array-index-i32",
+      `export function main(): i32 {
+         const a: FixedArray<i32, 4> = fixedArray(4, 0);
+         let i: i32 = 0;
+         while (i < 4) { a[i] = i; i = i + 1; }
+         return a[3];
+       }\n`,
+      "GF0161",
+    );
+    expect(diagnostic.message).toContain("usize");
+  });
+
+  test("a `usize` counter indexes, and `length` is the natural bound", async () => {
+    const result = await run(
+      "array-index-usize",
+      `export function main(): i32 {
+         const a: FixedArray<i32, 4> = fixedArray(4, 0);
+         let i: usize = 0;
+         while (i < a.length) { a[i] = nativeCast<i32>(i) * 2; i = i + 1; }
+         return a[3];
+       }\n`,
+    );
+    expect(result.exitCode).toBe(6);
+  });
+
+  test("an `i32` converted with `nativeCast` indexes too", async () => {
+    const result = await run(
+      "array-index-cast",
+      `export function main(): i32 {
+         const a: FixedArray<i32, 4> = fixedArray(4, 7);
+         const i: i32 = 2;
+         return a[nativeCast<usize>(i)];
+       }\n`,
+    );
+    expect(result.exitCode).toBe(7);
+  });
+
+  test("indexing is unchecked, exactly as the prelude says", async () => {
+    // Not an assertion about the *value* — there is no value to assert, the
+    // read is out of bounds. The assertion is that nothing checks it and
+    // nothing crashes, which is what "unchecked, like every other memory
+    // access here" commits to.
+    const result = await run(
+      "array-oob",
+      `export function main(): i32 {
+         const a: FixedArray<u8, 2> = fixedArray(2, 0);
+         const v: u8 = a[5];
+         return 0;
+       }\n`,
+    );
+    expect(result.exitCode).toBe(0);
+  });
+
+  test("a four-kilobyte array is inline storage, and the last element is reachable", async () => {
+    const result = await run(
+      "array-big",
+      `export function main(): i32 {
+         const a: FixedArray<u8, 4096> = fixedArray(4096, 1);
+         return nativeCast<i32>(a[4095]);
+       }\n`,
+    );
+    expect(result.exitCode).toBe(1);
+  });
+
+  test("`length` is usable as an ordinary `usize`", async () => {
+    const result = await run(
+      "array-length-value",
+      `export function main(): i32 {
+         const a: FixedArray<u8, 8> = fixedArray(8, 0);
+         const n: usize = a.length;
+         return nativeCast<i32>(n);
+       }\n`,
+    );
+    expect(result.exitCode).toBe(8);
+  });
+
+  test("an array of an array cannot be built from a nested `fixedArray` call", async () => {
+    // `fixedArray<T, N>(length, fill)` takes the fill by value, and the width
+    // pass has no width for a `FixedArray` fill, so the inner call is rejected
+    // before the outer one is considered. There is no other spelling for a
+    // two-dimensional array today.
+    await expectRejected(
+      "array-nested",
+      `export function main(): i32 {
+         const a: FixedArray<FixedArray<u8, 2>, 2> = fixedArray(2, fixedArray(2, 3));
+         return nativeCast<i32>(a[1][1]);
+       }\n`,
+      "GF0161",
+    );
+  });
+});

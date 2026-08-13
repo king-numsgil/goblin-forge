@@ -189,3 +189,154 @@ describe("what structs are not", () => {
     expect(errorCodes(result).some((code) => code.startsWith("TS"))).toBe(true);
   });
 });
+
+describe("struct edges", () => {
+  test("an interface with no fields has no machine representation", async () => {
+    // A zero-sized struct is a real design question — C++ gives it size 1 so
+    // that two objects have different addresses, C forbids it outright — and
+    // the compiler declines to answer it rather than picking silently.
+    const diagnostic = await expectRejected(
+      "struct-empty",
+      `interface E { }
+
+       export function main(): i32 {
+         const e: E = { };
+         return 0;
+       }\n`,
+      "GF0001",
+    );
+    expect(diagnostic.message).toContain("no fields");
+  });
+
+  test("a literal's field order does not have to match the declaration's", async () => {
+    // Layout comes from the *declaration*; the literal is just a set of
+    // initialisers. Reading `b` back proves the store went to the right slot.
+    const result = await run(
+      "struct-literal-order",
+      `interface S { b: i32; a: i32; }
+
+       export function main(): i32 {
+         const s: S = { a: 1, b: 2 };
+         return s.b * 10 + s.a;
+       }\n`,
+    );
+    expect(result.exitCode).toBe(21);
+  });
+
+  test("a nested field is mutable through the outer value", async () => {
+    const result = await run(
+      "struct-nested-mutate",
+      `interface In { a: i32; }
+       interface Out { i: In; b: i32; }
+
+       export function main(): i32 {
+         const o: Out = { i: { a: 1 }, b: 2 };
+         o.i.a = 5;
+         return o.i.a * 10 + o.b;
+       }\n`,
+    );
+    expect(result.exitCode).toBe(52);
+  });
+
+  test("assigning a struct to itself is not a self-destruction", async () => {
+    // The copy-assignment corner every value-semantics language has to answer:
+    // release-then-copy on the same storage reads freed memory.
+    const result = await run(
+      "struct-self-assign",
+      `interface S { s: string; }
+
+       export function main(): i32 {
+         let s: S = { s: "a" + "b" };
+         s = s;
+         console.log(s.s);
+         return 0;
+       }\n`,
+    );
+    expect(result.stdout).toBe("ab\n");
+    expect(result.exitCode).toBe(0);
+    expect(result.leaked).toBe(0);
+  });
+
+  test("a field may be read straight off a returned temporary", async () => {
+    const result = await run(
+      "struct-temp-field",
+      `interface S { a: i32; }
+       function make(): S { return { a: 4 }; }
+
+       export function main(): i32 {
+         return make().a;
+       }\n`,
+    );
+    expect(result.exitCode).toBe(4);
+  });
+
+  test("a `readonly` field is written by the literal and not afterwards", async () => {
+    const result = await run(
+      "struct-readonly",
+      `interface S { readonly a: i32; }
+
+       export function main(): i32 {
+         const s: S = { a: 3 };
+         return s.a;
+       }\n`,
+    );
+    expect(result.exitCode).toBe(3);
+
+    const { result: bad } = await compileSource(
+      "struct-readonly-write",
+      `interface S { readonly a: i32; }
+
+       export function main(): i32 {
+         const s: S = { a: 3 };
+         s.a = 4;
+         return s.a;
+       }\n`,
+    );
+    expect(bad.ok).toBe(false);
+    expect(errorCodes(bad).some((code) => code.startsWith("TS"))).toBe(true);
+  });
+
+  test("a `boolean` field sits beside an integer one", async () => {
+    const result = await run(
+      "struct-bool-field",
+      `interface S { flag: boolean; n: i32; }
+
+       export function main(): i32 {
+         const s: S = { flag: true, n: 7 };
+         if (s.flag) { return s.n; }
+         return 0;
+       }\n`,
+    );
+    expect(result.exitCode).toBe(7);
+  });
+
+  test("an interface may extend another, and the fields flatten", async () => {
+    const result = await run(
+      "struct-extends",
+      `interface A { a: i32; }
+       interface B extends A { b: i32; }
+
+       export function main(): i32 {
+         const v: B = { a: 1, b: 2 };
+         return v.a * 10 + v.b;
+       }\n`,
+    );
+    expect(result.exitCode).toBe(12);
+  });
+
+  test("copying a struct with an owning field copies the buffer too", async () => {
+    const result = await run(
+      "struct-owning-copy",
+      `interface S { s: string; }
+
+       export function main(): i32 {
+         const a: S = { s: "x" + "y" };
+         const b: S = a;
+         console.log(a.s + b.s);
+         return 0;
+       }\n`,
+    );
+    expect(result.stdout).toBe("xyxy\n");
+    expect(result.leaked).toBe(0);
+  });
+});

@@ -19,7 +19,7 @@
 
 import { describe, expect, test } from "bun:test";
 
-import { expectRejected, run } from "./harness.ts";
+import { compileSource, errorCodes, expectRejected, run } from "./harness.ts";
 
 describe("classes", () => {
   test("fields, a constructor, and a method that mutates", async () => {
@@ -562,5 +562,425 @@ describe("`Reference<C>` for a class", () => {
       "GF0234",
     );
     expect(diagnostic.message).toContain("outlive");
+  });
+});
+
+describe("field initialisers", () => {
+  // `class C { x: i32 = 5 }` is ordinary TypeScript and ordinary C++ — a
+  // default member initialiser. The lowerer used to build the class's layout
+  // from the declarations and never emit the initialiser, so the field held
+  // whatever zero-initialisation left there and no diagnostic said so.
+  //
+  // They are constructor work now, which is what C++ makes them: a class with
+  // initialisers and no `constructor` gets a generated `Class$new`, and the
+  // order is base construction, then this class's initialisers in declaration
+  // order, then the constructor body.
+
+  test("a scalar field initialiser is stored", async () => {
+    const result = await run(
+      "class-init-scalar",
+      `class C { x: i32 = 5; }
+
+       export function main(): i32 {
+         const c = new C();
+         return c.x;
+       }\n`,
+    );
+    expect(result.exitCode).toBe(5);
+  });
+
+  test("an owning field initialiser is stored", async () => {
+    const result = await run(
+      "class-init-string",
+      `class C { s: string = "ab"; }
+
+       export function main(): i32 {
+         const c = new C();
+         console.log(\`[\${c.s}]\`);
+         return 0;
+       }\n`,
+    );
+    expect(result.stdout).toBe("[ab]\n");
+  });
+
+  test("an initialiser runs even when there is also a constructor", async () => {
+    const result = await run(
+      "class-init-with-ctor",
+      `class C {
+         x: i32 = 5;
+         y: i32;
+         constructor() { this.y = 2; }
+       }
+
+       export function main(): i32 {
+         const c = new C();
+         return c.x * 10 + c.y;
+       }\n`,
+    );
+    expect(result.exitCode).toBe(52);
+  });
+
+  test("a base class's initialiser runs for a derived object", async () => {
+    const result = await run(
+      "class-init-inherited",
+      `class A { a: i32 = 1; }
+       class B extends A { b: i32 = 2; }
+
+       export function main(): i32 {
+         const b = new B();
+         return b.a * 10 + b.b;
+       }\n`,
+    );
+    expect(result.exitCode).toBe(12);
+  });
+
+  test("initialisers run in declaration order, and may read earlier fields", async () => {
+    // Printed rather than returned: three fields do not fit in the eight bits
+    // an exit code carries.
+    const result = await run(
+      "class-init-order",
+      `class C {
+         a: i32 = 2;
+         b: i32 = this.a * 3;
+         c: i32 = this.b + 1;
+       }
+
+       export function main(): i32 {
+         const c = new C();
+         console.log(\`\${c.a} \${c.b} \${c.c}\`);
+         return 0;
+       }\n`,
+    );
+    expect(result.stdout).toBe("2 6 7\n");
+  });
+
+  test("the constructor body runs after the initialisers, so it wins", async () => {
+    // C++'s order exactly: a default member initialiser is not a fallback for
+    // an unassigned field, it runs first and the body assigns over it.
+    const result = await run(
+      "class-init-then-body",
+      `class C {
+         x: i32 = 1;
+         constructor() { this.x = 9; }
+       }
+
+       export function main(): i32 {
+         const c = new C();
+         return c.x;
+       }\n`,
+    );
+    expect(result.exitCode).toBe(9);
+  });
+
+  test("a base constructor runs before a derived initialiser", async () => {
+    // The ordering that says where the initialisers were put. Running them at
+    // the `new` site instead would put B's ahead of A's constructor body, and
+    // this prints the difference: A's body sets `shared` to 1, B's initialiser
+    // then sets it to 2. In C++ the answer is 2.
+    const result = await run(
+      "class-init-base-first",
+      `class A {
+         shared: i32;
+         constructor() { this.shared = 1; }
+       }
+       class B extends A {
+         mine: i32 = this.take();
+         take(): i32 { this.shared = 2; return 7; }
+       }
+
+       export function main(): i32 {
+         const b = new B();
+         return b.shared * 10 + b.mine;
+       }\n`,
+    );
+    expect(result.exitCode).toBe(27);
+  });
+
+  test("an owning initialiser in a derived class is released once", async () => {
+    const result = await run(
+      "class-init-owning-inherited",
+      `class A { a: string = "a" + "1"; }
+       class B extends A { b: string = "b" + "2"; }
+
+       export function main(): i32 {
+         const value = new B();
+         console.log(value.a + value.b);
+         return 0;
+       }\n`,
+    );
+    expect(result.stdout).toBe("a1b2\n");
+    expect(result.leaked).toBe(0);
+  });
+
+  test("initialisers in a loop do not accumulate", async () => {
+    const result = await run(
+      "class-init-loop",
+      `class C { s: string = "x" + "y"; }
+
+       export function main(): i32 {
+         let i: i32 = 0;
+         while (i < 20) { const c = new C(); i = i + 1; }
+         console.log("done");
+         return 0;
+       }\n`,
+    );
+    expect(result.stdout).toBe("done\n");
+    expect(result.leaked).toBe(0);
+  });
+
+  test("a three-deep chain runs every level's initialisers once", async () => {
+    const result = await run(
+      "class-init-three-deep",
+      `class A { a: i32 = 1; }
+       class B extends A { b: i32 = 2; }
+       class C extends B { c: i32 = 3; }
+
+       export function main(): i32 {
+         const value = new C();
+         return value.a * 100 + value.b * 10 + value.c;
+       }\n`,
+    );
+    expect(result.exitCode).toBe(123);
+  });
+
+  test("a class with no initialisers and a base that has them still gets them", async () => {
+    // `B` declares nothing at all, so it only has a constructor because `A`
+    // needs one. Without that, `A`'s initialiser would never run for a `B`.
+    const result = await run(
+      "class-init-empty-derived",
+      `class A { a: i32 = 4; }
+       class B extends A { }
+
+       export function main(): i32 {
+         const b = new B();
+         return b.a;
+       }\n`,
+    );
+    expect(result.exitCode).toBe(4);
+  });
+
+  test("a field set in the constructor is stored, which is the working spelling", async () => {
+    const result = await run(
+      "class-ctor-assign",
+      `class C {
+         x: i32;
+         constructor() { this.x = 5; }
+       }
+
+       export function main(): i32 {
+         const c = new C();
+         return c.x;
+       }\n`,
+    );
+    expect(result.exitCode).toBe(5);
+  });
+
+  test("a class with no constructor and no initialisers is zeroed", async () => {
+    const result = await run(
+      "class-zeroed",
+      `class C { x: i32; y: i32; }
+
+       export function main(): i32 {
+         const c = new C();
+         return c.x + c.y;
+       }\n`,
+    );
+    expect(result.exitCode).toBe(0);
+  });
+});
+
+describe("class members at the edges", () => {
+  test("an implicit `super()` runs, so base fields are reachable", async () => {
+    const result = await run(
+      "class-implicit-super",
+      `class A {
+         a: i32;
+         constructor() { this.a = 1; }
+       }
+       class B extends A {
+         b: i32;
+         constructor() { super(); this.b = 2; }
+       }
+
+       export function main(): i32 {
+         const b = new B();
+         return b.a + b.b;
+       }\n`,
+    );
+    expect(result.exitCode).toBe(3);
+  });
+
+  test("a four-deep chain with a gap dispatches to the nearest overrider", async () => {
+    const result = await run(
+      "class-four-deep",
+      `class A { f(): i32 { return 1; } }
+       class B extends A { }
+       class C extends B { override f(): i32 { return 3; } }
+       class D extends C { }
+
+       function through(x: Reference<A>): i32 { return x.f(); }
+
+       export function main(): i32 {
+         const d = new D();
+         return through(d);
+       }\n`,
+    );
+    expect(result.exitCode).toBe(3);
+  });
+
+  test("a `private` field is reachable from the class's own methods", async () => {
+    const result = await run(
+      "class-private",
+      `class C {
+         private x: i32;
+         constructor(x: i32) { this.x = x; }
+         get(): i32 { return this.x; }
+       }
+
+       export function main(): i32 {
+         const c = new C(6);
+         return c.get();
+       }\n`,
+    );
+    expect(result.exitCode).toBe(6);
+  });
+
+  test("a `readonly` field is assignable in the constructor and nowhere else", async () => {
+    const result = await run(
+      "class-readonly-ok",
+      `class C {
+         readonly x: i32;
+         constructor(x: i32) { this.x = x; }
+       }
+
+       export function main(): i32 {
+         const c = new C(4);
+         return c.x;
+       }\n`,
+    );
+    expect(result.exitCode).toBe(4);
+
+    const { result: bad } = await compileSource(
+      "class-readonly-write",
+      `class C {
+         readonly x: i32;
+         constructor(x: i32) { this.x = x; }
+       }
+
+       export function main(): i32 {
+         const c = new C(4);
+         c.x = 5;
+         return c.x;
+       }\n`,
+    );
+    expect(bad.ok).toBe(false);
+    expect(errorCodes(bad).some((code) => code.startsWith("TS"))).toBe(true);
+  });
+
+  test("a field may be called `length` without colliding with a string's", async () => {
+    const result = await run(
+      "class-field-length",
+      `class C {
+         length: i32;
+         constructor(n: i32) { this.length = n; }
+       }
+
+       export function main(): i32 {
+         const c = new C(3);
+         return c.length;
+       }\n`,
+    );
+    expect(result.exitCode).toBe(3);
+  });
+
+  test("`this` may be returned as a reference and dispatched through", async () => {
+    const result = await run(
+      "class-return-this",
+      `class C {
+         x: i32;
+         constructor(x: i32) { this.x = x; }
+         self(): Reference<C> { return this; }
+       }
+
+       export function main(): i32 {
+         const c = new C(9);
+         return c.self().x;
+       }\n`,
+    );
+    expect(result.exitCode).toBe(9);
+  });
+
+  test("a method taking more arguments than there are registers", async () => {
+    const result = await run(
+      "class-method-many-args",
+      `class C {
+         f(a: i32, b: i32, c: i32, d: i32, e: i32, g: i32, h: i32, i: i32): i32 {
+           return a + b + c + d + e + g + h + i;
+         }
+       }
+
+       export function main(): i32 {
+         const c = new C();
+         return c.f(1, 2, 3, 4, 5, 6, 7, 8);
+       }\n`,
+    );
+    expect(result.exitCode).toBe(36);
+  });
+
+  test("a method may return a struct by value", async () => {
+    const result = await run(
+      "class-method-struct",
+      `interface P { x: i32; y: i32; }
+       class C { make(): P { return { x: 1, y: 2 }; } }
+
+       export function main(): i32 {
+         const c = new C();
+         const p: P = c.make();
+         return p.x + p.y;
+       }\n`,
+    );
+    expect(result.exitCode).toBe(3);
+  });
+
+  test("an `override` without the keyword is tsc's business", async () => {
+    const { result } = await compileSource(
+      "class-no-override-keyword",
+      `class A { f(): i32 { return 1; } }
+       class B extends A { f(): i32 { return 2; } }
+
+       export function main(): i32 {
+         return new B().f();
+       }\n`,
+    );
+    expect(result.ok).toBe(false);
+    expect(errorCodes(result)).toContain("TS4114");
+  });
+});
+
+describe("class members the compiler does not have yet", () => {
+  test("a `static` method is GF0001", async () => {
+    await expectRejected(
+      "class-static",
+      `class C { static f(): i32 { return 1; } }
+
+       export function main(): i32 {
+         return C.f();
+       }\n`,
+      "GF0001",
+    );
+  });
+
+  test("an `abstract` method is GF0001, because it has no body", async () => {
+    const diagnostic = await expectRejected(
+      "class-abstract",
+      `abstract class A { abstract f(): i32; }
+       class B extends A { override f(): i32 { return 1; } }
+
+       export function main(): i32 {
+         return new B().f();
+       }\n`,
+      "GF0001",
+    );
+    expect(diagnostic.message).toContain("body");
   });
 });

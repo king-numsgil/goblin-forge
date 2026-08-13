@@ -402,3 +402,108 @@ describe("tryCast", () => {
     expect(diagnostic.message).toContain("nativeCast");
   });
 });
+
+describe("contract edges", () => {
+  test("a contract with two methods dispatches to both", async () => {
+    const result = await run(
+      "contract-two-methods",
+      `interface Pair { first(): i32; second(): i32; }
+       class Impl { first(): i32 { return 1; } second(): i32 { return 2; } }
+
+       function total(p: Reference<Pair>): i32 { return p.first() * 10 + p.second(); }
+
+       export function main(): i32 {
+         const impl = new Impl();
+         return total(impl);
+       }\n`,
+    );
+    expect(result.exitCode).toBe(12);
+  });
+
+  test("a contract method takes arguments", async () => {
+    const result = await run(
+      "contract-args",
+      `interface Adder { add(a: i32, b: i32): i32; }
+       class Impl { add(a: i32, b: i32): i32 { return a + b; } }
+
+       function use(x: Reference<Adder>): i32 { return x.add(2, 3); }
+
+       export function main(): i32 {
+         const impl = new Impl();
+         return use(impl);
+       }\n`,
+    );
+    expect(result.exitCode).toBe(5);
+  });
+
+  test("a contract may extend another, and the itab carries both halves", async () => {
+    const result = await run(
+      "contract-extends",
+      `interface Base { a(): i32; }
+       interface Derived extends Base { b(): i32; }
+       class Impl { a(): i32 { return 1; } b(): i32 { return 2; } }
+
+       function use(x: Reference<Derived>): i32 { return x.a() * 10 + x.b(); }
+
+       export function main(): i32 {
+         const impl = new Impl();
+         return use(impl);
+       }\n`,
+    );
+    expect(result.exitCode).toBe(12);
+  });
+
+  test("a temporary may be converted at a call site, unlike a binding", async () => {
+    // GF0234 rejects a *binding* that borrows a temporary, because the binding
+    // outlives it. A conversion made for an argument does not: the temporary
+    // lives to the end of the full expression, and the call finishes inside it.
+    const result = await run(
+      "contract-temp-arg",
+      `interface Speaker { speak(): string; }
+       class Dog { speak(): string { return "woof"; } }
+
+       function announce(who: Reference<Speaker>): void { console.log(who.speak()); }
+
+       export function main(): i32 {
+         announce(new Dog());
+         return 0;
+       }\n`,
+    );
+    expect(result.stdout).toBe("woof\n");
+    expect(result.leaked).toBe(0);
+  });
+
+  test("`tryCast` finds a class only when it says `implements`", async () => {
+    // Conversion is structural; discovery is not. The itab a conversion site
+    // registers belongs to that site, and a dynamic cast has never seen it —
+    // so `implements` is what puts the answer in the type descriptor.
+    const withClause = await run(
+      "contract-trycast-implements",
+      `interface Speaker { speak(): string; }
+       class Dog implements Speaker { speak(): string { return "woof"; } }
+
+       export function main(): i32 {
+         const d = new Dog();
+         const s = tryCast<Speaker>(d);
+         if (s !== null) { console.log(s.speak()); return 0; }
+         return 1;
+       }\n`,
+    );
+    expect(withClause.stdout).toBe("woof\n");
+    expect(withClause.exitCode).toBe(0);
+
+    const without = await run(
+      "contract-trycast-structural",
+      `interface Speaker { speak(): string; }
+       class Dog { speak(): string { return "woof"; } }
+
+       export function main(): i32 {
+         const d = new Dog();
+         const s = tryCast<Speaker>(d);
+         if (s !== null) { return 0; }
+         return 1;
+       }\n`,
+    );
+    expect(without.exitCode).toBe(1);
+  });
+});

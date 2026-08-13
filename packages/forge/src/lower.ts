@@ -43,9 +43,13 @@ import {
   fits,
   hasExplicitRadix,
   isFloatType,
+  isIntegerLiteral,
   isIntegerType,
+  isMachineComparable,
+  literalDigits,
   type MachineType,
   type Operator,
+  type OperatorInfo,
   OPERATORS,
   rangeOf,
   renderType,
@@ -114,6 +118,15 @@ const CSTRING_FREE = "cstring_free";
  * a print rather than something magic.
  */
 const RUNTIME = {
+  /**
+   * Called once at the top of a `bin`'s `main`, before its first statement.
+   *
+   * A call rather than a platform constructor, because a constructor in a
+   * static library is only linked when something else in its object already is
+   * — so a program that allocated nothing would silently not have one, which is
+   * exactly the program whose leak report has to be trustworthy.
+   */
+  init: "gf_runtime_init",
   print: "gf_print",
   eprint: "gf_eprint",
   fromI64: "gf_string_from_i64",
@@ -381,11 +394,12 @@ type FnRecord =
     }
   | {
       readonly kind: "imported";
-      readonly id: ExternId;
       readonly sig: SigId;
       readonly signature: FnSignature;
       readonly name: string;
       readonly exported: boolean;
+      /** Where it was declared, for the span on the extern when one is made. */
+      readonly declaration: ts.FunctionDeclaration;
     };
 
 /** One member of a class, waiting for its body to be lowered. */
@@ -394,7 +408,8 @@ type ClassBody =
   | {
       readonly kind: "constructor";
       readonly info: ClassInfo;
-      readonly node: ts.ConstructorDeclaration;
+      /** Absent when the class declares none and the constructor is generated. */
+      readonly node: ts.ConstructorDeclaration | undefined;
       readonly builder: FunctionBuilder;
       readonly params: readonly { name: string; type: MachineType }[];
     }
@@ -703,8 +718,12 @@ class Lowerer {
         builder: this.#declareClassFn(info.destructorSymbol, [selfRef], VOID, info.node),
       });
 
-      if (info.ctor !== undefined && info.constructorSymbol !== undefined) {
-        const params = this.#classFnParams(info.ctor);
+      // A constructor is emitted whenever there is construction to do, which is
+      // not the same as whenever one is written: a class whose fields carry
+      // initialisers has work to do without declaring one, and so does a class
+      // that only derives from such a class.
+      if (info.constructorSymbol !== undefined) {
+        const params = info.ctor === undefined ? [] : this.#classFnParams(info.ctor);
         if (params !== undefined) {
           bodies.push({
             kind: "constructor",
@@ -714,7 +733,7 @@ class Lowerer {
               info.constructorSymbol,
               [selfRef, ...params.map((p) => p.type)],
               VOID,
-              info.ctor,
+              info.ctor ?? info.node,
             ),
             params,
           });
@@ -996,12 +1015,25 @@ class Lowerer {
    * call, which is the point — REWRITE-PLAN §6 asks that both sides read the
    * same recorded shape, so that an internal call to an exported function
    * agrees with itself.
+   *
+   * The MIR extern is **not** made here, only the record that can make one. An
+   * extern in the module is an undefined symbol in the object file, so
+   * declaring it eagerly means declaring a library's surface and calling half
+   * of it fails to link on the half you did not call — which is not how a C
+   * header behaves. {@link externIdOf} makes it at the first call site.
    */
   #declareImport(node: ts.FunctionDeclaration): void {
     if (node.name === undefined) return;
     const name = node.name.text;
     const key = this.#keyOf(node, name);
     if (this.#functions.has(key)) return;
+
+    // A body-less declaration is only an import when nothing in this build
+    // defines it. TypeScript's overload signatures are body-less too, and they
+    // belong to a function whose implementation is the very next declaration —
+    // treating one as an `extern "C"` import drops the implementation and asks
+    // the linker for a symbol the program was about to define itself.
+    if (this.#hasImplementation(node)) return;
 
     const signature = this.#signature(node);
     if (signature === undefined) return;
@@ -1014,8 +1046,44 @@ class Lowerer {
       ret: this.tyOf(signature.returns, node),
       abi: "C",
     });
-    const id = this.#mir.extern({ name, sig, span: this.span(node) });
-    this.#functions.set(key, { kind: "imported", id, sig, signature, name, exported: true });
+    this.#functions.set(key, {
+      kind: "imported",
+      sig,
+      signature,
+      name,
+      exported: true,
+      declaration: node,
+    });
+  }
+
+  /** Whether some other declaration of this name in this build has a body. */
+  #hasImplementation(node: ts.FunctionDeclaration): boolean {
+    const symbol = node.name === undefined ? undefined : this.#checker.getSymbolAtLocation(node.name);
+    return (
+      symbol?.declarations?.some(
+        (declaration) =>
+          ts.isFunctionDeclaration(declaration) && declaration.body !== undefined,
+      ) ?? false
+    );
+  }
+
+  /**
+   * The MIR extern for an imported function, made on first use.
+   *
+   * Memoised by C name, exactly as {@link runtimeFn} is, and for the same
+   * reason: an extern is an undefined symbol, so the module should carry one
+   * only for a symbol it actually calls.
+   */
+  externIdOf(record: Extract<FnRecord, { kind: "imported" }>): ExternId {
+    const existing = this.#externs.get(record.name);
+    if (existing !== undefined) return existing;
+    const id = this.#mir.extern({
+      name: record.name,
+      sig: record.sig,
+      span: this.span(record.declaration),
+    });
+    this.#externs.set(record.name, id);
+    return id;
   }
 
   /**
@@ -1144,14 +1212,18 @@ class Lowerer {
       scopes.declare(param.name, {
         local: LocalId(index + 2),
         type: param.type,
-        ty: this.tyOf(param.type, body.node),
+        ty: this.tyOf(param.type, body.node ?? body.info.node),
       });
     });
 
     const returns = body.kind === "constructor" ? VOID : (body.returns ?? VOID);
     const lowerer = new BodyLowerer(this, body.builder, scopes, returns);
     lowerer.setClassContext(body.info, body.kind === "constructor");
-    if (body.node.body !== undefined) lowerer.run(body.node.body);
+    if (body.kind === "constructor") {
+      lowerer.runConstructor(body.info, body.node?.body);
+      return;
+    }
+    if (body.node?.body !== undefined) lowerer.run(body.node.body);
   }
 
   /**
@@ -1217,7 +1289,11 @@ class Lowerer {
       });
     });
 
-    new BodyLowerer(this, builder, scopes, record.signature.returns).run(node.body);
+    // The entry point, and only for a `bin`: a library has no `main` of its
+    // own, and the program that does have one is somebody else's.
+    const isEntry =
+      this.#requireMain && record.kind === "defined" && record.exported && record.name === "main";
+    new BodyLowerer(this, builder, scopes, record.signature.returns).run(node.body, isEntry);
   }
 
   // -- shared services -----------------------------------------------------
@@ -1404,7 +1480,7 @@ class Lowerer {
     // Idempotent, and it has to be: the propagation below re-enters this for
     // every derived class, and a three-deep hierarchy would otherwise walk
     // itself forever.
-    const key = `${className} ${contract.name}`;
+    const key = `${className}\0${contract.name}`;
     if (this.#implemented.has(key)) return true;
     this.#implemented.add(key);
 
@@ -1729,12 +1805,137 @@ class BodyLowerer {
   }
 
 
-  run(body: ts.Block): void {
+  run(body: ts.Block, isEntry = false): void {
     this.#current = this.#f.block();
+    // The runtime's one initialisation point, before the program's first
+    // statement. An ordinary `extern "C"` call like every other runtime call —
+    // it shows up in a MIR dump, which is where you want to see it, and it is
+    // linked because it is *called* rather than because a platform happened to
+    // pull in a constructor.
+    if (isEntry) this.#callRuntimeVoid(body, RUNTIME.init);
     this.#block(body);
     // Falling off the end of a `void` function is a return. tsc has already
     // rejected falling off the end of one that returns a value.
     if (this.#current !== undefined) this.#seal({ kind: "Return" });
+  }
+
+  /** Call a `void` runtime function that takes nothing, purely for its effect. */
+  #callRuntimeVoid(at: ts.Node, name: string): void {
+    const id = this.#outer.runtimeFn(name, [], VOID, at);
+    const next = this.#f.block();
+    this.#seal({
+      kind: "Call",
+      callee: { kind: "Direct", value: { kind: "Extern", value: id } },
+      args: [],
+      destination: { place: placeOf(LocalId(0)), target: next },
+      unwind: NO_UNWIND,
+    });
+    this.#current = next;
+  }
+
+  /**
+   * `Class$new` — the base's construction, then the field initialisers, then
+   * whatever the declared constructor's body says.
+   *
+   * That is C++'s order and it is the whole of why this is not simply `run`.
+   * A default member initialiser runs *after* the base subobject is complete
+   * and *before* the constructor body, so a base constructor writing a field
+   * cannot be undone by a derived initialiser, and a constructor body assigning
+   * over an initialised field wins. Running the initialisers at the `new` site
+   * instead would put every class's ahead of every base constructor body, which
+   * is the same answer only until one of them looks at the other's work.
+   *
+   * `body` is absent when the class declares no constructor and this one exists
+   * only to run initialisers — its own, the base's, or both.
+   */
+  runConstructor(info: ClassInfo, body: ts.Block | undefined): void {
+    this.#current = this.#f.block();
+
+    if (body === undefined) {
+      // Generated. tsc is not here to insist on `super()`, so the base call is
+      // written out rather than waited for.
+      if (info.base?.needsConstructor === true) this.#callBaseConstructor(info, info.node);
+      this.#fieldInitialisers(info);
+    } else if (info.base === undefined) {
+      // No base, so no `super()` to wait behind: the initialisers are the first
+      // thing that happens.
+      this.#fieldInitialisers(info);
+      this.#block(body);
+    } else {
+      // tsc requires `super()` in the constructor of a derived class, so the
+      // initialisers are emitted from there — which is where C++ runs them.
+      this.#pendingInitialisers = info;
+      this.#block(body);
+    }
+
+    if (this.#current !== undefined) this.#seal({ kind: "Return" });
+  }
+
+  /**
+   * The class whose field initialisers are waiting for a `super()` to finish.
+   *
+   * Cleared as soon as they are emitted, so a second `super()` — which tsc
+   * rejects anyway — could not run them twice.
+   */
+  #pendingInitialisers: ClassInfo | undefined;
+
+  /** Run the initialisers held back for the base construction to finish. */
+  #emitPendingInitialisers(): void {
+    const info = this.#pendingInitialisers;
+    if (info === undefined) return;
+    this.#pendingInitialisers = undefined;
+    this.#fieldInitialisers(info);
+  }
+
+  /**
+   * `this.field = <initialiser>` for each of this class's own initialised
+   * fields, in declaration order.
+   *
+   * Own fields only: the base's were run by the base's constructor, and running
+   * the flattened list here would run an inherited initialiser twice — the
+   * construction-side twin of the double free the destructor avoids by the same
+   * rule.
+   */
+  #fieldInitialisers(info: ClassInfo): void {
+    for (const field of info.initialisedFields) {
+      const initialiser = field.declaration.initializer;
+      if (initialiser === undefined) continue;
+      const index = info.fields.indexOf(field);
+      if (index < 0) continue;
+
+      // Each initialiser is its own full-expression, so whatever temporaries it
+      // makes die at the end of it — the same rule a statement gets, and the
+      // reason a `class C { s: string = "a" + "b" }` in a loop does not
+      // accumulate the concatenation's intermediates.
+      this.#fullExpression(() => {
+        const value = this.#expressionTyped(initialiser, field.type);
+        if (value === undefined) return;
+        // `Assign` rather than `Init`, and the same node `this.x = …` uses in a
+        // constructor body: the storage was zeroed by `Default` before the
+        // constructor was called, so an owning field holds an empty value that
+        // is released before the new one lands.
+        this.#push({
+          kind: "Assign",
+          place: {
+            local: LocalId(1),
+            projection: [{ kind: "Deref" }, { kind: "Field", value: FieldId(index) }],
+          },
+          rvalue: { kind: "Use", value: this.#forStorage(value) },
+        });
+      });
+    }
+  }
+
+  /** `Base$new(this)`, for a generated constructor that has no `super()` to read. */
+  #callBaseConstructor(info: ClassInfo, at: ts.Node): void {
+    const base = info.base;
+    if (base?.constructorSymbol === undefined) return;
+    const record = this.#outer.fn(base.constructorSymbol);
+    if (record === undefined || record.kind !== "defined") {
+      this.#outer.unsupported(at, `a call to \`${base.name}\`'s constructor`);
+      return;
+    }
+    this.#callDirect(record.id, [{ kind: "Copy", value: placeOf(LocalId(1)) }], undefined);
   }
 
   // -- statements ----------------------------------------------------------
@@ -1789,11 +1990,26 @@ class BodyLowerer {
    * one move nobody has to write, because there is nothing else it could mean:
    * the local is about to go out of scope, so copying it and then destroying
    * the original is an allocation and a free with no observable difference.
+   *
+   * **A by-value parameter is not such a local**, and this is the one place the
+   * distinction is invisible in the source. `return s` and `return move(s)`
+   * lower to the same move, so the rule `GF0236` states has to hold for both:
+   * the caller releases a by-value argument when the call ends (REWRITE-PLAN
+   * §11.4), and an owning value travels as a one-word handle (§4.5), so the
+   * callee's parameter is a *different local* holding the same buffer. Moving
+   * out of it hands the buffer to the caller and leaves the caller's own
+   * release still to come — the double free `GF0236` exists to prevent.
+   *
+   * Where the written `move` is an error, though, this is a copy. `return s` is
+   * exactly the read of an owning value that copies everywhere else in the
+   * language, and copying is what C++ produces here too once its own implicit
+   * move is unavailable — so the answer is the same, and only the allocation
+   * differs.
    */
   #returnValue(expression: ts.Expression): Operand | undefined {
     if (ts.isIdentifier(expression) && sameType(this.#returns, this.#widthType(expression))) {
       const binding = this.#scopes.lookup(expression.text);
-      if (binding !== undefined && this.#owns(binding.type)) {
+      if (binding !== undefined && this.#owns(binding.type) && !this.#isOwningParameter(binding)) {
         if (this.#readMoved(expression, binding.local, expression.text)) return undefined;
         this.#moved.set(binding.local, expression.text);
         return { kind: "Move", value: placeOf(binding.local) };
@@ -2216,6 +2432,16 @@ class BodyLowerer {
       place: placeOf(binding.local),
       rvalue: { kind: "Use", value: this.#forStorage(value) },
     });
+    // The binding holds a value again, so a `move` before this one no longer
+    // says anything about reading it. This is C++'s rule for a moved-from
+    // object: it is empty rather than invalid, and assigning to it is how you
+    // put it back into a known state. Without this, a `let` could never be
+    // reused after being moved out of — which is the ordinary shape of handing
+    // a buffer on from inside a loop.
+    //
+    // The right-hand side is lowered *first*, so `s = s` and `s = f(move(s))`
+    // still see the move that precedes them.
+    this.#moved.delete(binding.local);
   }
 
   /**
@@ -2650,8 +2876,58 @@ class BodyLowerer {
       return ERROR;
     }
 
-    if (info.comparison) return typed({ kind: "bool" });
+    if (info.comparison) {
+      if (operandType.kind === "typed" && !this.#comparable(expression, operator, info, operandType.type)) {
+        return ERROR;
+      }
+      return typed({ kind: "bool" });
+    }
     return operandType;
+  }
+
+  /**
+   * Whether two values of this type may be compared with this operator.
+   *
+   * tsc has nothing to say here: `<` on two strings is what it means in
+   * TypeScript, and `===` on two objects is a question TypeScript can answer
+   * because objects are references there. Neither survives the trip to a value
+   * model on a machine, so the frontend is the only thing that can refuse them
+   * — and until it did, both reached Cranelift and panicked, which is exactly
+   * the failure REWRITE-PLAN §8 says must not be reachable from source.
+   */
+  #comparable(
+    at: ts.BinaryExpression,
+    operator: Operator,
+    info: OperatorInfo,
+    type: MachineType,
+  ): boolean {
+    if (isMachineComparable(type)) return true;
+
+    // A `string` knows whether it equals another — the runtime compares the
+    // bytes — but not which of two comes first.
+    if (type.kind === "string") {
+      if (!info.ordered) return true;
+      this.#outer.unsupported(
+        at.operatorToken,
+        `\`${operator}\` on two strings, which needs a lexicographic comparison`,
+      );
+      return false;
+    }
+
+    // Everything left is an aggregate, and this is the value model rather than
+    // a gap. In TypeScript `a === b` on two objects asks whether they are the
+    // *same object*; here they are values, so there is no such question to ask
+    // — two values with equal fields are as interchangeable as two `3`s.
+    this.#outer.error(
+      at.operatorToken,
+      "GF0002",
+      `\`${operator}\` has no meaning on a \`${renderType(type)}\`. In TypeScript ` +
+        `this asks whether two names refer to the same object; here objects are ` +
+        `values, so the question does not arise — and comparing the bytes would ` +
+        `be wrong, because padding between fields holds nothing in particular. ` +
+        `Compare the fields you care about.`,
+    );
+    return false;
   }
 
   /** The type both operands promote to, or an error naming why there is none. */
@@ -2995,7 +3271,9 @@ class BodyLowerer {
     }
 
     const ty = this.#outer.tyOf(type, literal);
-    const text = literal.getText();
+    // The literal's *text*, with digit separators removed. `1_000` is ordinary
+    // TypeScript, and neither `Number` nor `BigInt` will take the underscores.
+    const text = literalDigits(literal.getText());
 
     if (rangeOf(type.name) === null) {
       const value = Number(text) * (negated ? -1 : 1);
@@ -3004,6 +3282,21 @@ class BodyLowerer {
           ? BigInt(new Uint32Array(new Float32Array([value]).buffer)[0]!)
           : new BigUint64Array(new Float64Array([value]).buffer)[0]!;
       return { operand: { kind: "Const", value: { kind: "Float", bits, ty } }, type };
+    }
+
+    // An integer width takes an integer literal, and nothing else. `1.5` is the
+    // obvious case; `1e3` is the one worth a message of its own, because it is
+    // exactly a thousand and is still refused — accepting it would be the
+    // silent float-to-integer conversion the language rejects everywhere else.
+    if (!isIntegerLiteral(text)) {
+      this.#outer.error(
+        literal,
+        "GF0164",
+        `\`${literal.getText()}\` is a floating-point literal and \`${type.name}\` ` +
+          `holds integers. Write the integer, or convert with ` +
+          `\`nativeCast<${type.name}>(…)\` where the truncation is meant.`,
+      );
+      return undefined;
     }
 
     const magnitude = BigInt(text);
@@ -3854,7 +4147,7 @@ class BodyLowerer {
         value:
           target.kind === "defined"
             ? { kind: "Local", value: target.id }
-            : { kind: "Extern", value: target.id },
+            : { kind: "Extern", value: this.#outer.externIdOf(target) },
       },
       args,
       destination: { place: placeOf(destination ?? LocalId(0)), target: next },
@@ -4499,12 +4792,18 @@ class BodyLowerer {
         );
         return undefined;
       }
+      // The base has nothing to construct, but this class may still have field
+      // initialisers waiting behind the `super()` that is written here.
+      this.#emitPendingInitialisers();
       return undefined;
     }
 
     const record = this.#outer.fn(base.constructorSymbol!);
     if (record === undefined || record.kind !== "defined") return undefined;
     this.#callDirect(record.id, args, undefined);
+    // The base subobject is complete, which is exactly when C++ runs this
+    // class's default member initialisers — before the constructor body.
+    this.#emitPendingInitialisers();
     return undefined;
   }
 
@@ -4616,10 +4915,16 @@ class BodyLowerer {
   /**
    * Report a read of a moved-from value.
    *
-   * Lexical, and deliberately so for now: a move is seen for the rest of the
-   * function once it has happened. A move under an `if`, read after the `if`,
-   * is not caught — and because a move nulls its source, that gap reads an
-   * empty string rather than freed memory. A wrong answer, never corruption.
+   * Not flow-sensitive, and deliberately so for now: a move is seen for the
+   * rest of the function once it has happened, so a move under an `if` is
+   * reported after the `if` even where the branch might not have run. An
+   * assignment to the binding clears the mark, which is what makes the
+   * conservative direction liveable — a `let` moved out of inside a loop and
+   * refilled before the next pass is the ordinary shape, not an exception.
+   *
+   * The cost of the other direction is bounded anyway: a move nulls its source,
+   * so a read this misses finds an empty value rather than freed memory. A
+   * wrong answer, never corruption.
    */
   #readMoved(at: ts.Node, local: LocalId, name: string): boolean {
     const moved = this.#moved.get(local);
@@ -4655,7 +4960,25 @@ class BodyLowerer {
     if (width.kind === "error") return undefined;
     // Converting a literal is a no-op the language would have done anyway, so
     // the literal is simply range-checked at the target width.
+    //
+    // Unless it is a *fractional* literal being converted to an integer width,
+    // which is the one case where there is a real conversion to do:
+    // `nativeCast<i32>(1.5)` is C++'s `static_cast<int>(1.5)` and means one.
+    // Range-checking `1.5` at `i32` would reject it (`GF0164`) for being
+    // written as a float — which is the right answer where the cast is absent
+    // and the wrong one here, because the cast is how truncation is asked for.
     if (width.kind === "poly") {
+      if (isIntegerType(target) && fractionalLiteralIn(argument)) {
+        const asFloat: MachineType = { kind: "scalar", name: "f64" };
+        const value = this.#value(argument, asFloat);
+        if (value === undefined) return undefined;
+        return this.#temporaryTyped(expression, target, {
+          kind: "Cast",
+          op: "FloatToInt",
+          operand: value.operand,
+          to: this.#outer.tyOf(target, expression),
+        });
+      }
       const value = this.#value(argument, target);
       return value === undefined ? undefined : { operand: value.operand, type: target };
     }
@@ -4824,4 +5147,17 @@ function elementTypeOf(type: MachineType): MachineType | undefined {
 function describe(node: ts.Node): string {
   const name = ts.SyntaxKind[node.kind];
   return `a ${name.replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase()}`;
+}
+
+/**
+ * Whether an expression built only from literals contains a fractional one.
+ *
+ * Such an expression has no width of its own and takes one from its context,
+ * so a single `1.5` anywhere inside it makes `f64` the only context that can
+ * hold the written value — which is what `nativeCast` needs to know before it
+ * range-checks the thing at an integer width.
+ */
+function fractionalLiteralIn(expression: ts.Node): boolean {
+  if (ts.isNumericLiteral(expression)) return !isIntegerLiteral(expression.getText());
+  return expression.getChildren().some((child) => fractionalLiteralIn(child));
 }
