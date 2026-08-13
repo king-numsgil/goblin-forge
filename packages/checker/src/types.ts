@@ -60,6 +60,24 @@ export type MachineType =
       readonly element: MachineType;
       readonly length: number;
     }
+  | {
+      /**
+       * `(a: i32) => i32` — a code address, and nothing else.
+       *
+       * One machine word, owning nothing, and **always classified by the C
+       * rules**. That is not a simplification to be lifted later: a function
+       * pointer's whole purpose is that both sides of a call agree about the
+       * signature without sharing a declaration, and C's classification is the
+       * only one anything outside this build knows. A function whose address
+       * is taken is emitted C-classified for the same reason.
+       *
+       * There is no environment here. A capturing closure is a different type
+       * with a different representation, and it is not implemented.
+       */
+      readonly kind: "fnptr";
+      readonly params: readonly MachineType[];
+      readonly returns: MachineType;
+    }
   | { readonly kind: "pointer"; readonly pointee: MachineType }
   | { readonly kind: "reference"; readonly referent: MachineType }
   | {
@@ -294,6 +312,53 @@ export function erase(checker: ts.TypeChecker, type: ts.Type): MachineType {
       throw new ErasureError("this array has no element type.", "GF0001");
     }
     return { kind: "array", element: erase(checker, element) };
+  }
+
+  // `(a: i32) => i32` — a code address. Before `eraseObject`, which would see a
+  // type with no properties and lay it out as an empty struct.
+  //
+  // One call signature and no properties, deliberately: a type with both is a
+  // callable object, which needs an environment to be worth anything and is
+  // therefore a closure rather than a function pointer.
+  const calls = checker.getSignaturesOfType(type, ts.SignatureKind.Call);
+  if (calls.length > 0 && checker.getPropertiesOfType(type).length === 0) {
+    if (calls.length > 1) {
+      throw new ErasureError(
+        "an overloaded function type has no single signature to point at. A " +
+          "function pointer is one code address and one calling convention.",
+        "GF0001",
+      );
+    }
+    const signature = calls[0]!;
+    if (signature.getTypeParameters()?.length) {
+      throw new ErasureError(
+        "a generic function type cannot be a function pointer: there is no one " +
+          "body to take the address of.",
+        "GF0001",
+      );
+    }
+    return {
+      kind: "fnptr",
+      params: signature.getParameters().map((parameter) => {
+        const declaration = parameter.valueDeclaration;
+        if (declaration === undefined || !ts.isParameter(declaration)) {
+          throw new ErasureError(
+            "a parameter of this function type has no declaration to read a " +
+              "type from.",
+            "GF0001",
+          );
+        }
+        if (declaration.questionToken || declaration.dotDotDotToken) {
+          throw new ErasureError(
+            "an optional or rest parameter has no C spelling, so it cannot be " +
+              "part of a function pointer's signature.",
+            "GF0001",
+          );
+        }
+        return erase(checker, checker.getTypeAtLocation(declaration));
+      }),
+      returns: erase(checker, checker.getReturnTypeOfSignature(signature)),
+    };
   }
 
   if (flags & ts.TypeFlags.Object) return eraseObject(checker, type);
@@ -544,6 +609,8 @@ export function renderType(type: MachineType): string {
       return "CString";
     case "array":
       return `${renderType(type.element)}[]`;
+    case "fnptr":
+      return `(${type.params.map(renderType).join(", ")}) => ${renderType(type.returns)}`;
     case "pointer":
       return `Pointer<${renderType(type.pointee)}>`;
     case "reference":

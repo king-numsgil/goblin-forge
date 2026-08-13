@@ -10,10 +10,10 @@
 // module, which is the failure mode this whole arrangement exists to remove.
 
 /** Fingerprint of the wire format these bindings were generated from. */
-export const SCHEMA_FINGERPRINT = 0x4a604933e6cf95d1n;
+export const SCHEMA_FINGERPRINT = 0x6cf57f249050c7dbn;
 
 /** The same value as hex, for comparing against the addon's report. */
-export const SCHEMA_FINGERPRINT_HEX = "4a604933e6cf95d1";
+export const SCHEMA_FINGERPRINT_HEX = "6cf57f249050c7db";
 
 // ---------------------------------------------------------------------------
 // postcard writer
@@ -345,7 +345,7 @@ export type Const =
   | { kind: "Float"; bits: bigint; ty: TyId }
   | { kind: "Null"; value: TyId }
   | { kind: "Str"; text: SymId; ty: TyId }
-  | { kind: "Func"; value: FuncRef }
+  | { kind: "Func"; func: FuncRef; ty: TyId }
 ;
 
 export type Operand =
@@ -849,7 +849,8 @@ export function writeConst(w: Writer, v: Const): void {
     }
     case "Func": {
       w.varint(6);
-      writeFuncRef(w, v.value);
+      writeFuncRef(w, v.func);
+      writeTyId(w, v.ty);
       break;
     }
   }

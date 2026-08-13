@@ -453,18 +453,22 @@ describe("classes: what is rejected", () => {
   });
 
   test("an interface holding a function-typed property stays a plain struct", async () => {
-    // The other side of the same rule: `speak: () => string` is a *field*, so
-    // the interface is data and is laid out as a struct. It is not implemented
-    // yet either — there are no function values — but the diagnostic must be
-    // about the function pointer rather than about dispatch.
-    const diagnostic = await expectRejected(
+    // The other side of the same rule: `speak: () => i32` is a *field*, so the
+    // interface is data and is laid out as a struct holding a code address —
+    // C's struct-of-callbacks, and not a contract with a vtable.
+    const result = await run(
       "interface-callback-field",
       `interface Handler { speak: () => i32; }
-       function use(h: Handler): i32 { return 0; }
-       export function main(): i32 { return 0; }\n`,
-      "GF0001",
+
+       function one(): i32 { return 1; }
+       function use(h: Handler): i32 { return h.speak(); }
+
+       export function main(): i32 {
+         const h: Handler = { speak: one };
+         return use(h);
+       }\n`,
     );
-    expect(diagnostic.message).not.toContain("contract");
+    expect(result.exitCode).toBe(1);
   });
 });
 
@@ -958,13 +962,28 @@ describe("class members at the edges", () => {
 });
 
 describe("class members the compiler does not have yet", () => {
-  test("a `static` method is GF0001", async () => {
-    await expectRejected(
+  test("a `static` method is a namespaced free function", async () => {
+    const result = await run(
       "class-static",
       `class C { static f(): i32 { return 1; } }
 
        export function main(): i32 {
          return C.f();
+       }\n`,
+    );
+    expect(result.exitCode).toBe(1);
+  });
+
+  test("a `static` field is still GF0001", async () => {
+    // A static *method* is a function with a qualified name and needs nowhere
+    // to live. A static field is a global, and there are no globals yet — a
+    // top-level `const` is `GF0001` too.
+    await expectRejected(
+      "class-static-field",
+      `class C { static n: i32 = 1; }
+
+       export function main(): i32 {
+         return 0;
        }\n`,
       "GF0001",
     );

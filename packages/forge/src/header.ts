@@ -129,6 +129,11 @@ export function emitHeader(module: Module, options: HeaderOptions): string {
 function emitStructs(module: Module): string[] {
   const order: number[] = [];
   const seen = new Set<number>();
+  // Signatures reached through a callback. Each gets a `typedef`, because C's
+  // declarator syntax for a function *returning* a function pointer —
+  // `int32_t (*f(void))(int32_t)` — is unreadable and a name is not optional
+  // anyway once one appears as a struct field.
+  const fnPtrs = new Set<number>();
 
   // **Post-order.** A struct is appended after everything it contains, because
   // nested aggregates are inline: `Line` holds two `Point`s by value, so C
@@ -153,6 +158,14 @@ function emitStructs(module: Module): string[] {
       visit(kind.value);
     }
     if (kind.kind === "FixedArray") visit(kind.element);
+    // Through a callback's signature: a struct that appears only as a
+    // callback's parameter still has to be declared before the callback is.
+    if (kind.kind === "FnPtr") {
+      const signature = module.sigs[kind.value];
+      for (const param of signature?.params ?? []) visit(param.ty);
+      if (signature !== undefined) visit(signature.ret);
+      fnPtrs.add(kind.value);
+    }
   };
 
   for (const func of module.funcs) {
@@ -164,6 +177,8 @@ function emitStructs(module: Module): string[] {
   }
 
   const out: string[] = [];
+  // Before the structs would be wrong — a callback may take one — and after
+  // them is right for the same reason.
   for (const id of order) {
     const def = module.structs[id];
     if (def === undefined) continue;
@@ -175,8 +190,22 @@ function emitStructs(module: Module): string[] {
     out.push(`} ${name};`);
     out.push("");
   }
+  for (const sig of [...fnPtrs].sort((a, b) => a - b)) {
+    out.push(`typedef ${functionPointer(module, sig, fnPtrName(sig))};`);
+    out.push("");
+  }
   if (out.length > 0) out.pop();
   return out;
+}
+
+/**
+ * The typedef name for a callback signature.
+ *
+ * By signature id, which is stable for a given program because the frontend
+ * interns signatures in the order it meets them.
+ */
+function fnPtrName(sig: number): string {
+  return `GfFn${sig}`;
 }
 
 function declaration(module: Module, name: string, signature: Signature): string {
@@ -201,6 +230,16 @@ function member(module: Module, ty: number, name: string): string {
     return `${cType(module, kind.element)} ${name}[${kind.length}]`;
   }
   return `${cType(module, ty)} ${name}`;
+}
+
+/** `ret (*name)(params)`, with an empty name for an abstract declarator. */
+function functionPointer(module: Module, sig: number, name: string): string {
+  const signature = module.sigs[sig];
+  if (signature === undefined) throw new HeaderError(`signature ${sig} is not in the module`);
+  const params = signature.params.map((param) => cType(module, param.ty));
+  if (signature.variadic) params.push("...");
+  const list = params.length === 0 ? "void" : params.join(", ");
+  return `${cType(module, signature.ret)} (*${name})(${list})`;
 }
 
 function cType(module: Module, ty: number): string {
@@ -245,10 +284,16 @@ function spell(module: Module, kind: TyKind): string {
     // These own something, or carry a vtable. `require_plain_data` in the ABI
     // classifier refuses them at the boundary, so reaching here means the two
     // halves disagree about what may cross.
+    // Its typedef, not an inline declarator. C's syntax for a function
+    // *returning* a function pointer puts the parameter list on the outside —
+    // `int32_t (*pick(bool))(int32_t)` — which a `${ret} ${name}(${params})`
+    // template cannot produce and nobody wants to read. The typedef makes a
+    // callback an ordinary noun everywhere it appears.
+    case "FnPtr":
+      return fnPtrName(kind.value);
     case "Array":
     case "Class":
     case "Interface":
-    case "FnPtr":
       throw new HeaderError(
         `\`${kind.kind}\` has no C spelling. The ABI classifier is meant to have ` +
           "rejected this before a header was asked for.",

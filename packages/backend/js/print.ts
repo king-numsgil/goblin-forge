@@ -297,9 +297,9 @@ function constant(module: Module, value: Const): string {
     case "Str":
       return JSON.stringify(sym(module, value.text));
     case "Func":
-      return value.value.kind === "Local"
-        ? sym(module, module.funcs[value.value.value]?.name ?? 0)
-        : sym(module, module.externs[value.value.value]?.name ?? 0);
+      return value.func.kind === "Local"
+        ? sym(module, module.funcs[value.func.value]?.name ?? 0)
+        : sym(module, module.externs[value.func.value]?.name ?? 0);
   }
 }
 

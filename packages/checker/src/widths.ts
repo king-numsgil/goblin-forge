@@ -166,6 +166,17 @@ export function sameType(a: MachineType, b: MachineType): boolean {
       const other = b as typeof a;
       return a.name === other.name;
     }
+    // Structural, and it has to be: a function pointer's identity is its
+    // signature, because that is the only thing a caller and a definition on
+    // the far side of a boundary can both know.
+    case "fnptr": {
+      const other = b as typeof a;
+      return (
+        a.params.length === other.params.length &&
+        sameType(a.returns, other.returns) &&
+        a.params.every((param, index) => sameType(param, other.params[index]!))
+      );
+    }
     // `void`, `bool` and `string` carry nothing to compare.
     default:
       return true;
@@ -268,6 +279,9 @@ export function isMachineComparable(type: MachineType): boolean {
     case "pointer":
     case "reference":
     case "cstring":
+    // A code address, so two of them compare as addresses — which is how you
+    // ask whether a callback is the one you installed.
+    case "fnptr":
       return true;
     default:
       return false;

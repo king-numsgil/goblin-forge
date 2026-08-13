@@ -149,6 +149,99 @@ int main(void) {
     expect(stdout).toBe("42\n3.50\n1\n");
   }, CMAKE_TIMEOUT);
 
+  test("C passes a callback in, and Goblin calls it", async () => {
+    // The reason function pointers are classified by the C rules and not by an
+    // internal convention. The C compiler decides how `int32_t (*)(int32_t)` is
+    // called; this side has to agree, and nothing here shares a declaration —
+    // the header is the only thing in common.
+    const lib = await library(
+      "lib-callback",
+      `export function twiceOver(f: (a: i32) => i32, x: i32): i32 {
+         return f(x) + f(x);
+       }
+
+       export function pick(flag: boolean): (a: i32) => i32 {
+         if (flag) { return double; }
+         return negate;
+       }
+
+       function double(a: i32): i32 { return a * 2; }
+       function negate(a: i32): i32 { return -a; }\n`,
+    );
+
+    const stdout = buildConsumer({
+      ...lib,
+      main: `#include <stdio.h>
+#include "main.h"
+
+static int32_t add_one(int32_t a) { return a + 1; }
+
+int main(void) {
+  /* C's function, called from Goblin. */
+  printf("%d\\n", twiceOver(add_one, 20));
+  /* Goblin's function, called from C through the pointer it returned. */
+  printf("%d\\n", pick(true)(21));
+  printf("%d\\n", pick(false)(21));
+  return 0;
+}
+`,
+    });
+    expect(stdout).toBe("42\n42\n-21\n");
+  }, CMAKE_TIMEOUT);
+
+  test("a callback taking a struct agrees about the struct too", async () => {
+    // The classification that differs between conventions. A `Point` travels
+    // one way under C's rules and another under the internal one, so a
+    // callback taking one is where a disagreement produces plausible numbers
+    // rather than a crash.
+    const lib = await library(
+      "lib-callback-struct",
+      `interface Point { x: i32; y: i32; }
+
+       export function applyTo(f: (p: Point) => i32, x: i32, y: i32): i32 {
+         return f({ x: x, y: y });
+       }\n`,
+    );
+
+    const stdout = buildConsumer({
+      ...lib,
+      main: `#include <stdio.h>
+#include "main.h"
+
+static int32_t manhattan(Point p) { return p.x + p.y; }
+
+int main(void) {
+  printf("%d\\n", applyTo(manhattan, 19, 23));
+  return 0;
+}
+`,
+    });
+    expect(stdout).toBe("42\n");
+  }, CMAKE_TIMEOUT);
+
+  test("a `static` method crosses as an ordinary function pointer", async () => {
+    const lib = await library(
+      "lib-callback-static",
+      `class Math2 { static triple(a: i32): i32 { return a * 3; } }
+
+       export function apply(f: (a: i32) => i32, x: i32): i32 { return f(x); }
+       export function tripler(): (a: i32) => i32 { return Math2.triple; }\n`,
+    );
+
+    const stdout = buildConsumer({
+      ...lib,
+      main: `#include <stdio.h>
+#include "main.h"
+
+int main(void) {
+  printf("%d\\n", apply(tripler(), 14));
+  return 0;
+}
+`,
+    });
+    expect(stdout).toBe("42\n");
+  }, CMAKE_TIMEOUT);
+
   test("structs cross the boundary with the layout the header declares", async () => {
     // The header is generated from the MIR, so the `Point` the C compiler lays
     // out is the one the backend laid out. If those disagreed the numbers

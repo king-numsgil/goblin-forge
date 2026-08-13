@@ -256,6 +256,43 @@ $ bun test tests/vector.test.ts
 The third kind C has — a bare `T*` from `malloc` — is still to come: `Pointer<T>`
 is declared and not yet a type you can write.
 
+### Functions are values, as long as they capture nothing
+
+```ts
+function add(a: i32, b: i32): i32 { return a + b; }
+class Math2 { static triple(a: i32): i32 { return a * 3; } }
+
+const f: (a: i32, b: i32) => i32 = add;   // a code address, one machine word
+export function apply(g: (a: i32) => i32, x: i32): i32 { return g(x); }
+apply(Math2.triple, 14);                  // 42
+```
+
+A function pointer is **always classified by the C rules**, and that is the
+design rather than a simplification: it exists so a call site and a definition
+agree without sharing a declaration, and C's classification is the only one
+anything outside this build knows. A function whose address is taken is emitted
+C-classified too, so the two cannot drift.
+
+Which is why a `static` method is what a callback written inside a class looks
+like. An *instance* method needs a receiver and a function pointer has nowhere
+to put one — the same reason there are no closures yet, and `(a) => a * n` is a
+`GF0001`.
+
+The distinction that decides how a call is emitted is one the language already
+drew at the declaration: `speak(): i32` is a method and dispatches through a
+vtable; `speak: () => i32` is a field holding an address and is called through.
+C's struct of callbacks stays a plain struct.
+
+```console
+$ bun test tests/function-pointers.test.ts
+ 34 pass  0 fail
+```
+
+`tests/libraries.test.ts` builds a **real C program** that passes its own
+function into Goblin and calls a Goblin function back through a pointer it was
+handed — including one taking a struct by value, which is where a disagreement
+about the convention would produce plausible numbers rather than a crash.
+
 ### Calling C
 
 A function declared with no body is an `extern "C"` import, and its signature is

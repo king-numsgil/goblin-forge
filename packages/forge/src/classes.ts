@@ -36,6 +36,21 @@ export interface ClassField {
   readonly owner: string;
 }
 
+/**
+ * A `static` method: a free function that happens to be written inside a class.
+ *
+ * No receiver, no vtable slot, no dispatch — the class name is a namespace and
+ * nothing more, which is exactly why one can be taken as a function pointer
+ * where an instance method cannot. An instance method needs a `this` that a
+ * `(a: i32) => i32` has nowhere to put.
+ */
+export interface StaticMethod {
+  readonly name: string;
+  readonly declaration: ts.MethodDeclaration;
+  /** The symbol its function is emitted under: `Class$name`. */
+  readonly symbol: string;
+}
+
 /** A method, with the slot it dispatches through. */
 export interface ClassMethod {
   readonly name: string;
@@ -62,6 +77,13 @@ export interface ClassInfo {
   readonly slots: readonly string[];
   /** Every method callable on this class, own and inherited, by name. */
   readonly methods: ReadonlyMap<string, ClassMethod>;
+  /**
+   * Every `static` method, own and inherited, by name.
+   *
+   * Apart from {@link ClassInfo.methods} because they are a different thing
+   * wearing the same syntax: no receiver, no slot, and therefore no override.
+   */
+  readonly statics: ReadonlyMap<string, StaticMethod>;
   readonly ctor: ts.ConstructorDeclaration | undefined;
   /**
    * Whether this class has a constructor to run, declared or generated.
@@ -252,7 +274,14 @@ function build(
   const slots: string[] = base ? [...base.slots] : [destructorSymbol];
   slots[0] = destructorSymbol;
 
+  const statics = new Map<string, StaticMethod>();
   const methods = new Map<string, ClassMethod>();
+  if (base) {
+    // Inherited, because `Derived.helper()` resolves to `Base.helper` in
+    // TypeScript. There is no overriding to do — the name is looked up at
+    // compile time and there is no receiver to dispatch on.
+    for (const [staticName, method] of base.statics) statics.set(staticName, method);
+  }
   if (base) {
     for (const [methodName, method] of base.methods) methods.set(methodName, method);
   }
@@ -263,13 +292,25 @@ function build(
       report.unsupported(member, "a computed or non-identifier method name");
       return undefined;
     }
-    if (isStatic(member)) {
-      report.unsupported(member, "a static method");
-      return undefined;
-    }
     if (member.body === undefined) {
       report.unsupported(member, "a method with no body");
       return undefined;
+    }
+    // A `static` method is a free function in a namespace: no receiver, no
+    // slot, no dispatch. Collected apart from the vtable for that reason —
+    // giving one a slot would mean an object could override it, and there is
+    // no object.
+    if (isStatic(member)) {
+      if (member.typeParameters && member.typeParameters.length > 0) {
+        report.unsupported(member.typeParameters[0]!, "a generic method");
+        return undefined;
+      }
+      statics.set(member.name.text, {
+        name: member.name.text,
+        declaration: member,
+        symbol: `${name}$${member.name.text}`,
+      });
+      continue;
     }
     if (member.typeParameters && member.typeParameters.length > 0) {
       report.unsupported(member.typeParameters[0]!, "a generic method");
@@ -329,6 +370,7 @@ function build(
     ownFieldsAt,
     slots,
     methods,
+    statics,
     ctor,
     needsConstructor,
     initialisedFields,

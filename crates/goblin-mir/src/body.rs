@@ -162,7 +162,15 @@ pub enum Const {
         ty: TyId,
     },
     /// The address of a function, for a `FnPtr` value.
-    Func(FuncRef),
+    ///
+    /// Carries its type like every other constant: the `FnPtr` type interns the
+    /// *signature the pointer is classified by*, which is not recoverable from
+    /// the function alone — two functions with the same shape may be declared
+    /// under different conventions.
+    Func {
+        func: FuncRef,
+        ty: TyId,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Schema)]

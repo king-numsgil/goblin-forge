@@ -1876,7 +1876,25 @@ impl<'a, 'm, M: ClifModule> FunctionTranslator<'a, 'm, M> {
                     .to_owned();
                 Some(self.string_literal(&text)?)
             }
-            Const::Func(_) => internal_error!("function pointers arrive with milestone 6"),
+            // The address of a function, as a relocation the linker fills in —
+            // the same kind of link-time fact a string literal's address is.
+            Const::Func { func, .. } => {
+                let id = match func {
+                    FuncRef::Local(id) => {
+                        *self.context.func_refs.defined.get(id.index()).ok_or_else(|| {
+                            InternalError::new(format!("function {} is missing", id.0))
+                        })?
+                    }
+                    FuncRef::Extern(id) => {
+                        *self.context.func_refs.imported.get(id.index()).ok_or_else(|| {
+                            InternalError::new(format!("extern {} is missing", id.0))
+                        })?
+                    }
+                };
+                let func_ref = self.clif_module.declare_func_in_func(id, self.builder.func);
+                let pointer = self.target.pointer_type();
+                Some(self.builder.ins().func_addr(pointer, func_ref))
+            }
         })
     }
 
@@ -2108,10 +2126,11 @@ impl<'a, 'm, M: ClifModule> FunctionTranslator<'a, 'm, M> {
                 | Const::Float { ty, .. }
                 | Const::Null(ty)
                 | Const::Bool { ty, .. }
-                | Const::Str { ty, .. } => Ok(*ty),
+                | Const::Str { ty, .. }
+                | Const::Func { ty, .. } => Ok(*ty),
                 // `Unit` is the only constant with no type, because there is no
                 // type for it to have.
-                Const::Unit | Const::Func(_) => {
+                Const::Unit => {
                     internal_error!("this constant has no recorded type")
                 }
             },
@@ -2131,7 +2150,12 @@ impl<'a, 'm, M: ClifModule> FunctionTranslator<'a, 'm, M> {
             // `p !== null` on a C string is the single most common thing a
             // Goblin program will do with one — `getenv`, `SDL_GetError`, half
             // of libc return null and mean it.
-            Some(TyKind::Pointer(_) | TyKind::Reference(_) | TyKind::CStr) => Ok(Numeric::Unsigned),
+            // `FnPtr` is here for the same reason: a code address is a word,
+            // and comparing two of them asks whether a callback is the one you
+            // installed.
+            Some(
+                TyKind::Pointer(_) | TyKind::Reference(_) | TyKind::CStr | TyKind::FnPtr(_),
+            ) => Ok(Numeric::Unsigned),
             _ => internal_error!("a non-numeric type reached an arithmetic operator"),
         }
     }
@@ -2311,9 +2335,19 @@ impl<'a, 'm, M: ClifModule> FunctionTranslator<'a, 'm, M> {
                         .get(id.index())
                         .ok_or_else(|| InternalError::new(format!("extern {} is missing", id.0)))?,
                 ),
-                Callee::Indirect { .. } => {
-                    internal_error!("calling through a `FnPtr` value is not implemented yet")
-                }
+                // A `FnPtr` value *is* the code address, so there is nothing to
+                // load — where a virtual call reads a vtable slot and an
+                // interface call reads an itab slot, this one is already there.
+                //
+                // The signature comes from the node rather than from the callee,
+                // because there is no callee to ask: `sig` is what the call site
+                // and the definition both classified against, which is the whole
+                // reason the node records it.
+                Callee::Indirect { operand, .. } => CallTarget::Indirect(
+                    self.operand(operand)?.ok_or_else(|| {
+                        InternalError::new("an indirect callee produced no value")
+                    })?,
+                ),
                 // Two loads and an indirect call. The receiver is `args[0]` — read
                 // once, used both as the `this` argument and as the source of the
                 // vtable pointer, so the two cannot disagree.
@@ -2518,11 +2552,22 @@ fn addressed_locals(func: &Function) -> std::collections::HashSet<LocalId> {
         // straight to the runtime, where other types materialise a temporary on
         // the way and get noticed by the statement scan above.
         if let Terminator::Call {
-            args, destination, ..
+            callee,
+            args,
+            destination,
+            ..
         } = &block.terminator
         {
             if let Some(dest) = destination {
                 note(&mut set, &dest.place);
+            }
+            // The callee too, when it is a value: `fs[0]()` reads the code
+            // address out of an array, and that read needs an address like any
+            // other projected place.
+            if let Callee::Indirect { operand, .. } = callee {
+                if let Operand::Copy(p) | Operand::Move(p) | Operand::Borrow(p) = operand {
+                    note(&mut set, p);
+                }
             }
             for operand in args {
                 if let Operand::Copy(p) | Operand::Move(p) | Operand::Borrow(p) = operand {

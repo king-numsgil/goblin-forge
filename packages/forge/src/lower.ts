@@ -63,6 +63,7 @@ import {
 import {
   type ClassInfo,
   type ClassMethod,
+  type StaticMethod,
   collectClasses,
 } from "./classes.ts";
 import {
@@ -427,6 +428,18 @@ type ClassBody =
       readonly builder: FunctionBuilder;
       readonly params: readonly { name: string; type: MachineType }[];
       readonly returns: MachineType;
+    }
+  | {
+      /**
+       * A `static` method — the same shape as a plain function, and lowered as
+       * one. No `this` is bound, so parameters start at local 1 rather than 2.
+       */
+      readonly kind: "static";
+      readonly info: ClassInfo;
+      readonly node: ts.MethodDeclaration;
+      readonly builder: FunctionBuilder;
+      readonly params: readonly { name: string; type: MachineType }[];
+      readonly returns: MachineType;
     };
 
 /**
@@ -539,6 +552,59 @@ class Lowerer {
     return this.#functions.get(this.#keyOf(declaration, declaration.name.text));
   }
 
+  /**
+   * Erase an expression's type without reporting when it cannot be erased.
+   *
+   * A *probe*, for the places that are deciding what kind of construct they are
+   * looking at rather than lowering one. `console.log(x)` is a property access
+   * whose receiver has no machine type at all, so anything that asks the width
+   * pass about a receiver before knowing it is a value raises a diagnostic
+   * about `console` — which is the wrong complaint and stops the compile.
+   */
+  tryErase(expression: ts.Expression): MachineType | undefined {
+    try {
+      return erase(this.#checker, this.#checker.getTypeAtLocation(expression));
+    } catch (error) {
+      if (error instanceof ErasureError) return undefined;
+      throw error;
+    }
+  }
+
+  /**
+   * `f` or `C.f` written as a *value* rather than called.
+   *
+   * The result is a code address. An instance method is deliberately not here:
+   * it needs a receiver, and a function pointer has nowhere to put one — which
+   * is the whole reason `static` is what a callback is written as.
+   */
+  /**
+   * Whether this expression is the *name* of a function declaration.
+   *
+   * Broader than {@link Lowerer.functionValueAt}, and deliberately: an
+   * intrinsic like `cstring` is an ambient `declare function` with no address
+   * at all, so it has no record here — but it is still a name rather than a
+   * value, and treating `cstring(s)` as a call through a function pointer takes
+   * it away from the path that knows what it means.
+   */
+  namesADeclaredFunction(expression: ts.Expression): boolean {
+    if (!ts.isIdentifier(expression)) return false;
+    let symbol = this.#checker.getSymbolAtLocation(expression);
+    if (symbol === undefined) return false;
+    if ((symbol.flags & ts.SymbolFlags.Alias) !== 0) {
+      symbol = this.#checker.getAliasedSymbol(symbol);
+    }
+    return symbol.declarations?.some(ts.isFunctionDeclaration) ?? false;
+  }
+
+  functionValueAt(expression: ts.Expression): FnRecord | undefined {
+    if (ts.isPropertyAccessExpression(expression) && ts.isIdentifier(expression.expression)) {
+      const info = this.#classes.get(expression.expression.text);
+      const method = info?.statics.get(expression.name.text);
+      return method === undefined ? undefined : this.#functions.get(method.symbol);
+    }
+    return this.resolveCallee(expression);
+  }
+
   readonly #requireMain: boolean;
   readonly #root: string;
   readonly #entry: string;
@@ -589,6 +655,11 @@ class Lowerer {
         (file) =>
           !file.isDeclarationFile && !this.#program.isSourceFileFromExternalLibrary(file),
       );
+
+    // Before anything is declared: whether a function's address is taken
+    // decides its calling convention, and a declaration cannot be revised once
+    // the call that takes the address has been lowered.
+    this.#collectAddressTaken(sources);
 
     // Classes come first and in their own phase, because a top-level function
     // may take one as a parameter, and because a class's methods have to exist
@@ -665,6 +736,79 @@ class Lowerer {
    * can use it to decide *whether* a construct is about a class before
    * committing to lowering it as one.
    */
+  /**
+   * Functions whose *address* is taken somewhere in the program.
+   *
+   * These are emitted with the C calling convention, because a `FnPtr`'s
+   * signature is classified by the C rules and a call through one has to agree
+   * with the definition. Only the convention changes; the symbol and the
+   * linkage do not, so an internal helper stays internal.
+   *
+   * Whole-program, and it has to be: whether a function's address is taken is
+   * not a property of its declaration, and the call in another module that
+   * takes it may be lowered long after the declaration was.
+   */
+  readonly #addressTaken = new Set<ts.Declaration>();
+
+  /**
+   * Find every function referred to as a value rather than called.
+   *
+   * The distinction is entirely syntactic — `f(1)` calls, `f` does not — so
+   * this collects the callee position of every call first and then treats any
+   * remaining reference as an address.
+   */
+  #collectAddressTaken(sources: readonly ts.SourceFile[]): void {
+    const callees = new Set<ts.Node>();
+    const findCalls = (node: ts.Node): void => {
+      if (ts.isCallExpression(node)) callees.add(node.expression);
+      ts.forEachChild(node, findCalls);
+    };
+    for (const source of sources) findCalls(source);
+
+    const scan = (node: ts.Node): void => {
+      // The `f` in `obj.f` is not an independent reference to `f`; the whole
+      // property access is. Skipping it keeps `C.f()` from looking like an
+      // address taken through its own name.
+      const parent: ts.Node | undefined = node.parent;
+      // A declaration's own name is not a reference to it. Without this, every
+      // `function f(…)` marks `f` as having its address taken — which quietly
+      // moves the whole program onto the C calling convention, and then fails
+      // on the first parameter that cannot cross a C boundary.
+      const isDeclarationName =
+        parent !== undefined &&
+        (ts.isFunctionDeclaration(parent) ||
+          ts.isMethodDeclaration(parent) ||
+          ts.isClassDeclaration(parent) ||
+          ts.isVariableDeclaration(parent) ||
+          ts.isParameter(parent) ||
+          ts.isPropertyDeclaration(parent) ||
+          ts.isBindingElement(parent)) &&
+        parent.name === node;
+
+      const isMemberName =
+        parent !== undefined &&
+        ((ts.isPropertyAccessExpression(parent) && parent.name === node) ||
+          (ts.isQualifiedName(parent) && parent.right === node));
+
+      if (
+        (ts.isIdentifier(node) || ts.isPropertyAccessExpression(node)) &&
+        !callees.has(node) &&
+        !isMemberName &&
+        !isDeclarationName
+      ) {
+        for (const declaration of this.#checker.getSymbolAtLocation(node)?.declarations ?? []) {
+          if (ts.isFunctionDeclaration(declaration)) {
+            this.#addressTaken.add(declaration);
+          } else if (ts.isMethodDeclaration(declaration) && isStaticMember(declaration)) {
+            this.#addressTaken.add(declaration);
+          }
+        }
+      }
+      ts.forEachChild(node, scan);
+    };
+    for (const source of sources) scan(source);
+  }
+
   /**
    * The element type, when this expression is a `T[]` or a reference to one.
    *
@@ -798,6 +942,43 @@ class Lowerer {
           returns,
         });
       }
+
+      for (const method of info.statics.values()) {
+        // Inherited statics belong to the class that declared them, and the
+        // symbol says which — so emitting only the ones whose symbol starts
+        // with this class's name emits each exactly once.
+        if (method.symbol !== `${info.name}$${method.name}`) continue;
+        const params = this.#classFnParams(method.declaration);
+        if (params === undefined) continue;
+        const signature = this.#checker.getSignatureFromDeclaration(method.declaration);
+        const returns =
+          signature === undefined
+            ? undefined
+            : this.erase(
+                method.declaration.type ?? method.declaration,
+                this.#checker.getReturnTypeOfSignature(signature),
+              );
+        if (returns === undefined) {
+          this.unsupported(method.declaration, "a method tsc could not give a signature to");
+          continue;
+        }
+        // No receiver: a static method is a free function, so its parameters
+        // are exactly what was written.
+        bodies.push({
+          kind: "static",
+          info,
+          node: method.declaration,
+          builder: this.#declareClassFn(
+            method.symbol,
+            params.map((p) => p.type),
+            returns,
+            method.declaration,
+            this.#addressTaken.has(method.declaration),
+          ),
+          params,
+          returns,
+        });
+      }
     }
 
     for (const [name, info] of this.#classes) {
@@ -904,11 +1085,16 @@ class Lowerer {
     params: MachineType[],
     returns: MachineType,
     at: ts.Node,
+    // A function whose address is taken is classified by the C rules, because
+    // that is what a `FnPtr`'s signature is classified by and the two have to
+    // agree. The *symbol* is unchanged — this is about the calling convention,
+    // not about visibility.
+    addressTaken = false,
   ): FunctionBuilder {
     const sig = this.#mir.sig({
       params: params.map((param) => ({ ty: this.tyOf(param, at), name: null })),
       ret: this.tyOf(returns, at),
-      abi: "Internal",
+      abi: addressTaken ? "C" : "Internal",
     });
     const builder = this.#mir.declareFunction({
       name: symbol,
@@ -1003,13 +1189,19 @@ class Lowerer {
     // An exported function is a C entry point: something outside this module
     // calls it by its symbol, so it is classified by the C rules. `main` in
     // particular is called by the platform C runtime.
+    //
+    // A function whose *address* is taken is classified the same way, because a
+    // `FnPtr`'s signature is, and the call through the pointer and the
+    // definition must agree. It stays internally linked under its own symbol —
+    // only the convention changes.
+    const addressTaken = this.#addressTaken.has(statement);
     const sig = this.#mir.sig({
       params: signature.params.map((param) => ({
         ty: this.tyOf(param.type, statement),
         name: null,
       })),
       ret: this.tyOf(signature.returns, statement),
-      abi: isPublic ? "C" : "Internal",
+      abi: isPublic || addressTaken ? "C" : "Internal",
     });
 
     if (isPublic && name === "main" && !this.#checkEntryPoint(statement, signature)) {
@@ -1120,6 +1312,23 @@ class Lowerer {
    * defence in depth — it should now be unreachable.
    */
   #checkCBoundary(type: MachineType, at: ts.Node, what: string): boolean {
+    // A callback is a boundary of its own: whatever C hands *back* through it
+    // has to be spellable too. Checked one level in rather than assumed,
+    // because the pointer itself is only a word and would otherwise sail
+    // through carrying a signature nothing outside this build can call.
+    if (type.kind === "fnptr") {
+      let crossable = true;
+      for (const param of type.params) {
+        if (!this.#checkCBoundary(param, at, `${what}, which is a callback taking a value that`)) {
+          crossable = false;
+        }
+      }
+      if (!this.#checkCBoundary(type.returns, at, `${what}, which is a callback returning a value that`)) {
+        crossable = false;
+      }
+      return crossable;
+    }
+
     // `string` is deliberately absent from this list. It is a valid,
     // nul-terminated `char *` — the runtime lays it out that way on purpose —
     // so C reads one with no conversion, and ownership becomes the documented,
@@ -1223,6 +1432,25 @@ class Lowerer {
       referent: { kind: "class", name: body.info.name },
     };
     const scopes = new Scopes();
+
+    // A `static` method has no receiver, so nothing is bound to `this` and its
+    // parameters start at local 1. Reading `this` inside one then fails the way
+    // it does in a free function — the name is not in scope — which is the
+    // right complaint rather than a special-cased one.
+    if (body.kind === "static") {
+      body.params.forEach((param, index) => {
+        scopes.declare(param.name, {
+          local: LocalId(index + 1),
+          type: param.type,
+          ty: this.tyOf(param.type, body.node),
+        });
+      });
+      const lowerer = new BodyLowerer(this, body.builder, scopes, body.returns);
+      lowerer.setClassContext(body.info, false);
+      if (body.node.body !== undefined) lowerer.run(body.node.body);
+      return;
+    }
+
     scopes.declare("this", {
       local: LocalId(1),
       type: self,
@@ -1336,6 +1564,21 @@ class Lowerer {
     return this.#functions;
   }
 
+  /**
+   * The MIR signature id for a function-pointer type.
+   *
+   * Always the C classification — see the `fnptr` note on `MachineType`. Shared
+   * with the call site so that a `FnPtr`'s type and a call through it cannot
+   * disagree about how an aggregate parameter travels.
+   */
+  sigOf(type: Extract<MachineType, { kind: "fnptr" }>, at: ts.Node): SigId {
+    return this.#mir.sig({
+      params: type.params.map((param) => ({ ty: this.tyOf(param, at), name: null })),
+      ret: this.tyOf(type.returns, at),
+      abi: "C",
+    });
+  }
+
   /** The MIR type id for an erased machine type. */
   tyOf(type: MachineType, at: ts.Node): TyId {
     switch (type.kind) {
@@ -1371,6 +1614,13 @@ class Lowerer {
         });
       case "array":
         return this.#mir.ty({ kind: "Array", value: this.tyOf(type.element, at) });
+      // Always the C classification. A function pointer exists so that a call
+      // site and a definition agree without sharing a declaration, and C's
+      // rules are the only ones anything outside this build knows — so an
+      // internal calling convention here would be a second, invisible ABI that
+      // happens to work until the first aggregate parameter.
+      case "fnptr":
+        return this.#mir.ty({ kind: "FnPtr", value: this.sigOf(type, at) });
       case "scalar":
         if (type.name === "f32" || type.name === "f64") {
           return this.#mir.ty({
@@ -2575,6 +2825,11 @@ class BodyLowerer {
     if (ts.isIdentifier(expression)) {
       const binding = this.#scopes.lookup(expression.text);
       if (binding === undefined) {
+        // A function named rather than called: its address, typed by tsc as a
+        // function type, which erasure turns into a `fnptr`.
+        if (this.#outer.functionValueAt(expression) !== undefined) {
+          return this.#erasedWidth(expression);
+        }
         this.#outer.unsupported(expression, `the name \`${expression.text}\``);
         return ERROR;
       }
@@ -2668,6 +2923,10 @@ class BodyLowerer {
     // Before the general path, and asked of tsc rather than of the width pass,
     // so that a field reached through a `Reference<C>` resolves the same way a
     // field of a value does.
+    // `C.f` as a value — a static method's address. Before the class-field
+    // path, because `C` here is a class *name* rather than an object.
+    if (this.#staticAt(expression) !== undefined) return this.#erasedWidth(expression);
+
     const className = this.#outer.classNameAt(expression.expression);
     if (className !== undefined) {
       const info = this.#outer.classInfo(className);
@@ -2759,6 +3018,113 @@ class BodyLowerer {
   }
 
   /**
+   * A callee that is a *value* of function-pointer type rather than a name.
+   *
+   * A local holding a callback, a struct field, an element of an array. Not a
+   * function's own name: `f(1)` where `f` is a declaration is a direct call,
+   * and turning it into an indirect one would take its address for no reason
+   * and force the C convention on it.
+   */
+  #callableValue(
+    expression: ts.Expression,
+  ): { value: Typed; type: Extract<MachineType, { kind: "fnptr" }> } | undefined {
+    if (this.#outer.namesADeclaredFunction(expression)) return undefined;
+    if (this.#outer.functionValueAt(expression) !== undefined) return undefined;
+    // A **method** is not a function-pointer value, even though tsc gives
+    // `c.speak` a function type. It needs a receiver, and a `FnPtr` has nowhere
+    // to put one — so `c.speak()` is a virtual call and only a *field* holding
+    // a code address is an indirect one. This is the distinction the README
+    // draws between a method signature and a function-typed property, arriving
+    // where it decides how a call is emitted.
+    if (ts.isPropertyAccessExpression(expression) && this.#namesAMethod(expression)) {
+      return undefined;
+    }
+    // Asked of tsc and silently, never of the width pass: this runs over every
+    // call's callee, including `console.log`, whose receiver has no machine
+    // type and would be reported as an unresolvable name.
+    const type = this.#outer.tryErase(expression);
+    if (type?.kind !== "fnptr") return undefined;
+    const value = this.#value(expression, type);
+    return value === undefined ? undefined : { value, type };
+  }
+
+  /**
+   * `f` or `C.f` as a value: the function's address.
+   *
+   * A constant, not a load — the address is a link-time fact, so this is the
+   * same kind of thing a string literal is.
+   */
+  #functionValue(expression: ts.Expression, natural: MachineType): Typed | undefined {
+    const target = this.#outer.functionValueAt(expression);
+    if (target === undefined) return undefined;
+    if (natural.kind !== "fnptr") {
+      this.#outer.error(
+        expression,
+        "GF0161",
+        `this names a function, so it is a code address; it cannot be a ` +
+          `\`${renderType(natural)}\`.`,
+      );
+      return undefined;
+    }
+    return {
+      operand: {
+        kind: "Const",
+        value: {
+          kind: "Func",
+          func:
+            target.kind === "defined"
+              ? { kind: "Local", value: target.id }
+              : { kind: "Extern", value: this.#outer.externIdOf(target) },
+          ty: this.#outer.tyOf(natural, expression),
+        },
+      },
+      type: natural,
+    };
+  }
+
+  /**
+   * Whether `x.name` names a method rather than a data member.
+   *
+   * Asked of the declaration, not of the type: `speak(): string` and
+   * `speak: () => string` have the same type and are different things, which is
+   * exactly the shape/contract distinction the language draws at the
+   * declaration and has to keep drawing here.
+   */
+  #namesAMethod(access: ts.PropertyAccessExpression): boolean {
+    const symbol = this.#outer.checker.getSymbolAtLocation(access.name);
+    return (
+      symbol?.declarations?.some(
+        (declaration) =>
+          (ts.isMethodDeclaration(declaration) && !isStaticMember(declaration)) ||
+          ts.isMethodSignature(declaration),
+      ) ?? false
+    );
+  }
+
+  /** The width of an expression, taken from tsc's type for it. */
+  #erasedWidth(expression: ts.Expression): Width {
+    const type = this.#outer.erase(
+      expression,
+      this.#outer.checker.getTypeAtLocation(expression),
+    );
+    return type === undefined ? ERROR : typed(type);
+  }
+
+  /**
+   * `C.f` where `C` names a class and `f` is one of its `static` methods.
+   *
+   * Resolved from the *name*, never from a value: `C` is a class, not an
+   * object, so asking the width pass for its type would report a name that
+   * does not resolve — the same trap `console.log` sets for the method-call
+   * path.
+   */
+  #staticAt(access: ts.PropertyAccessExpression): StaticMethod | undefined {
+    if (!ts.isIdentifier(access.expression)) return undefined;
+    const info = this.#outer.classInfo(access.expression.text);
+    return info?.statics.get(access.name.text);
+  }
+
+  /**
    * The array a value denotes, seeing through one `Reference<T[]>`.
    *
    * The same job `#asClass` does for objects, and it exists for the same
@@ -2790,6 +3156,23 @@ class BodyLowerer {
   #callWidth(expression: ts.CallExpression): Width {
     // A constructor returns nothing; `super(…)` is a statement.
     if (expression.expression.kind === ts.SyntaxKind.SuperKeyword) return typed(VOID);
+
+    // A call through a value of function-pointer type. Its return type is the
+    // type's, not any declaration's — there may be no declaration in this
+    // build. Probed silently, and first, for the reasons `#call` gives.
+    const callee = expression.expression;
+    const callable = this.#outer.tryErase(callee);
+    if (
+      callable?.kind === "fnptr" &&
+      !this.#outer.namesADeclaredFunction(callee) &&
+      this.#outer.functionValueAt(callee) === undefined &&
+      !(ts.isPropertyAccessExpression(callee) && this.#namesAMethod(callee))
+    ) {
+      for (const argument of expression.arguments) {
+        if (this.width(argument).kind === "error") return ERROR;
+      }
+      return typed(callable.returns);
+    }
 
     if (ts.isPropertyAccessExpression(expression.expression)) {
       const method = this.#methodWidth(expression, expression.expression);
@@ -2857,6 +3240,15 @@ class BodyLowerer {
 
     const target = this.#outer.resolveCallee(expression.expression);
     if (target === undefined) {
+      // A value of function-pointer type, called. Its return type comes from
+      // the type rather than from a declaration, because there may not be one.
+      const width = this.width(expression.expression);
+      if (width.kind === "typed" && width.type.kind === "fnptr") {
+        for (const argument of expression.arguments) {
+          if (this.width(argument).kind === "error") return ERROR;
+        }
+        return typed(width.type.returns);
+      }
       this.#outer.unsupported(expression, `a call to \`${expression.expression.text}\``);
       return ERROR;
     }
@@ -2888,6 +3280,21 @@ class BodyLowerer {
           );
           return ERROR;
       }
+    }
+
+    // `C.f(…)` — a static method. The receiver is a *class name*, not a value,
+    // so this is resolved before anything tries to give `C` a type.
+    const staticMethod = this.#staticAt(access);
+    if (staticMethod !== undefined) {
+      for (const argument of expression.arguments) {
+        if (this.width(argument).kind === "error") return ERROR;
+      }
+      const record = this.#outer.fn(staticMethod.symbol);
+      if (record === undefined) {
+        this.#outer.unsupported(expression, `a call to \`${staticMethod.symbol}\``);
+        return ERROR;
+      }
+      return typed(record.signature.returns);
     }
 
     const contract = this.#contractAt(access.expression);
@@ -3353,7 +3760,9 @@ class BodyLowerer {
     }
 
     if (ts.isTemplateExpression(expression)) return this.#template(expression);
-    if (ts.isPropertyAccessExpression(expression)) return this.#property(expression);
+    if (ts.isPropertyAccessExpression(expression)) {
+      return this.#propertyValue(expression, natural);
+    }
     if (ts.isObjectLiteralExpression(expression)) {
       return this.#objectLiteral(expression, natural);
     }
@@ -3371,7 +3780,7 @@ class BodyLowerer {
 
     if (ts.isIdentifier(expression)) {
       const binding = this.#scopes.lookup(expression.text);
-      if (binding === undefined) return undefined;
+      if (binding === undefined) return this.#functionValue(expression, natural);
       if (this.#readMoved(expression, binding.local, expression.text)) return undefined;
       // For a trivial type copy and move lower identically, and the frontend
       // still says which one it means. `Copy` is right here: reading a binding
@@ -4028,6 +4437,14 @@ class BodyLowerer {
   }
 
   /** `s.length` on a string, or a field of a struct. */
+  #propertyValue(expression: ts.PropertyAccessExpression, natural: MachineType): Typed | undefined {
+    // `C.f` — a static method's address, before anything asks `C` for a value.
+    if (this.#staticAt(expression) !== undefined) {
+      return this.#functionValue(expression, natural);
+    }
+    return this.#property(expression);
+  }
+
   #property(expression: ts.PropertyAccessExpression): Typed | undefined {
     // A fixed array's length is in its type, so it is a constant rather than a
     // load — which is the whole difference between it and `T[]`.
@@ -4394,11 +4811,20 @@ class BodyLowerer {
     if (expression.expression.kind === ts.SyntaxKind.SuperKeyword) {
       return this.#superCall(expression);
     }
+    // A value of function-pointer type, called: a local holding a callback, a
+    // struct field, an element of an array. First, because a callee can be any
+    // expression at all while every path below recognises one shape — and
+    // because a field holding a code address is *not* a method call, there
+    // being nowhere in a `FnPtr` to put a receiver.
+    const callable = this.#callableValue(expression.expression);
+    if (callable !== undefined) return this.#indirectCall(expression, callable.value, callable.type);
+
     if (ts.isPropertyAccessExpression(expression.expression)) {
       const method = this.#methodCall(expression, expression.expression);
       if (method !== "not-a-method") return method;
       return this.#console(expression);
     }
+
     if (!ts.isIdentifier(expression.expression)) return undefined;
     const name = expression.expression.text;
 
@@ -4421,19 +4847,61 @@ class BodyLowerer {
       return undefined;
     }
 
+    return this.#directCall(expression, target, expression.arguments);
+  }
+
+  /** A call to a known function: marshal the arguments and emit the terminator. */
+  #directCall(
+    expression: ts.CallExpression,
+    target: FnRecord,
+    written: readonly ts.Expression[],
+  ): Typed | undefined {
+    if (written.length !== target.signature.params.length) {
+      // tsc has already rejected a genuine arity mismatch, so reaching this
+      // means the two disagree, which is a compiler bug rather than a user one.
+      this.#outer.unsupported(expression, "a call whose arity tsc and the lowerer disagree on");
+      return undefined;
+    }
+
     const args: Operand[] = [];
-    for (const [index, argument] of expression.arguments.entries()) {
+    for (const [index, argument] of written.entries()) {
       const value = this.#expressionTyped(argument, target.signature.params[index]!.type);
       if (value === undefined) return undefined;
       args.push(this.#forArgument(argument, value));
     }
 
-    const returns = target.signature.returns;
+    return this.#emitCall(
+      expression,
+      {
+        kind: "Direct",
+        value:
+          target.kind === "defined"
+            ? { kind: "Local", value: target.id }
+            : { kind: "Extern", value: this.#outer.externIdOf(target) },
+      },
+      args,
+      target.signature.returns,
+    );
+  }
+
+  /**
+   * Emit a call terminator, whatever the callee is.
+   *
+   * One place, so that a direct call, a static method and a call through a
+   * function pointer agree about where the result lands and how a `void` return
+   * is spelled — the three differ only in the callee.
+   */
+  #emitCall(
+    at: ts.Node,
+    callee: Extract<Terminator, { kind: "Call" }>["callee"],
+    args: Operand[],
+    returns: MachineType,
+  ): Typed | undefined {
     const destination =
       returns.kind === "void"
         ? undefined
         : this.#f.addLocal({
-            ty: this.#outer.tyOf(returns, expression),
+            ty: this.#outer.tyOf(returns, at),
             storage: "Temporary",
           });
     if (destination !== undefined) {
@@ -4444,13 +4912,7 @@ class BodyLowerer {
     const next = this.#f.block();
     this.#seal({
       kind: "Call",
-      callee: {
-        kind: "Direct",
-        value:
-          target.kind === "defined"
-            ? { kind: "Local", value: target.id }
-            : { kind: "Extern", value: this.#outer.externIdOf(target) },
-      },
+      callee,
       args,
       destination: { place: placeOf(destination ?? LocalId(0)), target: next },
       unwind: NO_UNWIND,
@@ -4459,6 +4921,43 @@ class BodyLowerer {
 
     if (destination === undefined) return undefined;
     return this.#fromCall(destination, returns);
+  }
+
+  /**
+   * `f(1)` where `f` is a value of function-pointer type.
+   *
+   * The signature comes from the *type*, not from any declaration — there may
+   * be no declaration in this build at all. It is recorded on the node because
+   * the call site and whatever definition ends up there have to classify
+   * identically, and C's rules are the only thing they share.
+   */
+  #indirectCall(
+    expression: ts.CallExpression,
+    callee: Typed,
+    signature: Extract<MachineType, { kind: "fnptr" }>,
+  ): Typed | undefined {
+    if (expression.arguments.length !== signature.params.length) {
+      this.#outer.unsupported(expression, "a call whose arity tsc and the lowerer disagree on");
+      return undefined;
+    }
+
+    const args: Operand[] = [];
+    for (const [index, argument] of expression.arguments.entries()) {
+      const value = this.#expressionTyped(argument, signature.params[index]!);
+      if (value === undefined) return undefined;
+      args.push(this.#forArgument(argument, value));
+    }
+
+    return this.#emitCall(
+      expression,
+      {
+        kind: "Indirect",
+        operand: this.#forRead(callee),
+        sig: this.#outer.sigOf(signature, expression),
+      },
+      args,
+      signature.returns,
+    );
   }
 
   /**
@@ -4480,6 +4979,17 @@ class BodyLowerer {
   ): Typed | undefined | "not-a-method" {
     if (access.expression.kind === ts.SyntaxKind.SuperKeyword) {
       return this.#superMethodCall(expression, access);
+    }
+
+    // `C.f(…)` — a static method: an ordinary direct call with no receiver.
+    const staticMethod = this.#staticAt(access);
+    if (staticMethod !== undefined) {
+      const record = this.#outer.fn(staticMethod.symbol);
+      if (record === undefined || record.kind !== "defined") {
+        this.#outer.unsupported(expression, `a call to \`${staticMethod.symbol}\``);
+        return undefined;
+      }
+      return this.#directCall(expression, record, expression.arguments);
     }
 
     // `xs.push(v)` and `xs.pop()`, before the class and contract paths for the
@@ -5462,6 +5972,14 @@ function elementTypeOf(type: MachineType): MachineType | undefined {
     default:
       return undefined;
   }
+}
+
+/** Whether a class member carries `static`. */
+function isStaticMember(member: ts.ClassElement): boolean {
+  return (
+    ts.canHaveModifiers(member) &&
+    (ts.getModifiers(member)?.some((m) => m.kind === ts.SyntaxKind.StaticKeyword) ?? false)
+  );
 }
 
 function describe(node: ts.Node): string {
