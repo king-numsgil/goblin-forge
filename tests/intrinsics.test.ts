@@ -144,6 +144,21 @@ describe("the intrinsics that are implemented", () => {
     expect(result.leaked).toBe(0);
   });
 
+  test("`allocArray` and `freeArray` — see `tests/heap.test.ts`", async () => {
+    const result = await run(
+      "intr-alloc-array",
+      `export function main(): i32 {
+         const xs = allocArray<u8>(4);
+         xs[3] = 9;
+         const v: u8 = xs[3];
+         xs.freeArray();
+         return cast<i32>(v);
+       }\n`,
+    );
+    expect(result.exitCode).toBe(9);
+    expect(result.leaked).toBe(0);
+  });
+
   test("`p.address`, `p.deref()` and `p.offset()` — see `tests/heap.test.ts`", async () => {
     const result = await run(
       "intr-pointer-methods",
@@ -167,7 +182,6 @@ describe("the intrinsics the prelude declares and the lowerer does not have", ()
   // only acceptable answer is GF0001 with a file and a line — never a backend
   // failure, and never a wrong number.
   const cases: [string, string][] = [
-    ["allocArray", "  const p = allocArray<u8>(4);\n  p.freeArray();\n  return 0;"],
     ["erase", "  const p = alloc<i32>();\n  const e = p.erase();\n  p.free();\n  return 0;"],
     ["reify", "  const p = alloc<i32>();\n  const r = p.reify<u8>();\n  p.free();\n  return 0;"],
   ];

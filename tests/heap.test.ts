@@ -516,11 +516,168 @@ describe("nullable pointers", () => {
   });
 });
 
+describe("allocArray and freeArray", () => {
+  test("a run of elements, indexed and strided like any other pointer", async () => {
+    const result = await run(
+      "heap-alloc-array",
+      `export function main(): i32 {
+         const xs = allocArray<i32>(4);
+         let i: usize = 0;
+         while (i < 4) {
+           xs[i] = cast<i32>(i) * 10;
+           i = i + 1;
+         }
+         const sum: i32 = xs[0] + xs[1] + xs[2] + xs.offset(3)[0];
+         xs.freeArray();
+         return sum;
+       }\n`,
+    );
+    expect(result.exitCode).toBe(60);
+    expect(result.leaked).toBe(0);
+  });
+
+  test("every element is initialised, not merely allocated", async () => {
+    // The reason there is no uninitialised form, and the reason the
+    // construction loop is not an optimisation away. `freeArray` destroys what
+    // each slot holds; on uninitialised memory that is a garbage pointer per
+    // element, and the crash lands nowhere near the mistake.
+    const result = await run(
+      "heap-alloc-array-zeroed",
+      `export function main(): i32 {
+         const xs = allocArray<i32>(8);
+         let sum: i32 = 0;
+         let i: usize = 0;
+         while (i < 8) { sum = sum + xs[i]; i = i + 1; }
+         xs.freeArray();
+         return sum;
+       }\n`,
+    );
+    expect(result.exitCode).toBe(0);
+    expect(result.leaked).toBe(0);
+  });
+
+  test("`freeArray` runs one destructor per element", async () => {
+    // The whole reason `delete[]` is a separate operation. Twenty arrays of
+    // three strings each: sixty allocations that only a per-element loop
+    // releases, and the counter is what says it happened.
+    const result = await run(
+      "heap-free-array-owning",
+      `export function main(): i32 {
+         let n: usize = 0;
+         while (n < 20) {
+           const xs = allocArray<string>(3);
+           xs[0] = "a" + "0";
+           xs[1] = "b" + "1";
+           xs[2] = "c" + "2";
+           xs.freeArray();
+           n = n + 1;
+         }
+         console.log("done");
+         return 0;
+       }\n`,
+    );
+    expect(result.stdout).toBe("done\n");
+    expect(result.leaked).toBe(0);
+  });
+
+  test("a count of zero allocates a block and frees it", async () => {
+    // `new T[0]` is a real pointer in C++ too — the cookie still has to live
+    // somewhere, so the block is never empty even when the run is.
+    const result = await run(
+      "heap-alloc-array-zero",
+      `export function main(): i32 {
+         const xs = allocArray<i32>(0);
+         const real: boolean = xs.address !== 0;
+         xs.freeArray();
+         return real ? 0 : 1;
+       }\n`,
+    );
+    expect(result.exitCode).toBe(0);
+    expect(result.leaked).toBe(0);
+  });
+
+  test("elements stride by `sizeOf`, padding included", async () => {
+    // The distinction that makes the cookie's `stride` argument worth naming:
+    // `{ i32, i8 }` occupies five bytes and strides by eight. Allocating with
+    // one number and indexing with the other overlaps the elements, and it
+    // prints plausible values for a while before it stops.
+    const result = await run(
+      "heap-alloc-array-stride",
+      `interface Pad { a: i32; b: i8; }
+
+       export function main(): i32 {
+         const xs = allocArray<Pad>(3);
+         xs[0].a = 1;
+         xs[1].a = 2;
+         xs[2].a = 3;
+         const gap: usize = xs.offset(1).address - xs.address;
+         console.log(\`\${sizeOf<Pad>()} \${gap} \${xs[0].a} \${xs[2].a}\`);
+         xs.freeArray();
+         return 0;
+       }\n`,
+    );
+    expect(result.stdout).toBe("8 8 1 3\n");
+    expect(result.leaked).toBe(0);
+  });
+
+  test("a class with a constructor is refused, as `new T[n]` is in C++", async () => {
+    const diagnostic = await expectRejected(
+      "heap-alloc-array-ctor",
+      `class R {
+         x: i32;
+         constructor(x: i32) { this.x = x; }
+       }
+
+       export function main(): i32 {
+         const xs = allocArray<R>(2);
+         xs.freeArray();
+         return 0;
+       }\n`,
+      "GF0002",
+    );
+    expect(diagnostic.message).toContain("nowhere to put its arguments");
+  });
+
+  test("a class without one is allocated in a run, and destroyed in a run", async () => {
+    const result = await run(
+      "heap-alloc-array-class",
+      `class Holder { s: string = "x" + "y"; }
+
+       export function main(): i32 {
+         let n: usize = 0;
+         while (n < 20) {
+           const xs = allocArray<Holder>(2);
+           n = n + 1;
+           xs.freeArray();
+         }
+         console.log("done");
+         return 0;
+       }\n`,
+    );
+    expect(result.stdout).toBe("done\n");
+    expect(result.leaked).toBe(0);
+  });
+
+  test("dropping the pointer leaks the whole run, not one element", async () => {
+    let message = "";
+    try {
+      await run(
+        "heap-alloc-array-leak",
+        `export function main(): i32 {
+           const xs = allocArray<i32>(4);
+           return 0;
+         }\n`,
+      );
+    } catch (error) {
+      message = String((error as Error).message);
+    }
+    expect(message).toContain("leaked 1 allocation");
+  });
+});
+
 describe("what is still missing", () => {
-  test("`allocArray`, `freeArray`, `erase` and `reify` are GF0001", async () => {
+  test("`erase` and `reify` are GF0001", async () => {
     for (const [name, body] of [
-      ["allocArray", "  const p = allocArray<u8>(4);\n  return 0;"],
-      ["freeArray", "  const p = alloc<i32>();\n  p.freeArray();\n  return 0;"],
       ["erase", "  const p = alloc<i32>();\n  const e = p.erase();\n  p.free();\n  return 0;"],
       ["reify", "  const p = alloc<i32>();\n  const r = p.reify<u8>();\n  p.free();\n  return 0;"],
     ] as const) {

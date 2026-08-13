@@ -520,6 +520,17 @@ declare function tryCast<T>(value: object): Reference<T> | null;
  * The count is a runtime value, which is the whole reason this exists: a length
  * known at compile time is a `FixedArray<T, N>` and costs no allocation.
  *
+ * Every element is default-initialised, for the same reason {@link alloc} has
+ * no uninitialised form. There is nowhere to put a constructor's arguments, so
+ * a class that declares one is refused — exactly as `new T[n]` in C++ needs a
+ * default constructor.
+ *
+ * The count is stored in a hidden word just before the first element, which is
+ * how `freeArray` knows how many destructors to run. That costs one machine
+ * word per allocation and is what C++ does; it also means the pointer you get
+ * back is **not** the start of the block, so it must not be handed to `free`,
+ * to `realloc`, or to anything else that expects an allocator's own pointer.
+ *
  * Released with `freeArray`, and never with `free`.
  */
 declare function allocArray<T>(count: usize): Pointer<T>;
@@ -530,6 +541,11 @@ declare function allocArray<T>(count: usize): Pointer<T>;
  * This is the *storage* size — what an array of `T` strides by and what
  * `alloc<T>()` reserves — never "what a register holds". The two are
  * different questions and this answers only one of them.
+ *
+ * It is C's `sizeof`, padding included: `{ a: i32, b: i8 }` occupies five bytes
+ * and this says eight, because that is what the sixth through eighth bytes are
+ * for. So `sizeOf<T>() * n` is the right size for a buffer of `n`, which is the
+ * whole reason it is the rounded number.
  */
 declare function sizeOf<T>(): usize;
 

@@ -112,6 +112,8 @@ const CSTRING = "cstring";
 const CSTRING_FREE = "cstringFree";
 /** `alloc(C, …)` — construct a `C` on the heap. C++'s `new C(…)`. */
 const ALLOC = "alloc";
+/** `allocArray<T>(n)` — a run of `n` default-initialised `T`. C++'s `new T[n]`. */
+const ALLOC_ARRAY = "allocArray";
 /** `sizeOf<T>()` and `alignOf<T>()` — the layout, as constants. */
 const NATIVE_SIZE_OF = "sizeOf";
 const NATIVE_ALIGN_OF = "alignOf";
@@ -182,6 +184,19 @@ const RUNTIME = {
    */
   alloc: "gf_alloc",
   free: "gf_free",
+  /**
+   * `new T[n]` and `delete[]`, with the count in a cookie behind the pointer.
+   *
+   * The count has to survive the allocation because `freeArray` is given only a
+   * pointer and needs two things it does not carry: how many destructors to run
+   * and how many bytes to release. C++ writes the cookie only when the
+   * destructor is non-trivial, because `operator delete[]` can ask the
+   * allocator how big the block was; Rust's cannot be asked, so it is always
+   * written and `gf_alloc_array_count` is how the loop bound is recovered.
+   */
+  allocArray: "gf_alloc_array",
+  allocArrayCount: "gf_alloc_array_count",
+  freeArray: "gf_free_array",
   /**
    * `gf_string_from_cstr(p)` — `strlen`, allocate, copy, NUL-terminate.
    *
@@ -3370,6 +3385,15 @@ class BodyLowerer {
     }
     // `alloc(C, …)`, `sizeOf<T>()`, `alignOf<T>()` — the type is
     // the call's own, which tsc has already worked out.
+    // `allocArray<T>(n)` — separately, because its *first* argument is the
+    // count rather than a class name to be skipped.
+    if (expression.expression.text === ALLOC_ARRAY) {
+      for (const argument of expression.arguments) {
+        if (this.width(argument).kind === "error") return ERROR;
+      }
+      return this.#erasedWidth(expression);
+    }
+
     if (
       expression.expression.text === ALLOC ||
       expression.expression.text === NATIVE_SIZE_OF ||
@@ -3572,6 +3596,7 @@ class BodyLowerer {
   ): Width {
     switch (access.name.text) {
       case "free":
+      case "freeArray":
         return typed(VOID);
       case "offset":
         return typed(pointer);
@@ -4634,6 +4659,226 @@ class BodyLowerer {
   }
 
   /**
+   * `for (i = 0; i < limit; i++) { … }`, in blocks.
+   *
+   * Both halves of `new T[n]` / `delete[]` need one, and so does
+   * {@link #fixedArray}, which predates this and builds its own. The counter is
+   * an `Owned` local rather than a temporary because it lives across the back
+   * edge: a temporary is released at the end of the statement that made it, and
+   * this one is still being read on the next iteration.
+   */
+  #countedLoop(at: ts.Node, limit: Operand, body: (counter: LocalId) => void): void {
+    const usizeTy = this.#outer.tyOf(USIZE, at);
+    const counter = this.#f.addLocal({ ty: usizeTy, storage: "Owned" });
+    const test = this.#f.addLocal({ ty: this.#boolTy(), storage: "Temporary" });
+
+    const head = this.#f.block();
+    const inside = this.#f.block();
+    const exit = this.#f.block();
+
+    this.#push({ kind: "StorageLive", value: counter });
+    this.#push({
+      kind: "Init",
+      place: placeOf(counter),
+      rvalue: { kind: "Use", value: { kind: "Const", value: { kind: "Int", bits: 0n, ty: usizeTy } } },
+    });
+    this.#seal({ kind: "Goto", value: head });
+
+    this.#current = head;
+    this.#push({ kind: "StorageLive", value: test });
+    this.#push({
+      kind: "Init",
+      place: placeOf(test),
+      rvalue: {
+        kind: "Binary",
+        op: "Lt",
+        lhs: { kind: "Copy", value: placeOf(counter) },
+        rhs: limit,
+      },
+    });
+    this.#seal({
+      kind: "Branch",
+      cond: { kind: "Copy", value: placeOf(test) },
+      thenBlock: inside,
+      elseBlock: exit,
+    });
+
+    this.#current = inside;
+    body(counter);
+    this.#push({
+      kind: "Assign",
+      place: placeOf(counter),
+      rvalue: {
+        kind: "Binary",
+        op: "Add",
+        lhs: { kind: "Copy", value: placeOf(counter) },
+        rhs: { kind: "Const", value: { kind: "Int", bits: 1n, ty: usizeTy } },
+      },
+    });
+    this.#seal({ kind: "Goto", value: head });
+
+    this.#current = exit;
+    this.#push({ kind: "StorageDead", value: test });
+    this.#push({ kind: "StorageDead", value: counter });
+  }
+
+  /** A runtime call's result, pinned into a local so it can be read twice. */
+  #pin(at: ts.Expression, value: Typed): Place | undefined {
+    const local = this.#f.addLocal({
+      ty: this.#outer.tyOf(value.type, at),
+      storage: "Owned",
+    });
+    this.#push({ kind: "StorageLive", value: local });
+    this.#push({ kind: "Init", place: placeOf(local), rvalue: { kind: "Use", value: value.operand } });
+    return placeOf(local);
+  }
+
+  /**
+   * `allocArray<T>(n)` — storage for `n` elements, every one initialised.
+   *
+   * C++'s `new T[n]`, and built from the same parts `alloc` is: the runtime
+   * hands out bytes and remembers how many elements were asked for, and the
+   * loop that constructs into them is emitted here, because only this side
+   * knows what constructing a `T` means.
+   *
+   * `Default` per element, exactly as `alloc<T>()` does for its one — there is
+   * no uninitialised form anywhere in this language, because a destructor
+   * releases what a slot holds and on uninitialised memory that is a garbage
+   * pointer. That also means the loop is not optional: `allocArray<string>(4)`
+   * followed by `freeArray()` has to be well defined.
+   */
+  #allocArray(expression: ts.CallExpression, natural: MachineType): Typed | undefined {
+    const argument = expression.arguments[0];
+    if (expression.arguments.length !== 1 || argument === undefined) {
+      this.#outer.error(expression, "GF0002", "`allocArray` takes exactly one element count.");
+      return undefined;
+    }
+    if (natural.kind !== "pointer") {
+      this.#outer.error(
+        expression,
+        "GF0002",
+        "`allocArray` needs the element type written out: `allocArray<i32>(n)`.",
+      );
+      return undefined;
+    }
+    const element = natural.pointee;
+
+    // The same trap `alloc<T>()` refuses, for the same reason: there is nowhere
+    // to put the constructor's arguments, so every element would be allocated
+    // and never constructed. C++ says the same thing — `new T[n]` needs a
+    // default constructor — it just says it about a constructor this language
+    // does not have.
+    if (element.kind === "class" && this.#outer.classInfo(element.name)?.ctor !== undefined) {
+      this.#outer.error(
+        expression,
+        "GF0002",
+        `\`${element.name}\` has a constructor, and \`allocArray\` has nowhere to ` +
+          "put its arguments. Allocate the elements one at a time with " +
+          `\`alloc(${element.name}, …)\`.`,
+      );
+      return undefined;
+    }
+
+    const count = this.#expressionTyped(argument, USIZE);
+    if (count === undefined) return undefined;
+    const ty = this.#outer.tyOf(element, expression);
+    const size = this.#temporaryTyped(expression, USIZE, { kind: "SizeOf", value: ty });
+    const align = this.#temporaryTyped(expression, USIZE, { kind: "AlignOf", value: ty });
+    if (size === undefined || align === undefined) return undefined;
+
+    // Pinned because it is read twice — once by the allocation and once as the
+    // loop's bound — and the second read must see the same number the first
+    // did, whatever the argument expression was.
+    const limit = this.#pin(expression, count);
+    if (limit === undefined) return undefined;
+
+    const raw = this.#callRuntime(
+      expression,
+      RUNTIME.allocArray,
+      [{ operand: { kind: "Copy", value: limit }, type: USIZE }, size, align],
+      natural,
+    );
+    if (raw === undefined) return undefined;
+    const place = this.#placeOfSubject(expression, raw);
+    if (place === undefined) return undefined;
+
+    this.#countedLoop(expression, { kind: "Copy", value: limit }, (counter) => {
+      this.#push({
+        kind: "Init",
+        place: {
+          local: place.local,
+          projection: [...place.projection, { kind: "Index", value: counter }],
+        },
+        rvalue: { kind: "Default" },
+      });
+    });
+
+    return { operand: raw.operand, type: natural };
+  }
+
+  /**
+   * `p.freeArray()` — destroy every element, then release the run.
+   *
+   * C++'s `delete[]`, and distinct from `free` for exactly the reason C++ keeps
+   * them distinct: one destructor has to run per element, and only the cookie
+   * knows how many there are. Calling the wrong one is undefined behaviour here
+   * as it is there.
+   *
+   * The elements are destroyed with `Drop`, which is a **direct** call — the
+   * opposite of {@link #free}, which dispatches through the vtable. That is not
+   * an inconsistency: a run of `T` strides by `T`'s size, so a
+   * `Pointer<Base>` into an array of `Derived` is already addressing the wrong
+   * elements before anything is destroyed. C++ makes that undefined for the
+   * same reason, and a virtual call here would destroy the right objects at the
+   * wrong addresses, which is a worse answer than the wrong destructor.
+   */
+  #freeArray(expression: ts.CallExpression, subject: Typed): Typed | undefined {
+    if (expression.arguments.length !== 0) {
+      this.#outer.error(expression, "GF0002", "`freeArray` takes no arguments.");
+      return undefined;
+    }
+    if (subject.type.kind !== "pointer") return undefined;
+    const element = subject.type.pointee;
+    const ty = this.#outer.tyOf(element, expression);
+
+    const size = this.#temporaryTyped(expression, USIZE, { kind: "SizeOf", value: ty });
+    const align = this.#temporaryTyped(expression, USIZE, { kind: "AlignOf", value: ty });
+    if (size === undefined || align === undefined) return undefined;
+
+    const place = this.#placeOfSubject(expression, subject);
+    if (place === undefined) return undefined;
+    const pointer: Typed = { operand: { kind: "Copy", value: place }, type: subject.type };
+
+    if (needsDrop(element)) {
+      const count = this.#callRuntime(
+        expression,
+        RUNTIME.allocArrayCount,
+        [pointer, align],
+        USIZE,
+      );
+      if (count === undefined) return undefined;
+      const limit = this.#pin(expression, count);
+      if (limit === undefined) return undefined;
+
+      this.#countedLoop(expression, { kind: "Copy", value: limit }, (counter) => {
+        this.#push({
+          kind: "Drop",
+          place: {
+            local: place.local,
+            projection: [...place.projection, { kind: "Index", value: counter }],
+          },
+          flag: null,
+          unwind: NO_UNWIND,
+        });
+      });
+    }
+
+    // The elements first, then the storage — a destructor is still reading live
+    // memory when it runs.
+    return this.#callRuntime(expression, RUNTIME.freeArray, [pointer, size, align], VOID);
+  }
+
+  /**
    * One of {@link POINTER_METHODS}, with the receiver already lowered.
    *
    * The width pass has already refused the three that are not implemented, so
@@ -4647,6 +4892,8 @@ class BodyLowerer {
     switch (access.name.text) {
       case "free":
         return this.#free(expression, subject);
+      case "freeArray":
+        return this.#freeArray(expression, subject);
       case "deref":
         return this.#deref(expression, subject);
       case "offset":
@@ -5532,6 +5779,7 @@ class BodyLowerer {
     if (name === CSTRING) return this.#cstring(expression);
     if (name === CSTRING_FREE) return this.#cstringFree(expression);
     if (name === ALLOC) return this.#alloc(expression, natural);
+    if (name === ALLOC_ARRAY) return this.#allocArray(expression, natural);
     if (name === STRING_FROM_CSTRING) return this.#stringFromCString(expression);
     if (name === NATIVE_SIZE_OF || name === NATIVE_ALIGN_OF) {
       return this.#layoutQuery(expression, name === NATIVE_SIZE_OF);

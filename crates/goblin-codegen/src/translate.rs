@@ -1762,10 +1762,22 @@ impl<'a, 'm, M: ClifModule> FunctionTranslator<'a, 'm, M> {
             }
             // Constants: the layout engine has already answered by the time
             // anything is emitted.
+            // The **stride**, not the unrounded size, because that is what C's
+            // `sizeof` reports and what the prelude promises: `{ i32, i8 }`
+            // occupies five bytes and `sizeof` says eight. Anything computing
+            // `sizeOf<T>() * n` for a buffer needs the eight, and the size
+            // overlaps the elements with each other (REWRITE-PLAN §10).
+            //
+            // `alloc` and `free` agree either way, since both ask this — but
+            // they have to agree with *indexing* too, and indexing strides.
             Rvalue::SizeOf(ty) => {
                 let pointer = self.target.pointer_type();
                 let layout = self.layouts.layout(*ty)?;
-                Some(self.builder.ins().iconst(pointer, i64::from(layout.size)))
+                Some(
+                    self.builder
+                        .ins()
+                        .iconst(pointer, i64::from(layout.stride())),
+                )
             }
             Rvalue::AlignOf(ty) => {
                 let pointer = self.target.pointer_type();

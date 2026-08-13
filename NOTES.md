@@ -98,7 +98,6 @@ backend failure:
 | interface-to-interface conversion, and a contract extending another | nothing lowers either | later |
 | `Reference<T>` for anything but a class or a contract | `checker/src/types.ts`, the `isReferenceType` branch | later |
 | an interface mixing methods and data | `checker/src/types.ts`, `contractOf` — a rule, not a gap | — |
-| `allocArray` / `p.freeArray()` | `lower.ts`, `#pointerMethodWidth` — needs a per-element destructor loop | later |
 | `p.erase()` / `p.reify<U>()` | `lower.ts`, `#pointerMethodWidth` — needs a decision about what `Pointer<unknown>` erases to | later |
 | static fields | `classes.ts`, `describeMember` | later |
 | parameter properties (`constructor(private x)`) | `classes.ts`, `#classFnParams` | later |

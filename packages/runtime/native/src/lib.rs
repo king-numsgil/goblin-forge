@@ -30,6 +30,7 @@
 
 #![allow(clippy::missing_safety_doc)]
 
+use core::mem::align_of;
 use core::sync::atomic::{AtomicI64, AtomicBool, Ordering};
 use std::alloc::{Layout, alloc, dealloc};
 use std::io::Write;
@@ -288,6 +289,94 @@ pub unsafe extern "C" fn gf_free(pointer: *mut u8, size: usize, align: usize) {
     let layout = Layout::from_size_align(size.max(1), align.max(1)).expect("free layout");
     LIVE.fetch_sub(1, Ordering::SeqCst);
     unsafe { dealloc(pointer, layout) };
+    trace("free");
+}
+
+// ---------------------------------------------------------------------------
+// `new T[n]` and `delete[]`
+//
+// The count has to survive the allocation, because `delete[]` is given only a
+// pointer and needs two things the pointer does not carry: how many destructors
+// to run, and how many bytes to hand back. C++ solves this with a **cookie** —
+// a hidden word just before the first element — and so does this:
+//
+//   [ count: usize ][ pad ][ elem0 ][ elem1 ] …
+//                           ^ the `Pointer<T>` the caller gets
+//
+// C++ writes the cookie only when the element has a non-trivial destructor,
+// because `operator delete[]` can ask the allocator how big the block was.
+// Rust's allocator cannot be asked — `dealloc` is *given* the layout — so the
+// cookie is unconditional here. One word per array, and the alternative is a
+// size the caller would have to remember and pass back.
+//
+// The header is `max(align, align_of::<usize>())` bytes, and the block is
+// allocated at that alignment too: that keeps the cookie aligned for a `usize`
+// *and* leaves the elements at their own alignment, since the header is then a
+// multiple of both.
+// ---------------------------------------------------------------------------
+
+/// The block's alignment, and the offset from it to the first element.
+///
+/// Named for the *run* rather than for the array, because `T[]` a few hundred
+/// lines down has a header of its own and a different one — that one carries a
+/// length and a capacity and belongs to a growable container, where this is one
+/// hidden word behind a raw pointer.
+fn run_header(align: usize) -> (usize, usize) {
+    let align = align.max(align_of::<usize>()).max(1);
+    (align, align)
+}
+
+/// Storage for `count` elements, **uninitialised**, with the count remembered.
+///
+/// `stride` is what one element occupies in an array — the size rounded up to
+/// the alignment, which is what C's `sizeof` reports and what the backend's
+/// indexing strides by. Passing the unrounded size instead overlaps the
+/// elements with each other (REWRITE-PLAN §10).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gf_alloc_array(count: usize, stride: usize, align: usize) -> *mut u8 {
+    install_reporter();
+    let (align, offset) = run_header(align);
+    let bytes = stride
+        .checked_mul(count)
+        .and_then(|total| total.checked_add(offset))
+        .expect("array too large");
+    let layout = Layout::from_size_align(bytes, align).expect("array alloc layout");
+    let raw = unsafe { alloc(layout) };
+    if raw.is_null() {
+        std::process::abort();
+    }
+    unsafe { raw.cast::<usize>().write(count) };
+    LIVE.fetch_add(1, Ordering::SeqCst);
+    trace("alloc");
+    unsafe { raw.add(offset) }
+}
+
+/// How many elements [`gf_alloc_array`] was asked for.
+///
+/// Read back rather than remembered by the caller, which is the whole reason
+/// the cookie exists: `p.freeArray()` names a pointer and nothing else.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gf_alloc_array_count(pointer: *mut u8, align: usize) -> usize {
+    if pointer.is_null() {
+        return 0;
+    }
+    let (_, offset) = run_header(align);
+    unsafe { pointer.sub(offset).cast::<usize>().read() }
+}
+
+/// Release storage from [`gf_alloc_array`]. The elements are already destroyed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gf_free_array(pointer: *mut u8, stride: usize, align: usize) {
+    if pointer.is_null() {
+        return;
+    }
+    let (align, offset) = run_header(align);
+    let base = unsafe { pointer.sub(offset) };
+    let count = unsafe { base.cast::<usize>().read() };
+    let bytes = stride * count + offset;
+    let layout = Layout::from_size_align(bytes, align).expect("array free layout");
+    LIVE.fetch_sub(1, Ordering::SeqCst);
+    unsafe { dealloc(base, layout) };
     trace("free");
 }
 
