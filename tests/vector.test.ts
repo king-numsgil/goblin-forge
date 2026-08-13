@@ -100,7 +100,7 @@ describe("indexing", () => {
       `export function main(): i32 {
          const xs: i32[] = [0, 0, 0, 0];
          let i: usize = 0;
-         while (i < xs.length) { xs[i] = nativeCast<i32>(i) * 2; i = i + 1; }
+         while (i < xs.length) { xs[i] = cast<i32>(i) * 2; i = i + 1; }
          return xs[3];
        }\n`,
     );

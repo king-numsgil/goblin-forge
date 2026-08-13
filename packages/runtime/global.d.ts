@@ -50,7 +50,7 @@ interface RegExp {}
  * fixed array **is** the bytes rather than a pointer to them:
  *
  *     const buf: FixedArray<u8, 128> = fixedArray(128, 0);
- *     nativeSizeOf<FixedArray<u8, 128>>();   // 128, not 8
+ *     sizeOf<FixedArray<u8, 128>>();   // 128, not 8
  *
  * A C array decays to a pointer in most expression contexts, which is where the
  * intuition that it *is* one comes from. It is not, and the difference shows
@@ -128,7 +128,7 @@ declare function fixedArray<T, N extends number>(length: N, fill: T): FixedArray
  *
  * Indexing is unchecked, like every other memory access here, and `length` is
  * a `usize` — so a loop counter has to be one too, or converted with
- * `nativeCast<usize>(…)`.
+ * `cast<usize>(…)`.
  *
  * An array is released when its binding leaves scope, and it releases its
  * elements first if the element type owns anything.
@@ -332,8 +332,37 @@ interface CorePointer<T> {
    * is in C++.
    */
   freeArray(): void;
+
+  /**
+   * `p + n`, in units of `T` — C's pointer arithmetic.
+   *
+   * A method rather than a free function because there is a receiver to hang it
+   * on, which is also why it needs no prefix to say it is unsafe. Nothing
+   * checks that the result points at anything.
+   */
+  offset(elements: isize): Pointer<T>;
+
+  /**
+   * Discard the pointee type. `Pointer<unknown>` is the language's only
+   * type-erased pointer and the only escape hatch in the ambient surface —
+   * there is deliberately no `any` and no unchecked cast between two concrete
+   * pointee types.
+   */
+  erase(): Pointer<unknown>;
+
+  /** Re-attach a pointee type to an erased pointer. Entirely on your honour. */
+  reify<U>(): Pointer<U>;
 }
 
+/**
+ * Members of {@link CorePointer} are **reserved on every class**.
+ *
+ * `Pointer<T>` is `T & CorePointer<T>`, so a class that declares `free` or
+ * `address` has a member that can never be reached through a pointer to it —
+ * the pointer's own wins, silently. tsc cannot see the problem, because the
+ * intersection is perfectly well typed; the compiler rejects it instead
+ * (`GF0002`), at the declaration rather than at the confusing call site.
+ */
 type Pointer<T> = T extends GfPrimitive ? CorePointer<T> : T & CorePointer<T>;
 
 // ---------------------------------------------------------------------------
@@ -495,21 +524,6 @@ declare function tryCast<T>(value: object): Reference<T> | null;
  */
 declare function allocArray<T>(count: usize): Pointer<T>;
 
-/** Load the `T` at `ptr`. Requires `T` to have a known layout. */
-declare function nativeRead<T>(ptr: CorePointer<T>): T;
-
-/** Store `value` at `ptr`. Requires `T` to have a known layout. */
-declare function nativeWrite<T>(ptr: CorePointer<T>, value: T): void;
-
-/** `ptr + elements * sizeof(T)`, in units of `T`. */
-declare function nativeOffset<T>(ptr: CorePointer<T>, elements: isize): Pointer<T>;
-
-/** The null address, typed. */
-declare function nativeNull<T>(): Pointer<T>;
-
-/** Address comparison against null. */
-declare function nativeIsNull<T>(ptr: CorePointer<T>): boolean;
-
 /**
  * Size of `T` in bytes, as laid out by this compiler.
  *
@@ -517,21 +531,10 @@ declare function nativeIsNull<T>(ptr: CorePointer<T>): boolean;
  * `alloc<T>()` reserves — never "what a register holds". The two are
  * different questions and this answers only one of them.
  */
-declare function nativeSizeOf<T>(): usize;
+declare function sizeOf<T>(): usize;
 
 /** Alignment of `T` in bytes. */
-declare function nativeAlignOf<T>(): usize;
-
-/**
- * Discard a pointer's pointee type. `Pointer<unknown>` is the language's only
- * type-erased pointer and the only escape hatch in the ambient surface — there
- * is deliberately no `any` and no unchecked cast between two concrete pointee
- * types.
- */
-declare function nativeErase<T>(ptr: CorePointer<T>): Pointer<unknown>;
-
-/** Re-attach a pointee type to an erased pointer. Entirely on your honour. */
-declare function nativeReify<T>(ptr: CorePointer<unknown>): Pointer<T>;
+declare function alignOf<T>(): usize;
 
 // ---------------------------------------------------------------------------
 // Width conversion.
@@ -543,12 +546,12 @@ declare function nativeReify<T>(ptr: CorePointer<unknown>): Pointer<T>;
 // exact only to 2^53. C performs both of those silently; here you write which
 // one you meant.
 //
-// `nativeCast` is that written form. It is also the only way to narrow, since
+// `cast` is that written form. It is also the only way to narrow, since
 // silent truncation is how you lose an afternoon.
 // ---------------------------------------------------------------------------
 
 /** Convert a numeric value to another fixed width. */
-declare function nativeCast<T extends number>(value: number): T;
+declare function cast<T extends number>(value: number): T;
 
 // ---------------------------------------------------------------------------
 // Strings.
@@ -656,11 +659,11 @@ declare function cstring(value: string): CString;
  *
  * ```ts
  * const mine = cstring(move(built));
- * cstring_free(mine);          // right
+ * cstringFree(mine);          // right
  *
  * declare function SDL_GetPrefPath(o: CString, a: CString): CString | null;
  * const theirs = SDL_GetPrefPath(cstring("acme"), cstring("game"));
- * cstring_free(theirs);        // WRONG — SDL allocated it, `SDL_free` releases it
+ * cstringFree(theirs);        // WRONG — SDL allocated it, `SDL_free` releases it
  * ```
  *
  * There is deliberately **no `free()` method on `CString`**. A method would have
@@ -670,7 +673,7 @@ declare function cstring(value: string): CString;
  * is the same rule C has always had — and a named function per allocator is how
  * C says it.
  */
-declare function cstring_free(value: CString): void;
+declare function cstringFree(value: CString): void;
 
 // ---------------------------------------------------------------------------
 // console

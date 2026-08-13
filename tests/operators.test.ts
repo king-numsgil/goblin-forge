@@ -212,25 +212,25 @@ describe("floating point", () => {
 
 describe("conversions", () => {
   test("a float truncates towards zero in both directions", async () => {
-    expect(await prints("op-cast-trunc-neg", "  const a: f64 = -2.9;", "nativeCast<i32>(a)")).toBe(
+    expect(await prints("op-cast-trunc-neg", "  const a: f64 = -2.9;", "cast<i32>(a)")).toBe(
       "-2\n",
     );
-    expect(await prints("op-cast-trunc-pos", "  const a: f64 = 2.9;", "nativeCast<i32>(a)")).toBe(
+    expect(await prints("op-cast-trunc-pos", "  const a: f64 = 2.9;", "cast<i32>(a)")).toBe(
       "2\n",
     );
   });
 
   test("a negative value cast to an unsigned width reinterprets its bits", async () => {
-    expect(await prints("op-cast-neg-u8", "  const a: i32 = -1;", "nativeCast<u8>(a)")).toBe(
+    expect(await prints("op-cast-neg-u8", "  const a: i32 = -1;", "cast<u8>(a)")).toBe(
       "255\n",
     );
-    expect(await prints("op-cast-neg-u32", "  const a: i32 = -1;", "nativeCast<u32>(a)")).toBe(
+    expect(await prints("op-cast-neg-u32", "  const a: i32 = -1;", "cast<u32>(a)")).toBe(
       "4294967295\n",
     );
   });
 
   test("a narrowing cast keeps the low bits", async () => {
-    expect(await prints("op-cast-narrow", "  const a: i32 = 0x1234;", "nativeCast<u8>(a)")).toBe(
+    expect(await prints("op-cast-narrow", "  const a: i32 = 0x1234;", "cast<u8>(a)")).toBe(
       "52\n",
     );
   });
@@ -399,6 +399,6 @@ describe("literal forms", () => {
   });
 
   test("the conversion the diagnostic suggests actually works", async () => {
-    expect(await prints("lit-frac-cast", "", "nativeCast<i32>(1.5)")).toBe("1\n");
+    expect(await prints("lit-frac-cast", "", "cast<i32>(1.5)")).toBe("1\n");
   });
 });

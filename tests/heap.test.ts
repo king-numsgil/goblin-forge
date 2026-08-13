@@ -305,16 +305,16 @@ describe("pointers and polymorphism", () => {
 });
 
 describe("the layout intrinsics", () => {
-  test("`nativeSizeOf` and `nativeAlignOf` are constants from the layout engine", async () => {
+  test("`sizeOf` and `alignOf` are constants from the layout engine", async () => {
     const result = await run(
       "heap-layout",
       `interface P { x: i32; y: i32; }
        interface Padded { flag: boolean; value: f64; }
 
        export function main(): i32 {
-         console.log(\`\${nativeSizeOf<P>()} \${nativeAlignOf<P>()}\`);
-         console.log(\`\${nativeSizeOf<Padded>()} \${nativeAlignOf<Padded>()}\`);
-         console.log(\`\${nativeSizeOf<u8>()} \${nativeSizeOf<FixedArray<u8, 128>>()}\`);
+         console.log(\`\${sizeOf<P>()} \${alignOf<P>()}\`);
+         console.log(\`\${sizeOf<Padded>()} \${alignOf<Padded>()}\`);
+         console.log(\`\${sizeOf<u8>()} \${sizeOf<FixedArray<u8, 128>>()}\`);
          return 0;
        }\n`,
     );
@@ -330,18 +330,18 @@ describe("the layout intrinsics", () => {
        class One { x: i32; }
 
        export function main(): i32 {
-         console.log(\`\${nativeSizeOf<Empty>()} \${nativeSizeOf<One>()}\`);
+         console.log(\`\${sizeOf<Empty>()} \${sizeOf<One>()}\`);
          return 0;
        }\n`,
     );
     expect(result.stdout).toBe("8 16\n");
   });
 
-  test("`nativeSizeOf` written without a type argument is refused", async () => {
+  test("`sizeOf` written without a type argument is refused", async () => {
     const { result } = await compileSource(
       "heap-sizeof-untyped",
       `export function main(): i32 {
-         const n: usize = nativeSizeOf();
+         const n: usize = sizeOf();
          return 0;
        }\n`,
     );
@@ -354,8 +354,8 @@ describe("what is still missing", () => {
   test("`allocArray` and the raw-pointer intrinsics are GF0001", async () => {
     for (const [name, body] of [
       ["allocArray", "  const p = allocArray<u8>(4);\n  return 0;"],
-      ["nativeNull", "  const p = nativeNull<i32>();\n  return 0;"],
-      ["nativeOffset", "  const p = nativeNull<i32>();\n  const q = nativeOffset(p, 1);\n  return 0;"],
+      ["offset", "  const p = alloc<i32>();\n  const q = p.offset(1);\n  p.free();\n  return 0;"],
+      ["erase", "  const p = alloc<i32>();\n  const e = p.erase();\n  p.free();\n  return 0;"],
     ] as const) {
       await expectRejected(
         `heap-missing-${name}`,

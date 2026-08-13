@@ -41,7 +41,7 @@ describe("promotion", () => {
          const count: i16 = 7;
          const scale: f64 = 1.5;
          const scaled: f64 = count * scale;
-         return nativeCast<i32>(scaled);
+         return cast<i32>(scaled);
        }\n`,
     );
     expect(result.exitCode).toBe(10);
@@ -106,20 +106,20 @@ describe("narrowing", () => {
        }\n`,
       "GF0160",
     );
-    expect(diagnostic.message).toContain("nativeCast");
+    expect(diagnostic.message).toContain("cast");
   });
 
-  test("`nativeCast` is the written form, and it is accepted", async () => {
+  test("`cast` is the written form, and it is accepted", async () => {
     const result = await run(
       "explicit-narrowing",
       `export function main(): i32 {
          const a: i32 = 300;
-         const narrow: u8 = nativeCast<u8>(a);
-         return nativeCast<i32>(narrow);
+         const narrow: u8 = cast<u8>(a);
+         return cast<i32>(narrow);
        }\n`,
     );
     // 300 truncates to 44 in a u8. Silent truncation is what GF0160 refuses;
-    // written truncation is what nativeCast is for.
+    // written truncation is what cast is for.
     expect(result.exitCode).toBe(44);
   });
 
@@ -128,7 +128,7 @@ describe("narrowing", () => {
       "float-to-int",
       `export function main(): i32 {
          const x: f64 = 7.9;
-         return nativeCast<i32>(x);
+         return cast<i32>(x);
        }\n`,
     );
     expect(result.exitCode).toBe(7);
@@ -157,7 +157,7 @@ describe("literals", () => {
       `export function main(): i32 {
          const small: u8 = 200;
          const wide: i64 = 200;
-         const total: i32 = nativeCast<i32>(small) + nativeCast<i32>(wide);
+         const total: i32 = cast<i32>(small) + cast<i32>(wide);
          if (total === 400) { return 1; }
          return 0;
        }\n`,
@@ -182,7 +182,7 @@ describe("literals", () => {
       "signed-lower-bound",
       `export function main(): i32 {
          const low: i8 = -128;
-         return nativeCast<i32>(low);
+         return cast<i32>(low);
        }\n`,
     );
     expect(result.exitCode).toBe(-128 & 0xff ? 128 : 128);
@@ -277,7 +277,7 @@ describe("operators", () => {
          const value: u8 = 3;
          const by: i64 = 2;
          const shifted: u8 = value << by;
-         return nativeCast<i32>(shifted);
+         return cast<i32>(shifted);
        }\n`,
     );
     // The shift happens at `u8`, so the result is a `u8`. Promoting to a
@@ -291,7 +291,7 @@ describe("operators", () => {
       `export function main(): i32 {
          const value: u8 = 200;
          const shifted: u8 = value << 1;
-         return nativeCast<i32>(shifted);
+         return cast<i32>(shifted);
        }\n`,
     );
     // 400 does not fit in a u8; the result is 144, not 400. That is the point
@@ -342,7 +342,7 @@ describe("the type environment is scoped", () => {
          let verdict: i32 = 0;
          if (value > 0) {
            const value: u8 = 7;
-           verdict = nativeCast<i32>(value);
+           verdict = cast<i32>(value);
          }
          return verdict;
        }\n`,
@@ -388,15 +388,15 @@ describe("the type environment is scoped", () => {
   });
 });
 
-describe("nativeCast", () => {
+describe("cast", () => {
   test("converts between every pair of integer widths", async () => {
     const result = await run(
       "cast-round-trip",
       `export function main(): i32 {
          const a: i8 = -1;
-         const b: u8 = nativeCast<u8>(a);
-         const c: u32 = nativeCast<u32>(b);
-         return nativeCast<i32>(c);
+         const b: u8 = cast<u8>(a);
+         const c: u32 = cast<u32>(b);
+         return cast<i32>(c);
        }\n`,
     );
     // -1 as a u8 is 255, and widening that is 255 — not 4294967295, which is
@@ -409,7 +409,7 @@ describe("nativeCast", () => {
       "cast-sign-extend",
       `export function main(): i32 {
          const a: i8 = -1;
-         return nativeCast<i32>(a);
+         return cast<i32>(a);
        }\n`,
     );
     expect(result.exitCode).toBe(-1 >>> 0 ? 255 : 255);
@@ -420,9 +420,9 @@ describe("nativeCast", () => {
       "cast-float",
       `export function main(): i32 {
          const a: i64 = 9;
-         const b: f32 = nativeCast<f32>(a);
-         const c: f64 = nativeCast<f64>(b);
-         return nativeCast<i32>(c);
+         const b: f32 = cast<f32>(a);
+         const c: f64 = cast<f64>(b);
+         return cast<i32>(c);
        }\n`,
     );
     expect(result.exitCode).toBe(9);

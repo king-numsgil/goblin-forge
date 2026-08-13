@@ -22,7 +22,7 @@ import { compileSource, expectRejected } from "./harness.ts";
 /** Codes no program can currently reach, and why. */
 const UNREACHABLE: Partial<Record<string, string>> = {
   GF0163:
-    "`nativeCast<T extends number>(value: number)` — tsc rejects every argument " +
+    "`cast<T extends number>(value: number)` — tsc rejects every argument " +
     "that is not already a number, so the lowerer's own conversion check is " +
     "never the thing that says no.",
   GF0227:

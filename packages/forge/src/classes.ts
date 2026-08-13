@@ -130,6 +130,30 @@ export interface ClassInfo {
   readonly declaredInterfaces: readonly string[];
 }
 
+/**
+ * Names a class may not use, because `Pointer<T>` already does.
+ *
+ * `Pointer<T>` is `T & CorePointer<T>`, so a class declaring `free` or
+ * `address` ends up with a member that can never be reached through a pointer
+ * to it — the pointer's own wins, silently. tsc cannot help: the intersection
+ * is perfectly well typed, and picking one side of it is exactly what an
+ * intersection means.
+ *
+ * So it is refused at the *declaration*, where the name is, rather than left to
+ * surface as a call that mysteriously does something else. `tests/classes.test.ts`
+ * checks this list against the prelude's own `CorePointer<T>`, so the two cannot
+ * drift.
+ */
+export const RESERVED_ON_POINTER: readonly string[] = [
+  "address",
+  "deref",
+  "erase",
+  "free",
+  "freeArray",
+  "offset",
+  "reify",
+];
+
 export interface ClassReport {
   /** A construct that is meant to work and does not yet. */
   unsupported(node: ts.Node, what: string): void;
@@ -250,6 +274,32 @@ function build(
       }
       declaredInterfaces.push(expression.expression.text);
     }
+  }
+
+  // Reserved names, checked once over every instance member rather than at
+  // each of the four places one can be declared. Statics are exempt: they live
+  // on the class, and `Pointer<T>` is a pointer to an *instance*.
+  for (const member of node.members) {
+    if (isStatic(member) || member.name === undefined || !ts.isIdentifier(member.name)) continue;
+    if (!RESERVED_ON_POINTER.includes(member.name.text)) continue;
+    if (
+      !ts.isPropertyDeclaration(member) &&
+      !ts.isMethodDeclaration(member) &&
+      !ts.isGetAccessorDeclaration(member) &&
+      !ts.isSetAccessorDeclaration(member)
+    ) {
+      continue;
+    }
+    report.refuse(
+      member,
+      `\`${member.name.text}\` is reserved: every \`Pointer<T>\` has one, and ` +
+        `\`Pointer<${name}>\` is \`${name}\` and the pointer's members together. ` +
+        `A \`${name}.${member.name.text}\` would be unreachable through a pointer ` +
+        "— the pointer's own would answer instead, and tsc would not say so " +
+        "because an intersection picking one side is exactly what it means. " +
+        `The reserved names are ${RESERVED_ON_POINTER.join(", ")}.`,
+    );
+    return undefined;
   }
 
   // -- fields ---------------------------------------------------------------

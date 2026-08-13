@@ -37,7 +37,7 @@ the same files this compiler does — your editor underlines what the compiler
 will reject, while you type, with no extension installed.
 
 > **Status: experimental.** The language is real and the test suite is large
-> (650 tests, including programs checked against a C compiler and against
+> (660 tests, including programs checked against a C compiler and against
 > equivalent C++), but this is a young project. Expect gaps — they are reported
 > as diagnostics with a file and a line, never as a crash.
 
@@ -234,7 +234,7 @@ const sum = a + b;          // GF0161: no common type. C makes this u32 and
 
 const wide: i32 = 1000;
 const narrow: i8 = wide * 2;  // GF0160: the truncation is invisible at the
-                              // point it costs you. Write nativeCast<i8>(…).
+                              // point it costs you. Write cast<i8>(…).
 
 const bits: i8 = 0xff;      // fine — -1, because that is how anybody writes
 const same: i8 = 255;       // GF0164 — but this is not a bit pattern.
@@ -334,7 +334,14 @@ and on uninitialised memory that is a garbage pointer.
 destruction has to be virtual: everywhere else the compiler destroys a value
 whose storage was laid out for exactly its static type.
 
-`nativeSizeOf<T>()` and `nativeAlignOf<T>()` answer from the same layout engine
+`p[0]` is C's `*p`, so a pointer to a scalar reads and writes without any
+dereference intrinsic. Every member `Pointer<T>` has — `free`, `address`,
+`deref`, `offset`, `erase`, `reify`, `freeArray` — is **reserved on every
+class**: `Pointer<C>` is `C` and the pointer's members together, so a class
+declaring `free` would have one nothing could reach through a pointer. tsc
+cannot see that, so the compiler refuses it at the declaration.
+
+`sizeOf<T>()` and `alignOf<T>()` answer from the same layout engine
 the backend uses.
 
 ### Interfaces come in two kinds, and the syntax says which
@@ -462,10 +469,10 @@ on two machines.
 
 ### Not there yet
 
-`allocArray` and the raw-pointer intrinsics (`nativeRead`, `nativeNull`,
-`nativeOffset`, …), array-to-pointer decay, `String.substring`/`indexOf`/
-`codePointAt`, closures, generics, `switch`, `do`/`while`, `for…of`,
-exceptions, static fields, top-level statements and top-level `const`.
+`allocArray`, `p.offset()`/`p.erase()`/`p.reify()`, nullable pointers,
+array-to-pointer decay, `String.substring`/`indexOf`/`codePointAt`, closures,
+generics, `switch`, `do`/`while`, `for…of`, exceptions, static fields,
+top-level statements and top-level `const`.
 
 All of them are declared or valid TypeScript, and all of them produce a
 `GF0001` diagnostic naming the construct and pointing at it.

@@ -225,7 +225,7 @@ describe("fixed array edges", () => {
       "array-zero",
       `export function main(): i32 {
          const a: FixedArray<u8, 0> = fixedArray(0, 0);
-         return nativeCast<i32>(a.length);
+         return cast<i32>(a.length);
        }\n`,
     );
     expect(result.exitCode).toBe(0);
@@ -254,20 +254,20 @@ describe("fixed array edges", () => {
       `export function main(): i32 {
          const a: FixedArray<i32, 4> = fixedArray(4, 0);
          let i: usize = 0;
-         while (i < a.length) { a[i] = nativeCast<i32>(i) * 2; i = i + 1; }
+         while (i < a.length) { a[i] = cast<i32>(i) * 2; i = i + 1; }
          return a[3];
        }\n`,
     );
     expect(result.exitCode).toBe(6);
   });
 
-  test("an `i32` converted with `nativeCast` indexes too", async () => {
+  test("an `i32` converted with `cast` indexes too", async () => {
     const result = await run(
       "array-index-cast",
       `export function main(): i32 {
          const a: FixedArray<i32, 4> = fixedArray(4, 7);
          const i: i32 = 2;
-         return a[nativeCast<usize>(i)];
+         return a[cast<usize>(i)];
        }\n`,
     );
     expect(result.exitCode).toBe(7);
@@ -294,7 +294,7 @@ describe("fixed array edges", () => {
       "array-big",
       `export function main(): i32 {
          const a: FixedArray<u8, 4096> = fixedArray(4096, 1);
-         return nativeCast<i32>(a[4095]);
+         return cast<i32>(a[4095]);
        }\n`,
     );
     expect(result.exitCode).toBe(1);
@@ -306,7 +306,7 @@ describe("fixed array edges", () => {
       `export function main(): i32 {
          const a: FixedArray<u8, 8> = fixedArray(8, 0);
          const n: usize = a.length;
-         return nativeCast<i32>(n);
+         return cast<i32>(n);
        }\n`,
     );
     expect(result.exitCode).toBe(8);
@@ -321,7 +321,7 @@ describe("fixed array edges", () => {
       "array-nested",
       `export function main(): i32 {
          const a: FixedArray<FixedArray<u8, 2>, 2> = fixedArray(2, fixedArray(2, 3));
-         return nativeCast<i32>(a[1][1]);
+         return cast<i32>(a[1][1]);
        }\n`,
       "GF0161",
     );

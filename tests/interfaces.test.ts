@@ -399,7 +399,7 @@ describe("tryCast", () => {
        }\n`,
       "GF0002",
     );
-    expect(diagnostic.message).toContain("nativeCast");
+    expect(diagnostic.message).toContain("cast");
   });
 });
 

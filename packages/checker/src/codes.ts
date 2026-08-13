@@ -81,7 +81,7 @@ export const CODES = {
     title: "implicit narrowing",
     explanation:
       "A value cannot silently become a narrower type, because the truncation " +
-      "is invisible at the point it costs you. Write `nativeCast<u8>(x)` where " +
+      "is invisible at the point it costs you. Write `cast<u8>(x)` where " +
       "you mean it.\n\n" +
       "tsc usually catches this on its own, because the twelve widths are " +
       "mutually unassignable. It cannot catch it on the result of arithmetic: " +
@@ -90,9 +90,9 @@ export const CODES = {
       "width. Closing that hole is what this pass is for.",
   },
   GF0163: {
-    title: "`nativeCast` cannot convert between these types",
+    title: "`cast` cannot convert between these types",
     explanation:
-      "`nativeCast` converts between the twelve fixed widths and from `boolean` " +
+      "`cast` converts between the twelve fixed widths and from `boolean` " +
       "to a width. It is not a reinterpretation and not an escape hatch: " +
       "converting a pointer, a string, or an aggregate is a different operation " +
       "with different rules, and each has its own spelling.",
@@ -123,7 +123,7 @@ export const CODES = {
       "integer width at all, whatever its value: `1e3` is exactly a thousand " +
       "and is still refused, because accepting it would be the silent " +
       "float-to-integer conversion every other part of the language makes you " +
-      "write. `nativeCast<i32>(1.5)` is that written form, and truncates.",
+      "write. `cast<i32>(1.5)` is that written form, and truncates.",
   },
   GF0165: {
     title: "unary minus on an unsigned type",

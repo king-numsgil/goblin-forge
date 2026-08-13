@@ -77,7 +77,7 @@ describe("CString", () => {
     expect(diagnostic.message).toContain("move");
   });
 
-  test("`cstring_free` releases a moved-out string", async () => {
+  test("`cstringFree` releases a moved-out string", async () => {
     // The companion to `cstring(move(…))`, and only to that: it calls Goblin's
     // own deallocator, which subtracts sixteen bytes to reach the length
     // header. A `CString` from anywhere else needs *its* library's free.
@@ -87,14 +87,14 @@ describe("CString", () => {
          const s: string = "a" + "bcd";
          const c: CString = cstring(move(s));
          console.log(\`len=\${c.length}\`);
-         cstring_free(c);
+         cstringFree(c);
          return 0;
        }\n`,
     );
     expect(result.stdout).toBe("len=4\n");
   });
 
-  test("`cstring_free` refuses a `string` — and tsc says so first", async () => {
+  test("`cstringFree` refuses a `string` — and tsc says so first", async () => {
     // A `string` releases itself; handing one here would free it twice. The
     // brand is what makes this tsc's to catch rather than the lowerer's, which
     // is the better outcome: the editor underlines it while you type. The
@@ -103,7 +103,7 @@ describe("CString", () => {
       "cstring-free-string",
       `export function main(): i32 {
          const s: string = "a" + "b";
-         cstring_free(s);
+         cstringFree(s);
          return 0;
        }\n`,
       "TS2345",

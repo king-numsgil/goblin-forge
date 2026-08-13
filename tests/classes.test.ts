@@ -19,6 +19,12 @@
 
 import { describe, expect, test } from "bun:test";
 
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+import { RESERVED_ON_POINTER } from "../packages/forge/src/classes.ts";
+
 import { compileSource, errorCodes, expectRejected, run } from "./harness.ts";
 
 describe("classes", () => {
@@ -960,6 +966,68 @@ describe("class members at the edges", () => {
     );
     expect(result.ok).toBe(false);
     expect(errorCodes(result)).toContain("TS4114");
+  });
+});
+
+describe("names a class may not use", () => {
+  // `Pointer<T>` is `T & CorePointer<T>`, so a class declaring one of the
+  // pointer's own members has a member nothing can reach through a pointer to
+  // it. tsc has no complaint — an intersection resolving to one side is what an
+  // intersection *is* — so the compiler refuses it at the declaration.
+
+  for (const reserved of RESERVED_ON_POINTER) {
+    test(`\`${reserved}\` as a method is GF0002`, async () => {
+      const diagnostic = await expectRejected(
+        `class-reserved-${reserved}`,
+        `class C { ${reserved}(): i32 { return 1; } }
+
+         export function main(): i32 { return 0; }\n`,
+        "GF0002",
+      );
+      expect(diagnostic.message).toContain("reserved");
+    });
+  }
+
+  test("as a field, a getter and a setter too", async () => {
+    for (const [what, member] of [
+      ["field", "free: i32 = 0;"],
+      ["getter", "get free(): i32 { return 0; }"],
+      ["setter", "set free(v: i32) { }"],
+    ] as const) {
+      const { result } = await compileSource(
+        `class-reserved-${what}`,
+        `class C { ${member} }
+
+         export function main(): i32 { return 0; }\n`,
+      );
+      expect({ what, ok: result.ok }).toEqual({ what, ok: false });
+      expect({ what, codes: errorCodes(result) }).toEqual({ what, codes: ["GF0002"] });
+    }
+  });
+
+  test("a `static` of the same name is fine — a pointer points at an instance", async () => {
+    const result = await run(
+      "class-reserved-static",
+      `class C { static free(): i32 { return 7; } }
+
+       export function main(): i32 { return C.free(); }\n`,
+    );
+    expect(result.exitCode).toBe(7);
+  });
+
+  test("the reserved list is exactly `CorePointer<T>`'s members", () => {
+    // The anti-drift check. Adding a method to `CorePointer` without adding it
+    // here would reintroduce the silent shadowing this rule exists to prevent,
+    // and nothing else would notice.
+    const prelude = readFileSync(
+      join(dirname(dirname(fileURLToPath(import.meta.url))), "packages", "runtime", "global.d.ts"),
+      "utf8",
+    );
+    const body = /interface CorePointer<T> \{([\s\S]*?)\n\}/.exec(prelude)?.[1] ?? "";
+    const declared = [...body.matchAll(/^\s{2}(?:readonly\s+)?([A-Za-z_]\w*)\s*[(:<]/gm)].map(
+      (match) => match[1]!,
+    );
+    expect([...new Set(declared)].sort()).toEqual([...RESERVED_ON_POINTER].sort());
   });
 });
 

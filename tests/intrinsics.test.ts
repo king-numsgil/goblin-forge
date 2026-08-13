@@ -19,12 +19,12 @@ import { describe, expect, test } from "bun:test";
 import { compileSource, errorCodes, expectRejected, run } from "./harness.ts";
 
 describe("the intrinsics that are implemented", () => {
-  test("`nativeCast` converts between widths", async () => {
+  test("`cast` converts between widths", async () => {
     const result = await run(
       "intr-nativecast",
       `export function main(): i32 {
          const a: i64 = 300;
-         return nativeCast<i32>(a);
+         return cast<i32>(a);
        }\n`,
     );
     expect(result.exitCode).toBe(44);
@@ -96,15 +96,15 @@ describe("the intrinsics that are implemented", () => {
     expect(result.leaked).toBe(0);
   });
 
-  test("`nativeSizeOf` and `nativeAlignOf` are the layout, as constants", async () => {
+  test("`sizeOf` and `alignOf` are the layout, as constants", async () => {
     const result = await run(
       "intr-layout",
       `interface P { x: i32; y: i32; }
 
        export function main(): i32 {
-         const size: usize = nativeSizeOf<P>();
-         const align: usize = nativeAlignOf<P>();
-         const byte: usize = nativeSizeOf<u8>();
+         const size: usize = sizeOf<P>();
+         const align: usize = alignOf<P>();
+         const byte: usize = sizeOf<u8>();
          console.log(\`\${size} \${align} \${byte}\`);
          return 0;
        }\n`,
@@ -112,14 +112,14 @@ describe("the intrinsics that are implemented", () => {
     expect(result.stdout).toBe("8 4 1\n");
   });
 
-  test("`cstring` borrows and `cstring_free` releases a moved one", async () => {
+  test("`cstring` borrows and `cstringFree` releases a moved one", async () => {
     const result = await run(
       "intr-cstring",
       `export function main(): i32 {
          const built: string = "a" + "b";
          const c: CString = cstring(move(built));
          console.log(\`\${c.length}\`);
-         cstring_free(c);
+         cstringFree(c);
          return 0;
        }\n`,
     );
@@ -134,8 +134,8 @@ describe("the intrinsics the prelude declares and the lowerer does not have", ()
   // failure, and never a wrong number.
   const cases: [string, string][] = [
     ["allocArray", "  const p = allocArray<u8>(4);\n  p.freeArray();\n  return 0;"],
-    ["nativeNull", "  const p = nativeNull<i32>();\n  if (nativeIsNull(p)) { return 1; }\n  return 0;"],
-    ["nativeErase", "  const p = nativeNull<i32>();\n  const e = nativeErase(p);\n  return 0;"],
+    ["offset", "  const p = alloc<i32>();\n  const q = p.offset(1);\n  p.free();\n  return 0;"],
+    ["erase", "  const p = alloc<i32>();\n  const e = p.erase();\n  p.free();\n  return 0;"],
     ["stringFromCString", '  const s: string = stringFromCString(cstring("hi"));\n  return 0;'],
   ];
 
@@ -199,8 +199,8 @@ describe("the `String` methods the prelude declares", () => {
   // multi-byte character" — and none of them is lowered.
   const cases: [string, string][] = [
     ["substring", '  const s: string = "hello";\n  console.log(s.substring(1, 3));\n  return 0;'],
-    ["indexOf", '  const s: string = "hello";\n  const i: isize = s.indexOf("ll");\n  return nativeCast<i32>(i);'],
-    ["codePointAt", '  const s: string = "hello";\n  const c: u32 = s.codePointAt(0);\n  return nativeCast<i32>(c);'],
+    ["indexOf", '  const s: string = "hello";\n  const i: isize = s.indexOf("ll");\n  return cast<i32>(i);'],
+    ["codePointAt", '  const s: string = "hello";\n  const c: u32 = s.codePointAt(0);\n  return cast<i32>(c);'],
   ];
 
   for (const [name, body] of cases) {
@@ -217,7 +217,7 @@ describe("the `String` methods the prelude declares", () => {
     await expectRejected(
       "intr-length-literal",
       `export function main(): i32 {
-         return nativeCast<i32>("abc".length);
+         return cast<i32>("abc".length);
        }\n`,
       "GF0001",
     );
@@ -226,7 +226,7 @@ describe("the `String` methods the prelude declares", () => {
       "intr-length-binding",
       `export function main(): i32 {
          const s: string = "abc";
-         return nativeCast<i32>(s.length);
+         return cast<i32>(s.length);
        }\n`,
     );
     expect(result.exitCode).toBe(3);
@@ -245,12 +245,12 @@ describe("intrinsics used wrongly", () => {
     );
   });
 
-  test("`cstring_free` of a `string` is refused, and tsc refuses it first", async () => {
+  test("`cstringFree` of a `string` is refused, and tsc refuses it first", async () => {
     const { result } = await compileSource(
       "intr-cstring-free-string",
       `export function main(): i32 {
          const s: string = "a" + "b";
-         cstring_free(s);
+         cstringFree(s);
          return 0;
        }\n`,
     );
@@ -274,15 +274,15 @@ describe("intrinsics used wrongly", () => {
     );
   });
 
-  test("`nativeCast` of a string is refused, and tsc refuses it first", async () => {
-    // `nativeCast<T extends number>(value: number)`, so anything that is not a
+  test("`cast` of a string is refused, and tsc refuses it first", async () => {
+    // `cast<T extends number>(value: number)`, so anything that is not a
     // `number` never reaches the compiler's own check. GF0163 therefore has no
     // program that raises it today — see `tests/diagnostics.test.ts`.
     const { result } = await compileSource(
       "intr-nativecast-string",
       `export function main(): i32 {
          const s: string = "a";
-         const n: i32 = nativeCast<i32>(s);
+         const n: i32 = cast<i32>(s);
          return n;
        }\n`,
     );
@@ -295,15 +295,15 @@ describe("intrinsics used wrongly", () => {
       "intr-as-expression",
       `export function main(): i32 {
          const s: string = "a";
-         const n: i32 = nativeCast<i32>(s as unknown as number);
+         const n: i32 = cast<i32>(s as unknown as number);
          return n;
        }\n`,
       "GF0001",
     );
   });
 
-  test.failing("`nativeCast` of a `boolean` is documented and unreachable", async () => {
-    // `global.d.ts` says nativeCast "converts between the twelve fixed widths
+  test.failing("`cast` of a `boolean` is documented and unreachable", async () => {
+    // `global.d.ts` says cast "converts between the twelve fixed widths
     // and from `boolean` to a width", GF0163's explanation repeats it, and the
     // lowerer has a `BoolToInt` cast kind waiting. The declared signature takes
     // a `number`, so tsc rejects every call that would use it.
@@ -311,7 +311,7 @@ describe("intrinsics used wrongly", () => {
       "intr-nativecast-bool",
       `export function main(): i32 {
          const b: boolean = true;
-         return nativeCast<i32>(b);
+         return cast<i32>(b);
        }\n`,
     );
     expect(result.exitCode).toBe(1);

@@ -2,10 +2,10 @@
 //!
 //! REWRITE-PLAN §5.2. v1 had one `Type::size` that meant "what a register
 //! holds" in some places and "how much space this occupies" in others, and it
-//! took a heap overflow and a wrong `nativeSizeOf` to notice. So:
+//! took a heap overflow and a wrong `sizeOf` to notice. So:
 //!
 //! * [`Layout`] answers **how many bytes does this occupy**. Array strides,
-//!   field offsets, `nativeSizeOf`, and anything the allocator is told all come
+//!   field offsets, `sizeOf`, and anything the allocator is told all come
 //!   from here.
 //! * [`Repr`] answers **what does a register hold**. Cranelift types, ABI
 //!   classification and parameter passing come from here.

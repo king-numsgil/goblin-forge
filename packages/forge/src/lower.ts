@@ -98,7 +98,7 @@ export interface LowerResult {
 const NO_UNWIND: UnwindAction = { kind: "Unreachable" };
 
 /** The intrinsic that spells a width conversion. */
-const NATIVE_CAST = "nativeCast";
+const NATIVE_CAST = "cast";
 /** The intrinsic that spells "hand this value's ownership somewhere else". */
 const MOVE = "move";
 /** The intrinsic that builds a `FixedArray<T, N>`. */
@@ -107,13 +107,13 @@ const FIXED_ARRAY = "fixedArray";
 const TRY_CAST = "tryCast";
 /** `cstring(s)` — borrow a `string`'s bytes as a raw `const char *`. */
 const CSTRING = "cstring";
-/** `cstring_free(c)` — release one that came from a Goblin `string`. */
-const CSTRING_FREE = "cstring_free";
+/** `cstringFree(c)` — release one that came from a Goblin `string`. */
+const CSTRING_FREE = "cstringFree";
 /** `alloc(C, …)` — construct a `C` on the heap. C++'s `new C(…)`. */
 const ALLOC = "alloc";
-/** `nativeSizeOf<T>()` and `nativeAlignOf<T>()` — the layout, as constants. */
-const NATIVE_SIZE_OF = "nativeSizeOf";
-const NATIVE_ALIGN_OF = "nativeAlignOf";
+/** `sizeOf<T>()` and `alignOf<T>()` — the layout, as constants. */
+const NATIVE_SIZE_OF = "sizeOf";
+const NATIVE_ALIGN_OF = "alignOf";
 
 /**
  * Runtime entry points the lowerer names directly.
@@ -3322,7 +3322,7 @@ class BodyLowerer {
       this.#outer.unsupported(expression.expression, "this call target");
       return ERROR;
     }
-    // `alloc(C, …)`, `nativeSizeOf<T>()`, `nativeAlignOf<T>()` — the type is
+    // `alloc(C, …)`, `sizeOf<T>()`, `alignOf<T>()` — the type is
     // the call's own, which tsc has already worked out.
     if (
       expression.expression.text === ALLOC ||
@@ -3626,7 +3626,7 @@ class BodyLowerer {
       "GF0161",
       `\`${renderType(left.type)}\` and \`${renderType(right.type)}\` have no ` +
         `common type, so \`${operator}\` has no type to work at. Neither holds ` +
-        `every value of the other. Convert one with \`nativeCast\` to say which ` +
+        `every value of the other. Convert one with \`cast\` to say which ` +
         `you meant.`,
     );
     return ERROR;
@@ -3739,7 +3739,7 @@ class BodyLowerer {
       narrowing
         ? `this is a \`${renderType(value.type)}\` and \`${renderType(expected)}\` ` +
             `is narrower, so the conversion can lose the value. Write ` +
-            `\`nativeCast<${renderType(expected)}>(…)\` if that is what you mean.`
+            `\`cast<${renderType(expected)}>(…)\` if that is what you mean.`
         : `this is a \`${renderType(value.type)}\`, which does not convert to ` +
             `\`${renderType(expected)}\` without losing values.`,
     );
@@ -3917,7 +3917,7 @@ class BodyLowerer {
         "GF0161",
         "this expression is built only from literals, so it has no width, and " +
           "nothing here supplies one. Annotate the binding or convert with " +
-          "`nativeCast`.",
+          "`cast`.",
       );
       return undefined;
     }
@@ -4014,7 +4014,7 @@ class BodyLowerer {
         "GF0164",
         `\`${literal.getText()}\` is a floating-point literal and \`${type.name}\` ` +
           `holds integers. Write the integer, or convert with ` +
-          `\`nativeCast<${type.name}>(…)\` where the truncation is meant.`,
+          `\`cast<${type.name}>(…)\` where the truncation is meant.`,
       );
       return undefined;
     }
@@ -4301,7 +4301,7 @@ class BodyLowerer {
   }
 
   /**
-   * `nativeSizeOf<T>()` / `nativeAlignOf<T>()`.
+   * `sizeOf<T>()` / `alignOf<T>()`.
    *
    * The type argument is read from tsc rather than from the expression, because
    * there is no expression — it is written only in the angle brackets.
@@ -5303,7 +5303,7 @@ class BodyLowerer {
     if (!ts.isIdentifier(expression.expression)) return undefined;
     const name = expression.expression.text;
 
-    if (name === NATIVE_CAST) return this.#nativeCast(expression, natural);
+    if (name === NATIVE_CAST) return this.#cast(expression, natural);
     if (name === MOVE) return this.#move(expression);
     if (name === FIXED_ARRAY) return this.#fixedArray(expression, natural);
     if (name === TRY_CAST) return this.#tryCast(expression);
@@ -5462,7 +5462,10 @@ class BodyLowerer {
 
     // `p.free()`, before the class path for the same reason the width pass
     // takes it first: a `Pointer<C>` auto-dereferences to a `C`.
-    if (access.name.text === "free") {
+    if (access.name.text === "free" && this.#outer.tryErase(access.expression)?.kind === "pointer") {
+      // Probed silently first: `C.free()` on a class *name* has no value to
+      // lower, and asking for one reports a name that does not resolve before
+      // anything has decided this was not a pointer at all.
       const subject = this.#value(access.expression, undefined);
       if (subject !== undefined && subject.type.kind === "pointer") {
         return this.#free(expression, subject);
@@ -5718,7 +5721,7 @@ class BodyLowerer {
   }
 
   /**
-   * `cstring_free(c)` — release a `CString` through Goblin's own deallocator.
+   * `cstringFree(c)` — release a `CString` through Goblin's own deallocator.
    *
    * An intrinsic rather than a method on `CString`, and that is the design
    * rather than a shortcut. A `.free()` would have to pick one deallocator, and
@@ -5730,7 +5733,7 @@ class BodyLowerer {
   #cstringFree(expression: ts.CallExpression): Typed | undefined {
     const argument = expression.arguments[0];
     if (expression.arguments.length !== 1 || argument === undefined) {
-      this.#outer.error(expression, "GF0002", "`cstring_free` takes exactly one `CString`.");
+      this.#outer.error(expression, "GF0002", "`cstringFree` takes exactly one `CString`.");
       return undefined;
     }
     const value = this.#expressionTyped(argument, CSTRING_TYPE);
@@ -5739,7 +5742,7 @@ class BodyLowerer {
       this.#outer.error(
         argument,
         "GF0002",
-        `\`cstring_free\` releases a \`CString\`, and this is a ` +
+        `\`cstringFree\` releases a \`CString\`, and this is a ` +
           `\`${renderType(value.type)}\`. A \`string\` releases itself.`,
       );
       return undefined;
@@ -5786,7 +5789,7 @@ class BodyLowerer {
       "GF0002",
       `\`tryCast\` asks whether a value is really some class or contract. ` +
         `\`${renderType(target)}\` is neither, and for the twelve widths the ` +
-        "answer is decided at compile time — `nativeCast` is the conversion " +
+        "answer is decided at compile time — `cast` is the conversion " +
         "you want there.",
     );
     return undefined;
@@ -6257,19 +6260,19 @@ class BodyLowerer {
   }
 
   /**
-   * `nativeCast<T>(value)` — the written form of a conversion.
+   * `cast<T>(value)` — the written form of a conversion.
    *
    * This is the only way to narrow, and the only way to perform a conversion
    * that could lose a value. Everything it does is something the language
    * refuses to do on its own, which is why it has to be written.
    */
-  #nativeCast(expression: ts.CallExpression, target: MachineType): Typed | undefined {
+  #cast(expression: ts.CallExpression, target: MachineType): Typed | undefined {
     const argument = expression.arguments[0];
     if (expression.arguments.length !== 1 || argument === undefined) {
       this.#outer.error(
         expression,
         "GF0163",
-        "`nativeCast` takes exactly one value to convert.",
+        "`cast` takes exactly one value to convert.",
       );
       return undefined;
     }
@@ -6281,7 +6284,7 @@ class BodyLowerer {
     //
     // Unless it is a *fractional* literal being converted to an integer width,
     // which is the one case where there is a real conversion to do:
-    // `nativeCast<i32>(1.5)` is C++'s `static_cast<int>(1.5)` and means one.
+    // `cast<i32>(1.5)` is C++'s `static_cast<int>(1.5)` and means one.
     // Range-checking `1.5` at `i32` would reject it (`GF0164`) for being
     // written as a float — which is the right answer where the cast is absent
     // and the wrong one here, because the cast is how truncation is asked for.
@@ -6480,7 +6483,7 @@ function describe(node: ts.Node): string {
  *
  * Such an expression has no width of its own and takes one from its context,
  * so a single `1.5` anywhere inside it makes `f64` the only context that can
- * hold the written value — which is what `nativeCast` needs to know before it
+ * hold the written value — which is what `cast` needs to know before it
  * range-checks the thing at an integer width.
  */
 function fractionalLiteralIn(expression: ts.Node): boolean {
