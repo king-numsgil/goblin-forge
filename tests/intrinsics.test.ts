@@ -75,6 +75,43 @@ describe("the intrinsics that are implemented", () => {
     expect(result.stdout).toBe("woof\n");
   });
 
+  test("`alloc` constructs on the heap and `free` releases", async () => {
+    const result = await run(
+      "intr-alloc",
+      `class Rect {
+         w: i32;
+         h: i32;
+         constructor(w: i32, h: i32) { this.w = w; this.h = h; }
+         area(): i32 { return this.w * this.h; }
+       }
+
+       export function main(): i32 {
+         const r = alloc(Rect, 6, 7);
+         const area: i32 = r.area();
+         r.free();
+         return area;
+       }\n`,
+    );
+    expect(result.exitCode).toBe(42);
+    expect(result.leaked).toBe(0);
+  });
+
+  test("`nativeSizeOf` and `nativeAlignOf` are the layout, as constants", async () => {
+    const result = await run(
+      "intr-layout",
+      `interface P { x: i32; y: i32; }
+
+       export function main(): i32 {
+         const size: usize = nativeSizeOf<P>();
+         const align: usize = nativeAlignOf<P>();
+         const byte: usize = nativeSizeOf<u8>();
+         console.log(\`\${size} \${align} \${byte}\`);
+         return 0;
+       }\n`,
+    );
+    expect(result.stdout).toBe("8 4 1\n");
+  });
+
   test("`cstring` borrows and `cstring_free` releases a moved one", async () => {
     const result = await run(
       "intr-cstring",
@@ -96,8 +133,6 @@ describe("the intrinsics the prelude declares and the lowerer does not have", ()
   // only acceptable answer is GF0001 with a file and a line — never a backend
   // failure, and never a wrong number.
   const cases: [string, string][] = [
-    ["nativeSizeOf", "  const n: usize = nativeSizeOf<i32>();\n  return nativeCast<i32>(n);"],
-    ["nativeAlignOf", "  const n: usize = nativeAlignOf<i32>();\n  return nativeCast<i32>(n);"],
     ["nativeNew", "  const p = nativeNew<i32>();\n  nativeDelete(p);\n  return 0;"],
     ["allocArray", "  const p = allocArray<u8>(4);\n  p.freeArray();\n  return 0;"],
     ["nativeNull", "  const p = nativeNull<i32>();\n  if (nativeIsNull(p)) { return 1; }\n  return 0;"],
@@ -117,34 +152,18 @@ describe("the intrinsics the prelude declares and the lowerer does not have", ()
     });
   }
 
-  test("`alloc` is GF0001", async () => {
+  test("a fixed array does not decay to a pointer yet", async () => {
+    // C's array-to-pointer conversion, and the one part of `Pointer<T>` that is
+    // still missing now that the type itself exists.
     await expectRejected(
-      "intr-missing-alloc",
-      `class R {
-         x: i32;
-         constructor(x: i32) { this.x = x; }
-       }
-
-       export function main(): i32 {
-         const r = alloc(R, 3);
-         r.free();
-         return 0;
-       }\n`,
-      "GF0001",
-    );
-  });
-
-  test("`Pointer<T>` cannot yet be written as a type, and the message says why", async () => {
-    const diagnostic = await expectRejected(
-      "intr-pointer-type",
+      "intr-array-decay",
       `export function main(): i32 {
          const buf: FixedArray<u8, 4> = fixedArray(4, 0);
          const p: Pointer<u8> = buf;
          return 0;
        }\n`,
-      "GF0001",
+      "GF0161",
     );
-    expect(diagnostic.message).toContain("Pointer");
   });
 
   test("`Reference<T>` may only be written for a contract, so far", async () => {

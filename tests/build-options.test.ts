@@ -171,19 +171,19 @@ describe("`main`", () => {
     expect(result.diagnostics.map((d) => d.code)).toContain("GF0004");
   });
 
-  test("the conventional argc/argv pair is GF0001 today, not GF0004 alone", async () => {
+  test("the conventional argc/argv pair is still GF0004, but only that", async () => {
     // GF0004's own explanation offers the pair as one of the two acceptable
-    // shapes. It is not acceptable yet, because `Pointer<T>` is not a type the
-    // compiler can spell — so what a user writing the documented signature gets
-    // is a complaint about the *pointer*, followed by one about `main`.
+    // shapes. It is not accepted yet — but now that `Pointer<T>` is a type the
+    // compiler can spell, the complaint is about `main` alone rather than about
+    // the pointer first and `main` afterwards.
     const { result } = await compileSource(
       "main-argv",
       `export function main(argc: i32, argv: Pointer<Pointer<u8>>): i32 { return 0; }\n`,
     );
     expect(result.ok).toBe(false);
     const codes = result.diagnostics.map((d) => d.code);
-    expect(codes).toContain("GF0001");
     expect(codes).toContain("GF0004");
+    expect(codes).not.toContain("GF0001");
   });
 
   test("a second exported function beside `main` is fine", async () => {

@@ -1760,6 +1760,18 @@ impl<'a, 'm, M: ClifModule> FunctionTranslator<'a, 'm, M> {
                 let zero = self.builder.ins().iconst(pointer, 0);
                 Some(self.builder.ins().icmp(IntCC::Equal, itab, zero))
             }
+            // Constants: the layout engine has already answered by the time
+            // anything is emitted.
+            Rvalue::SizeOf(ty) => {
+                let pointer = self.target.pointer_type();
+                let layout = self.layouts.layout(*ty)?;
+                Some(self.builder.ins().iconst(pointer, i64::from(layout.size)))
+            }
+            Rvalue::AlignOf(ty) => {
+                let pointer = self.target.pointer_type();
+                let layout = self.layouts.layout(*ty)?;
+                Some(self.builder.ins().iconst(pointer, i64::from(layout.align)))
+            }
             Rvalue::Len(place) => {
                 let ty = self.place_type(place)?;
                 let value = self.read_raw(place)?;
@@ -2593,6 +2605,8 @@ fn rvalue_operands(rvalue: &Rvalue) -> Vec<&Operand> {
         // and the *element* is stored afterwards through the pointer this
         // produces, so there is no operand here either.
         | Rvalue::ArrayPushSlot(_)
+        | Rvalue::SizeOf(_)
+        | Rvalue::AlignOf(_)
         // `source` is a place, not an operand: building a `Reference<I>` takes
         // the object's *address* and never reads it.
         | Rvalue::MakeInterface { .. }

@@ -260,6 +260,12 @@ function rvalue(module: Module, value: Rvalue): string {
       return `isNull(${place(value.value)})`;
     case "ArrayPushSlot":
       return `push_slot(${place(value.value)})`;
+    // By type id: a MIR dump names types that way everywhere else, and both of
+    // these become a constant the backend fills in from the layout.
+    case "SizeOf":
+      return `sizeof(ty${value.value})`;
+    case "AlignOf":
+      return `alignof(ty${value.value})`;
     case "MakeInterface":
       return `(${sym(module, module.interfaces[value.interface]?.name ?? 0)}) ${place(
         value.source,

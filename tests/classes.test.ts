@@ -367,18 +367,20 @@ describe("classes: what is rejected", () => {
     );
   });
 
-  test("a getter", async () => {
-    const diagnostic = await expectRejected(
+  test("a getter reads through a call — see `tests/accessors.test.ts`", async () => {
+    const result = await run(
       "class-getter",
       `class A {
          value: i32;
          constructor() { this.value = 1; }
          get doubled(): i32 { return this.value * 2; }
        }
-       export function main(): i32 { return 0; }\n`,
-      "GF0001",
+
+       export function main(): i32 {
+         return new A().doubled;
+       }\n`,
     );
-    expect(diagnostic.message).toContain("getter");
+    expect(result.exitCode).toBe(2);
   });
 
   test("a contract used as a value", async () => {

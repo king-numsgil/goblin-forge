@@ -325,6 +325,19 @@ pub enum Rvalue {
     /// `place` is the array itself, and it is **reseated**: growing reallocates,
     /// so the handle the caller holds is written back through.
     ArrayPushSlot(Place),
+    /// `nativeSizeOf<T>()` — the *storage* size of a `T`, in bytes.
+    ///
+    /// What an array of `T` strides by and what an allocation of one costs;
+    /// never "what a register holds", which is a different question.
+    ///
+    /// A node rather than a runtime call because only the backend lays types
+    /// out, and a constant rather than a lookup for the same reason: by the
+    /// time this is emitted the answer is known. `alloc` and `free` are built
+    /// from this and [`Rvalue::AlignOf`] rather than from nodes of their own,
+    /// which is what keeps allocation an ordinary runtime call.
+    SizeOf(TyId),
+    /// `nativeAlignOf<T>()` — the alignment of a `T`, in bytes.
+    AlignOf(TyId),
 }
 
 /// What happens if a call unwinds out of this point.

@@ -291,12 +291,22 @@ export function erase(checker: ts.TypeChecker, type: ts.Type): MachineType {
       "GF0001",
     );
   }
+  // `Pointer<T>`: a bare machine address. `T` exists only at compile time,
+  // where it supplies the layout to read through and the stride for arithmetic.
+  //
+  // Spelled as an intersection — `T & CorePointer<T>` — so that `p.field` and
+  // `p.method()` resolve without writing a dereference, which is the same
+  // auto-dereference C++ spells `->`. The pointee is therefore one member of
+  // the intersection rather than the type itself.
   if (isPointerType(checker, type)) {
-    throw new ErasureError(
-      "a `Pointer<T>` cannot be written as a type yet. It arrives with the " +
-        "allocation intrinsics, which are not implemented.",
-      "GF0001",
-    );
+    const pointee = pointeeOf(checker, type);
+    if (pointee === null) {
+      throw new ErasureError(
+        "this `Pointer<T>` has no pointee type to read through.",
+        "GF0001",
+      );
+    }
+    return { kind: "pointer", pointee: erase(checker, pointee) };
   }
 
   // `T[]` and `Array<T>` are one type in TypeScript and one type here: the
@@ -401,6 +411,19 @@ export function nullableOf(checker: ts.TypeChecker, type: ts.Type): ts.Type | nu
 }
 
 /** What a `Reference<T>` refers to, read off its brand, or `null`. */
+/**
+ * What a `Pointer<T>` points at.
+ *
+ * Read from the brand rather than from the intersection's other member, for the
+ * same reason {@link referentOf} does: the brand carries `T` exactly, where the
+ * intersection carries whatever `T` happened to widen to.
+ */
+export function pointeeOf(checker: ts.TypeChecker, type: ts.Type): ts.Type | null {
+  const brand = brandedProperty(checker, type, "PointerBrand");
+  if (!brand) return null;
+  return checker.getNonNullableType(checker.getTypeOfSymbol(brand));
+}
+
 export function referentOf(checker: ts.TypeChecker, type: ts.Type): ts.Type | null {
   const brand = brandedProperty(checker, type, "ReferenceBrand");
   if (!brand) return null;

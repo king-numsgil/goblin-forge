@@ -63,6 +63,7 @@ import {
 import {
   type ClassInfo,
   type ClassMethod,
+  type MethodBody,
   type StaticMethod,
   collectClasses,
 } from "./classes.ts";
@@ -108,6 +109,11 @@ const TRY_CAST = "tryCast";
 const CSTRING = "cstring";
 /** `cstring_free(c)` — release one that came from a Goblin `string`. */
 const CSTRING_FREE = "cstring_free";
+/** `alloc(C, …)` — construct a `C` on the heap. C++'s `new C(…)`. */
+const ALLOC = "alloc";
+/** `nativeSizeOf<T>()` and `nativeAlignOf<T>()` — the layout, as constants. */
+const NATIVE_SIZE_OF = "nativeSizeOf";
+const NATIVE_ALIGN_OF = "nativeAlignOf";
 
 /**
  * Runtime entry points the lowerer names directly.
@@ -142,6 +148,15 @@ const RUNTIME = {
    * a stride nor an alignment, so the frontend can name it directly.
    */
   arrayPop: "gf_array_pop",
+  /**
+   * `gf_alloc(size, align)` and `gf_free(p, size, align)` — raw storage.
+   *
+   * The runtime hands out and takes back bytes; constructing and destroying
+   * what goes in them is the backend's, which is why the size and alignment
+   * are arguments rather than something a type parameter would supply.
+   */
+  alloc: "gf_alloc",
+  free: "gf_free",
 } as const;
 
 /** `console` methods, and which stream each writes to. */
@@ -424,7 +439,7 @@ type ClassBody =
   | {
       readonly kind: "method";
       readonly info: ClassInfo;
-      readonly node: ts.MethodDeclaration;
+      readonly node: MethodBody;
       readonly builder: FunctionBuilder;
       readonly params: readonly { name: string; type: MachineType }[];
       readonly returns: MachineType;
@@ -436,7 +451,7 @@ type ClassBody =
        */
       readonly kind: "static";
       readonly info: ClassInfo;
-      readonly node: ts.MethodDeclaration;
+      readonly node: MethodBody;
       readonly builder: FunctionBuilder;
       readonly params: readonly { name: string; type: MachineType }[];
       readonly returns: MachineType;
@@ -809,6 +824,41 @@ class Lowerer {
     for (const source of sources) scan(source);
   }
 
+  /** Whether `name` is `base`, or derives from it through any number of steps. */
+  derivesFrom(name: string, base: string): boolean {
+    let info = this.#classes.get(name);
+    while (info !== undefined) {
+      if (info.name === base) return true;
+      info = info.base;
+    }
+    return false;
+  }
+
+  /**
+   * The type an accessor reads or writes.
+   *
+   * A getter's return type, or a setter's parameter type — the same question
+   * asked of whichever half exists, so that `x.name` and `x.name = v` agree
+   * about what `name` is.
+   */
+  accessorType(accessor: ClassMethod): MachineType | undefined {
+    const declaration = accessor.declaration;
+    if (ts.isSetAccessorDeclaration(declaration)) {
+      const parameter = declaration.parameters[0];
+      if (parameter === undefined) {
+        this.unsupported(declaration, "a setter with no parameter");
+        return undefined;
+      }
+      return this.erase(parameter, this.#checker.getTypeAtLocation(parameter));
+    }
+    const signature = this.#checker.getSignatureFromDeclaration(declaration);
+    if (signature === undefined) {
+      this.unsupported(declaration, "an accessor tsc could not give a signature to");
+      return undefined;
+    }
+    return this.erase(declaration, this.#checker.getReturnTypeOfSignature(signature));
+  }
+
   /**
    * The element type, when this expression is a `T[]` or a reference to one.
    *
@@ -910,7 +960,13 @@ class Lowerer {
         }
       }
 
-      for (const method of info.methods.values()) {
+      // Accessors are methods and are emitted as ones; only the syntax that
+      // reaches them differs.
+      for (const method of [
+        ...info.methods.values(),
+        ...info.getters.values(),
+        ...info.setters.values(),
+      ]) {
         // An inherited method belongs to the class that declared it and is
         // emitted once, there.
         if (method.owner !== info.name) continue;
@@ -1054,7 +1110,7 @@ class Lowerer {
   }
 
   #classFnParams(
-    node: ts.ConstructorDeclaration | ts.MethodDeclaration,
+    node: ts.ConstructorDeclaration | MethodBody,
   ): { name: string; type: MachineType }[] | undefined {
     const params: { name: string; type: MachineType }[] = [];
     for (const parameter of node.parameters) {
@@ -1915,9 +1971,15 @@ class BodyLowerer {
   #asClass(subject: Typed): { info: ClassInfo; place: Place } | undefined {
     let type = subject.type;
     const extra: Place["projection"] = [];
-    if (type.kind === "reference" && type.referent.kind === "class") {
+    // A `Pointer<C>` reaches an object the same way a `Reference<C>` does —
+    // one dereference — which is what makes `p.field` and `p.method()` work
+    // without writing one. The auto-dereference C++ spells `->`.
+    if (
+      (type.kind === "reference" && type.referent.kind === "class") ||
+      (type.kind === "pointer" && type.pointee.kind === "class")
+    ) {
       extra.push({ kind: "Deref" });
-      type = type.referent;
+      type = type.kind === "reference" ? type.referent : type.pointee;
     }
     if (type.kind !== "class") return undefined;
     const info = this.#outer.classInfo(type.name);
@@ -2734,8 +2796,29 @@ class BodyLowerer {
 
     const asClass = this.#asClass(subject);
     if (asClass !== undefined) {
+      // `x.name = v` where `name` is a setter: a call, not a store. Checked
+      // before the field lookup because a name is one or the other — declaring
+      // both is refused where the class is analysed.
+      const setter = asClass.info.setters.get(target.name.text);
+      if (setter !== undefined) {
+        this.#accessorCall(target, setter, [source]);
+        return;
+      }
+
       const field = this.#fieldOf(asClass.info, target.name.text);
       if (field === undefined) {
+        // A getter with no setter reads but does not write, and saying which is
+        // more use than saying the name is unknown.
+        if (asClass.info.getters.has(target.name.text)) {
+          this.#outer.error(
+            target,
+            "GF0002",
+            `\`${asClass.info.name}.${target.name.text}\` is a getter with no ` +
+              "setter, so it can be read and not written. Add `set " +
+              `${target.name.text}(value)\` if it should be.`,
+          );
+          return;
+        }
         this.#outer.unsupported(target, `\`${asClass.info.name}.${target.name.text}\``);
         return;
       }
@@ -2932,6 +3015,26 @@ class BodyLowerer {
       const info = this.#outer.classInfo(className);
       const field = info?.fields.find((f) => f.name === expression.name.text);
       if (field !== undefined) return typed(field.type);
+      // `x.name` where `name` is `get name()`: a call, and its type is what the
+      // getter returns.
+      const getter = info?.getters.get(expression.name.text);
+      if (getter !== undefined) {
+        const returns = this.#outer.accessorType(getter);
+        return returns === undefined ? ERROR : typed(returns);
+      }
+      // The mirror of assigning to a getter that has no setter. tsc lets a
+      // write-only accessor be read — it gives back `undefined`, which is not a
+      // type this language has — so this is the compiler's to refuse.
+      if (info?.setters.has(expression.name.text) === true) {
+        this.#outer.error(
+          expression,
+          "GF0002",
+          `\`${className}.${expression.name.text}\` is a setter with no getter, ` +
+            `so it can be written and not read. Add \`get ${expression.name.text}()\` ` +
+            "if it should be.",
+        );
+        return ERROR;
+      }
       if (info?.methods.has(expression.name.text) === true) {
         this.#outer.unsupported(expression, "a method used as a value");
         return ERROR;
@@ -3183,6 +3286,19 @@ class BodyLowerer {
       this.#outer.unsupported(expression.expression, "this call target");
       return ERROR;
     }
+    // `alloc(C, …)`, `nativeSizeOf<T>()`, `nativeAlignOf<T>()` — the type is
+    // the call's own, which tsc has already worked out.
+    if (
+      expression.expression.text === ALLOC ||
+      expression.expression.text === NATIVE_SIZE_OF ||
+      expression.expression.text === NATIVE_ALIGN_OF
+    ) {
+      for (const argument of expression.arguments.slice(1)) {
+        if (this.width(argument).kind === "error") return ERROR;
+      }
+      return this.#erasedWidth(expression);
+    }
+
     if (expression.expression.text === NATIVE_CAST) {
       // The target width is the call's own type, which tsc has already
       // resolved from the type argument. Reading it from there rather than
@@ -3280,6 +3396,14 @@ class BodyLowerer {
           );
           return ERROR;
       }
+    }
+
+    // `p.free()`. Before the class path, because a `Pointer<C>` auto-
+    // dereferences to a `C` and would otherwise look for a method called
+    // `free` on it.
+    if (access.name.text === "free") {
+      const pointer = this.#outer.tryErase(access.expression);
+      if (pointer?.kind === "pointer") return typed(VOID);
     }
 
     // `C.f(…)` — a static method. The receiver is a *class name*, not a value,
@@ -3534,6 +3658,23 @@ class BodyLowerer {
       return value.temporary === undefined
         ? { operand, type: expected }
         : { operand, type: expected, borrowsTemporary: true };
+    }
+    // `Pointer<Derived>` → `Pointer<Base>`: the same address, retyped.
+    //
+    // Costs nothing because a base is a byte-for-byte layout prefix of every
+    // class that derives from it, so the object's address *is* the base
+    // subobject's address. This is what makes polymorphism through a pointer
+    // work — and it is exactly as unsound as `Derived**` to `Base**` is in C++,
+    // which is the trade the prelude states when it makes `CorePointer<T>`
+    // covariant.
+    if (
+      expected.kind === "pointer" &&
+      value.type.kind === "pointer" &&
+      expected.pointee.kind === "class" &&
+      value.type.pointee.kind === "class" &&
+      this.#outer.derivesFrom(value.type.pointee.name, expected.pointee.name)
+    ) {
+      return { operand: value.operand, type: expected };
     }
     if (expected.kind === "reference" && expected.referent.kind === "class") {
       return this.#toClassReference(at, value, expected.referent.name);
@@ -4124,6 +4265,170 @@ class BodyLowerer {
   }
 
   /**
+   * `nativeSizeOf<T>()` / `nativeAlignOf<T>()`.
+   *
+   * The type argument is read from tsc rather than from the expression, because
+   * there is no expression — it is written only in the angle brackets.
+   */
+  #layoutQuery(expression: ts.CallExpression, size: boolean): Typed | undefined {
+    const argument = expression.typeArguments?.[0];
+    if (argument === undefined) {
+      this.#outer.error(
+        expression,
+        "GF0002",
+        `\`${size ? NATIVE_SIZE_OF : NATIVE_ALIGN_OF}\` needs the type written out: ` +
+          `\`${size ? NATIVE_SIZE_OF : NATIVE_ALIGN_OF}<i32>()\`.`,
+      );
+      return undefined;
+    }
+    const type = this.#outer.erase(argument, this.#outer.checker.getTypeAtLocation(argument));
+    if (type === undefined) return undefined;
+    const ty = this.#outer.tyOf(type, argument);
+    return this.#temporaryTyped(expression, USIZE, size ? { kind: "SizeOf", value: ty } : { kind: "AlignOf", value: ty });
+  }
+
+  /**
+   * `alloc(C, …args)` — construct a `C` on the heap, and hand back its address.
+   *
+   * C++'s `new C(…)`, and built from parts rather than from a node of its own:
+   * ask the runtime for storage the size and alignment of a `C`, zero it and
+   * install its vtable with the same `Default` a stack object gets, then run
+   * the constructor through a reference to it. The only thing the backend has
+   * to supply is the layout, and `SizeOf`/`AlignOf` already do that.
+   *
+   * Where `new C(…)` gives a value its scope releases, this gives a pointer
+   * that outlives the scope and leaks if you drop it — the same distinction
+   * C++ draws, and the reason `free()` is something you write.
+   */
+  #alloc(expression: ts.CallExpression, natural: MachineType): Typed | undefined {
+    const [klass, ...args] = expression.arguments;
+    if (klass === undefined || !ts.isIdentifier(klass)) {
+      this.#outer.error(expression, "GF0002", "`alloc` takes a class, then its constructor's arguments.");
+      return undefined;
+    }
+    const info = this.#outer.classInfo(klass.text);
+    if (info === undefined) {
+      this.#outer.unsupported(expression, `\`alloc(${klass.text}, …)\``);
+      return undefined;
+    }
+
+    const object: MachineType = { kind: "class", name: info.name };
+    const pointer: MachineType =
+      natural.kind === "pointer" ? natural : { kind: "pointer", pointee: object };
+    const ty = this.#outer.tyOf(object, expression);
+
+    const size = this.#temporaryTyped(expression, USIZE, { kind: "SizeOf", value: ty });
+    const align = this.#temporaryTyped(expression, USIZE, { kind: "AlignOf", value: ty });
+    if (size === undefined || align === undefined) return undefined;
+
+    const raw = this.#callRuntime(expression, RUNTIME.alloc, [size, align], pointer);
+    if (raw === undefined) return undefined;
+
+    // The storage is uninitialised, so this is the same two-step a stack object
+    // gets: `Default` zeroes it and installs the vtable — making it
+    // dispatchable, and therefore destructible, before the constructor runs a
+    // line — and then the constructor is an ordinary call.
+    const place = this.#placeOfSubject(expression, raw);
+    if (place === undefined) return undefined;
+    const target: Place = { local: place.local, projection: [...place.projection, { kind: "Deref" }] };
+    this.#push({ kind: "Init", place: target, rvalue: { kind: "Default" } });
+
+    const marshalled = this.#classCallArgs(
+      expression,
+      info,
+      info.constructorSymbol,
+      args,
+      { kind: "Copy", value: place },
+    );
+    if (marshalled === undefined) return undefined;
+    if (marshalled === null) {
+      if (args.length > 0) {
+        this.#outer.error(
+          expression,
+          "GF0002",
+          `\`${info.name}\` declares no constructor, so \`alloc\` takes no arguments after it.`,
+        );
+        return undefined;
+      }
+      return { operand: raw.operand, type: pointer };
+    }
+
+    const record = this.#outer.fn(info.constructorSymbol!);
+    if (record === undefined || record.kind !== "defined") return undefined;
+    this.#callDirect(record.id, marshalled, undefined);
+    return { operand: raw.operand, type: pointer };
+  }
+
+  /**
+   * `p.free()` — run the destructor, then hand the storage back.
+   *
+   * C++'s `delete`, and just as unchecked. A **direct** destructor call rather
+   * than a virtual one would be wrong here in a way it is not for a stack
+   * object: `Drop` on the pointee dispatches through the vtable, so deleting
+   * through a `Pointer<Base>` runs the derived destructor.
+   */
+  #free(expression: ts.CallExpression, subject: Typed): Typed | undefined {
+    if (expression.arguments.length !== 0) {
+      this.#outer.error(expression, "GF0002", "`free` takes no arguments.");
+      return undefined;
+    }
+    if (subject.type.kind !== "pointer") {
+      this.#outer.error(
+        expression,
+        "GF0002",
+        `\`free\` releases a \`Pointer<T>\`; this is a \`${renderType(subject.type)}\`.`,
+      );
+      return undefined;
+    }
+
+    const place = this.#placeOfSubject(expression, subject);
+    if (place === undefined) return undefined;
+    const pointee = subject.type.pointee;
+    const ty = this.#outer.tyOf(pointee, expression);
+
+    // The value first, then its storage — a destructor is still reading live
+    // memory when it runs.
+    //
+    // For a class this is a **virtual** call to slot 0, which is C++'s virtual
+    // destructor and is the one place destruction has to dispatch. Everywhere
+    // else the compiler destroys a value whose storage was laid out for exactly
+    // its static type, so the dynamic type *is* the static one — but a
+    // `Pointer<Base>` may address a `Derived`, and a direct call to `Base$drop`
+    // would leave the derived class's own fields unreleased.
+    if (pointee.kind === "class") {
+      const info = this.#outer.classInfo(pointee.name);
+      const destructor = info === undefined ? undefined : this.#outer.fn(info.destructorSymbol);
+      if (info === undefined || destructor === undefined) {
+        this.#outer.unsupported(expression, `\`free\` of a \`${renderType(pointee)}\``);
+        return undefined;
+      }
+      this.#emitCall(
+        expression,
+        { kind: "Virtual", slot: 0, sig: destructor.sig },
+        [{ kind: "Copy", value: place }],
+        VOID,
+      );
+    } else if (needsDrop(pointee)) {
+      this.#push({
+        kind: "Drop",
+        place: { local: place.local, projection: [...place.projection, { kind: "Deref" }] },
+        flag: null,
+        unwind: NO_UNWIND,
+      });
+    }
+
+    const size = this.#temporaryTyped(expression, USIZE, { kind: "SizeOf", value: ty });
+    const align = this.#temporaryTyped(expression, USIZE, { kind: "AlignOf", value: ty });
+    if (size === undefined || align === undefined) return undefined;
+    return this.#callRuntime(
+      expression,
+      RUNTIME.free,
+      [{ operand: { kind: "Copy", value: place }, type: subject.type }, size, align],
+      VOID,
+    );
+  }
+
+  /**
    * `xs.push(v)` — grow by one, then store the element into the new slot.
    *
    * Two steps because they belong to two halves of the compiler. Making room
@@ -4445,6 +4750,50 @@ class BodyLowerer {
     return this.#property(expression);
   }
 
+  /**
+   * `x.name` or `x.name = v` — an accessor, called.
+   *
+   * A **virtual** call, exactly like a method: an accessor has a vtable slot,
+   * so a getter overridden in a derived class is reached through a base
+   * reference. The only thing property syntax changes is where the arguments
+   * come from — none for a getter, the right-hand side for a setter.
+   */
+  #accessorCall(
+    at: ts.PropertyAccessExpression,
+    accessor: ClassMethod,
+    args: readonly ts.Expression[],
+  ): Typed | undefined {
+    const subject = this.#value(at.expression, undefined);
+    if (subject === undefined) return undefined;
+    const asClass = this.#asClass(subject);
+    if (asClass === undefined) {
+      this.#outer.unsupported(at, "an accessor on this receiver");
+      return undefined;
+    }
+
+    const record = this.#outer.fn(accessor.symbol);
+    if (record === undefined || record.kind !== "defined") {
+      this.#outer.unsupported(at, `a call to \`${accessor.symbol}\``);
+      return undefined;
+    }
+
+    const marshalled = this.#classCallArgs(
+      at,
+      asClass.info,
+      accessor.symbol,
+      args,
+      this.#refTo(at, asClass.place, { kind: "class", name: asClass.info.name }),
+    );
+    if (marshalled === undefined || marshalled === null) return undefined;
+
+    return this.#emitCall(
+      at,
+      { kind: "Virtual", slot: accessor.slot, sig: record.sig },
+      marshalled,
+      record.signature.returns,
+    );
+  }
+
   #property(expression: ts.PropertyAccessExpression): Typed | undefined {
     // A fixed array's length is in its type, so it is a constant rather than a
     // load — which is the whole difference between it and `T[]`.
@@ -4464,6 +4813,15 @@ class BodyLowerer {
         };
       }
     }
+
+    // `x.name` where `name` is a getter: an ordinary virtual call, dispatched
+    // like any method, so `override get` reaches the derived body.
+    const className = this.#outer.classNameAt(expression.expression);
+    const getter =
+      className === undefined
+        ? undefined
+        : this.#outer.classInfo(className)?.getters.get(expression.name.text);
+    if (getter !== undefined) return this.#accessorCall(expression, getter, []);
 
     const subject = this.#value(expression.expression, undefined);
     if (subject === undefined) return undefined;
@@ -4834,6 +5192,10 @@ class BodyLowerer {
     if (name === TRY_CAST) return this.#tryCast(expression);
     if (name === CSTRING) return this.#cstring(expression);
     if (name === CSTRING_FREE) return this.#cstringFree(expression);
+    if (name === ALLOC) return this.#alloc(expression, natural);
+    if (name === NATIVE_SIZE_OF || name === NATIVE_ALIGN_OF) {
+      return this.#layoutQuery(expression, name === NATIVE_SIZE_OF);
+    }
 
     // Resolved through tsc's symbol, not by name: an imported function is the
     // same symbol as its declaration however it is spelled at the call site,
@@ -4979,6 +5341,15 @@ class BodyLowerer {
   ): Typed | undefined | "not-a-method" {
     if (access.expression.kind === ts.SyntaxKind.SuperKeyword) {
       return this.#superMethodCall(expression, access);
+    }
+
+    // `p.free()`, before the class path for the same reason the width pass
+    // takes it first: a `Pointer<C>` auto-dereferences to a `C`.
+    if (access.name.text === "free") {
+      const subject = this.#value(access.expression, undefined);
+      if (subject !== undefined && subject.type.kind === "pointer") {
+        return this.#free(expression, subject);
+      }
     }
 
     // `C.f(…)` — a static method: an ordinary direct call with no receiver.

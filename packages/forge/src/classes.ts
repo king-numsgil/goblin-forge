@@ -51,11 +51,23 @@ export interface StaticMethod {
   readonly symbol: string;
 }
 
+/**
+ * What a method's body is written as.
+ *
+ * An accessor is a method wearing property syntax: `get name()` takes no
+ * arguments and returns, `set name(v)` takes one and returns nothing. They get
+ * vtable slots like any other method, because `override get` has to dispatch.
+ */
+export type MethodBody =
+  | ts.MethodDeclaration
+  | ts.GetAccessorDeclaration
+  | ts.SetAccessorDeclaration;
+
 /** A method, with the slot it dispatches through. */
 export interface ClassMethod {
   readonly name: string;
   readonly slot: number;
-  readonly declaration: ts.MethodDeclaration;
+  readonly declaration: MethodBody;
   /** The class whose body runs — the final overrider as of this class. */
   readonly owner: string;
   /** The symbol its function is emitted under. */
@@ -77,6 +89,16 @@ export interface ClassInfo {
   readonly slots: readonly string[];
   /** Every method callable on this class, own and inherited, by name. */
   readonly methods: ReadonlyMap<string, ClassMethod>;
+  /**
+   * `get name()` and `set name(v)`, own and inherited.
+   *
+   * Apart from {@link ClassInfo.methods} because they are reached by *property*
+   * syntax, and apart from each other because a name may have one, the other or
+   * both — and when it has both they are two functions with two slots, not one
+   * thing with two halves.
+   */
+  readonly getters: ReadonlyMap<string, ClassMethod>;
+  readonly setters: ReadonlyMap<string, ClassMethod>;
   /**
    * Every `static` method, own and inherited, by name.
    *
@@ -276,6 +298,12 @@ function build(
 
   const statics = new Map<string, StaticMethod>();
   const methods = new Map<string, ClassMethod>();
+  const getters = new Map<string, ClassMethod>();
+  const setters = new Map<string, ClassMethod>();
+  if (base) {
+    for (const [accessor, method] of base.getters) getters.set(accessor, method);
+    for (const [accessor, method] of base.setters) setters.set(accessor, method);
+  }
   if (base) {
     // Inherited, because `Derived.helper()` resolves to `Base.helper` in
     // TypeScript. There is no overriding to do — the name is looked up at
@@ -328,6 +356,47 @@ function build(
     methods.set(methodName, { name: methodName, slot, declaration: member, owner: name, symbol });
   }
 
+  // Accessors, after the methods so that slot numbering is stable in the order
+  // members are declared in — an accessor is a method with property syntax, and
+  // gets a slot like one so that `override get` dispatches.
+  for (const member of node.members) {
+    const isGetter = ts.isGetAccessorDeclaration(member);
+    if (!isGetter && !ts.isSetAccessorDeclaration(member)) continue;
+    if (!ts.isIdentifier(member.name)) {
+      report.unsupported(member, "a computed or non-identifier accessor name");
+      return undefined;
+    }
+    if (member.body === undefined) {
+      report.unsupported(member, "an accessor with no body");
+      return undefined;
+    }
+    if (isStatic(member)) {
+      report.unsupported(member, "a static accessor");
+      return undefined;
+    }
+
+    const accessor = member.name.text;
+    if (fields.some((field) => field.name === accessor)) {
+      report.refuse(
+        member,
+        `\`${name}.${accessor}\` is both a field and an accessor. One name is ` +
+          "one thing: the field would be unreachable, and every read of it would " +
+          "call the accessor instead.",
+      );
+      return undefined;
+    }
+
+    // Two namespaces, because `get x` and `set x` are two functions. Prefixed
+    // so they cannot collide with a method called `x` either.
+    const table = isGetter ? getters : setters;
+    const symbol = `${name}$${isGetter ? "get" : "set"}$${accessor}`;
+    const inherited = table.get(accessor);
+    const slot = inherited?.slot ?? slots.length;
+    if (inherited === undefined) slots.push(symbol);
+    else slots[slot] = symbol;
+    table.set(accessor, { name: accessor, slot, declaration: member, owner: name, symbol });
+  }
+
   // -- the constructor ------------------------------------------------------
   const constructors = node.members.filter(ts.isConstructorDeclaration);
   if (constructors.length > 1) {
@@ -345,6 +414,8 @@ function build(
       ts.isPropertyDeclaration(member) ||
       ts.isMethodDeclaration(member) ||
       ts.isConstructorDeclaration(member) ||
+      ts.isGetAccessorDeclaration(member) ||
+      ts.isSetAccessorDeclaration(member) ||
       member.kind === ts.SyntaxKind.SemicolonClassElement
     ) {
       continue;
@@ -370,6 +441,8 @@ function build(
     ownFieldsAt,
     slots,
     methods,
+    getters,
+    setters,
     statics,
     ctor,
     needsConstructor,

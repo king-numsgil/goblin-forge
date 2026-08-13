@@ -247,6 +247,51 @@ pub unsafe extern "C" fn gf_string_free(s: GfStr) {
 }
 
 // ---------------------------------------------------------------------------
+// Raw storage: `alloc` and `free`
+//
+// C++'s `new T(…)` and `delete`, split the way this compiler splits every other
+// owning operation: the runtime hands out and takes back *storage*, and the
+// backend runs the constructor and the destructor. Neither knows what a `T` is.
+//
+// Size and alignment come from the call site as ordinary arguments, because the
+// backend is the only thing that lays a type out and it knows both as
+// constants. That is also why there is no `gf_alloc<T>`: there is nothing to
+// specialise.
+// ---------------------------------------------------------------------------
+
+/// Storage for one value, **uninitialised**. The caller constructs into it.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gf_alloc(size: usize, align: usize) -> *mut u8 {
+    install_reporter();
+    // A zero-sized type still gets a distinct address, as it does in C++: two
+    // objects that exist are not the same object.
+    let layout = Layout::from_size_align(size.max(1), align.max(1)).expect("alloc layout");
+    let raw = unsafe { alloc(layout) };
+    if raw.is_null() {
+        std::process::abort();
+    }
+    LIVE.fetch_add(1, Ordering::SeqCst);
+    trace("alloc");
+    raw
+}
+
+/// Release storage from [`gf_alloc`]. The value in it is already destroyed.
+///
+/// The size and alignment must be the ones it was allocated with — Rust's
+/// allocator is given the layout on the way out as well as on the way in, which
+/// is why they are parameters rather than something the pointer remembers.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gf_free(pointer: *mut u8, size: usize, align: usize) {
+    if pointer.is_null() {
+        return;
+    }
+    let layout = Layout::from_size_align(size.max(1), align.max(1)).expect("free layout");
+    LIVE.fetch_sub(1, Ordering::SeqCst);
+    unsafe { dealloc(pointer, layout) };
+    trace("free");
+}
+
+// ---------------------------------------------------------------------------
 // `T[]`
 //
 // The same shape as a string, and deliberately: one machine word pointing at

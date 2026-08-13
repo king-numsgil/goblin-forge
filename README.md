@@ -290,6 +290,43 @@ fields *and* `Animal`'s vtable; `sound` is not copied, because there is nowhere
 in an `Animal` to put it. Polymorphism travels through `Reference<T>`, never
 through values.
 
+Getters and setters work as they do in TypeScript, and dispatch as methods do —
+`override get` is reached through a base reference:
+
+```ts
+class Animal {
+  protected _name: string;
+  constructor(name: string) { this._name = name; }
+  get name(): string { return this._name; }
+}
+```
+
+`static` methods are free functions in a namespace: no receiver, no vtable slot,
+and therefore usable as a function pointer where an instance method is not.
+
+### On the heap
+
+`new C(…)` gives a value its scope releases. `alloc` gives a pointer that
+outlives the scope — and leaks if you drop it, exactly as in C++:
+
+```ts
+const r = alloc(Rect, 6, 7);   // Pointer<Rect>
+console.log(`${r.area()}`);    // dereferences, like C++'s `->`
+r.free();                      // yours to call, and nobody calls it for you
+
+const p: Pointer<Animal> = alloc(Dog, "Heapy");
+p.speak();                     // the derived override
+p.free();                      // and the derived destructor
+```
+
+`free` dispatches destruction through the vtable, so releasing a `Dog` through a
+`Pointer<Animal>` still releases what only a `Dog` has. That is the one place
+destruction has to be virtual: everywhere else the compiler destroys a value
+whose storage was laid out for exactly its static type.
+
+`nativeSizeOf<T>()` and `nativeAlignOf<T>()` answer from the same layout engine
+the backend uses.
+
 ### Interfaces come in two kinds, and the syntax says which
 
 ```ts
@@ -415,10 +452,10 @@ on two machines.
 
 ### Not there yet
 
-`Pointer<T>` as a written type, the allocation intrinsics (`alloc`,
-`allocArray`, `nativeNew`), `String.substring`/`indexOf`/`codePointAt`,
-closures, generics, `switch`, `do`/`while`, `for…of`, exceptions, top-level
-statements and top-level `const`.
+`allocArray` and the raw-pointer intrinsics (`nativeNew`, `nativeRead`,
+`nativeOffset`, …), array-to-pointer decay, `String.substring`/`indexOf`/
+`codePointAt`, closures, generics, `switch`, `do`/`while`, `for…of`,
+exceptions, static fields, top-level statements and top-level `const`.
 
 All of them are declared or valid TypeScript, and all of them produce a
 `GF0001` diagnostic naming the construct and pointing at it.
