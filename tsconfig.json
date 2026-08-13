@@ -5,7 +5,8 @@
     "paths": {
       "goblin-forge": ["./packages/forge/src/index.ts"],
       "@goblin-forge/checker": ["./packages/checker/src/index.ts"],
-      "@goblin-forge/backend": ["./packages/backend/index.ts"]
+      "@goblin-forge/backend": ["./packages/backend/index.ts"],
+      "@goblin-forge/runtime/paths": ["./packages/runtime/src/paths.ts"]
     }
   },
   "//": [
@@ -24,7 +25,8 @@
     "packages/*/bench/**/*.ts",
     "packages/*/test/**/*.ts",
     "tests/**/*.ts",
-    "examples/*/build.ts"
+    "examples/*/build.ts",
+    "packages/cli/build.ts"
   ],
   "exclude": [
     "**/node_modules",
@@ -32,6 +34,7 @@
     "**/target",
     "examples/*/src",
     "tests/oracle",
-    "packages/runtime/global.d.ts"
+    "packages/runtime/global.d.ts",
+    "packages/cli/src/*.generated.ts"
   ]
 }

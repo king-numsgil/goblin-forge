@@ -25,7 +25,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { compile, type CompileResult, type Diagnostic, formatAll } from "goblin-forge";
-import { GLOBAL_DECLARATIONS, TSCONFIG_BASE } from "@goblin-forge/runtime/paths";
+import { globalDeclarations, tsconfigBase } from "@goblin-forge/runtime/paths";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SCRATCH = join(HERE, ".scratch");
@@ -101,12 +101,12 @@ export function writeProject(name: string, source: string, options: ProjectOptio
     tsconfig,
     `${JSON.stringify(
       {
-        extends: posix(TSCONFIG_BASE),
+        extends: posix(tsconfigBase()),
         ...(options.compilerOptions !== undefined
           ? { compilerOptions: options.compilerOptions }
           : {}),
         files: [
-          posix(GLOBAL_DECLARATIONS),
+          posix(globalDeclarations()),
           "src/main.ts",
           ...extraFiles.map(([file]) => `src/${file}`),
         ],

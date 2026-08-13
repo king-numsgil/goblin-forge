@@ -17,7 +17,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
-import { RUNTIME_ROOT } from "./paths.ts";
+import { runtimeCrate } from "./paths.ts";
 
 export interface RuntimeBuild {
   /** Absolute path to the static library. */
@@ -28,8 +28,13 @@ export interface RuntimeBuild {
 
 const cache = new Map<string, RuntimeBuild>();
 
-/** The crate directory. */
-export const RUNTIME_CRATE = join(RUNTIME_ROOT, "native");
+/**
+ * The crate directory.
+ *
+ * A function because a single-file executable extracts its embedded copy on
+ * first use, so the answer is not known when this module is evaluated.
+ */
+export const RUNTIME_CRATE = (): string => runtimeCrate();
 
 /**
  * Build the runtime for `target`, or the host when it is omitted.
@@ -50,7 +55,7 @@ export function buildRuntime(target?: string): RuntimeBuild {
   args.push("--", "--print", "native-static-libs");
 
   const result = spawnSync("cargo", args, {
-    cwd: RUNTIME_CRATE,
+    cwd: RUNTIME_CRATE(),
     encoding: "utf8",
     shell: process.platform === "win32",
   });
@@ -70,7 +75,7 @@ export function buildRuntime(target?: string): RuntimeBuild {
   if (library === undefined) {
     throw new Error(
       `the Goblin runtime built, but its static library was not where it was ` +
-        `expected under ${join(RUNTIME_CRATE, "target")}`,
+        `expected under ${join(RUNTIME_CRATE(), "target")}`,
     );
   }
 
@@ -83,7 +88,7 @@ export function buildRuntime(target?: string): RuntimeBuild {
 }
 
 function locateLibrary(target?: string): string | undefined {
-  const base = join(RUNTIME_CRATE, "target", ...(target ? [target] : []), "release");
+  const base = join(RUNTIME_CRATE(), "target", ...(target ? [target] : []), "release");
   for (const name of ["goblin_runtime.lib", "libgoblin_runtime.a"]) {
     const candidate = join(base, name);
     if (existsSync(candidate)) return candidate;

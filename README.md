@@ -87,10 +87,60 @@ bun run examples/hello/build.ts
 ./examples/hello/bin/hello        # .exe on Windows
 ```
 
+### The single-file executable *(experimental)*
+
+The whole compiler — the Bun runtime, the native backend, the prelude and the
+runtime crate — builds into one binary:
+
+```console
+bun run build:cli         # produces bin/goblin-forge
+```
+
+Then a project needs nothing else installed:
+
+```console
+$ goblin-forge init
+  .goblin/global.d.ts
+  .goblin/tsconfig.base.json
+  tsconfig.json
+  build.ts
+  src/main.ts
+
+$ goblin-forge
+built ./bin/app.exe
+```
+
+A build script *exports* what it wants built rather than calling the compiler:
+
+```ts
+// build.ts
+export default {
+  entry: "./src/main.ts",
+  output: "./bin/app",
+  type: "bin",
+  optLevel: "speed",
+};
+```
+
+Relative paths resolve against the script rather than the working directory, so
+`goblin-forge path/to/build.ts` does the same thing from anywhere. A default
+export that is a function works too, and is evaluated for its config.
+
+`init` writes the prelude into `.goblin/` so your **editor** can read it —
+tsserver reads the project's tsconfig and nothing else, so a prelude that lives
+only inside the executable would leave `i32` underlined in red while the build
+succeeds. When those files are present the compiler uses them rather than its
+own copies, so the two cannot drift.
+
+Two caveats while this is experimental. The binary is large (~110 MB — it
+contains a JavaScript runtime), and it still needs **cargo and a linker on the
+machine**, because it compiles and links native code. It removes the need to
+install goblin-forge, not the need for a toolchain.
+
 ### Compiling your own program
 
-The interface is a function rather than a CLI: a build is a short script, the
-options are an object, and a program that does not compile comes back as a
+Without the executable, the interface is a function: a build is a short script,
+the options are an object, and a program that does not compile comes back as a
 *result* rather than an exception.
 
 ```ts

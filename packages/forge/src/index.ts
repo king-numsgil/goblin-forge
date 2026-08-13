@@ -48,4 +48,9 @@ export {
   type Severity,
 } from "@goblin-forge/checker";
 
-export { GLOBAL_DECLARATIONS, TSCONFIG_BASE } from "@goblin-forge/runtime/paths";
+export {
+  globalDeclarations,
+  type RuntimeFiles,
+  tsconfigBase,
+  useRuntimeFiles,
+} from "@goblin-forge/runtime/paths";

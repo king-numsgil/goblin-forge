@@ -12,7 +12,8 @@
     "build:backend:debug": "bun run --cwd packages/backend build:debug",
     "typecheck": "tsc --build",
     "test": "bun test",
-    "bench:boundary": "bun run packages/backend/bench/boundary.bench.ts"
+    "bench:boundary": "bun run packages/backend/bench/boundary.bench.ts",
+    "build:cli": "bun run packages/cli/build.ts"
   },
   "devDependencies": {
     "@types/bun": "latest",

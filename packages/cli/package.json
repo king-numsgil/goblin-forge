@@ -1,0 +1,22 @@
+{
+  "name": "@goblin-forge/cli",
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "//": [
+    "The single-file executable: the whole compiler, the Bun runtime, the",
+    "native backend, the prelude and the runtime crate, in one binary.",
+    "",
+    "`bun build --compile` embeds the assets; `node:fs` reads them straight out",
+    "of the binary, which is what lets tsc read the prelude without anything",
+    "being unpacked. The runtime crate is the exception and is extracted,",
+    "because cargo is given a directory and has to find a real one."
+  ],
+  "exports": {
+    ".": "./src/main.ts"
+  },
+  "scripts": {
+    "build": "bun run ./build.ts"
+  }
+}

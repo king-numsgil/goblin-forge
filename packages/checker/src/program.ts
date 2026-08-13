@@ -10,7 +10,7 @@
 
 import ts from "typescript";
 
-import { GLOBAL_DECLARATIONS } from "@goblin-forge/runtime/paths";
+import { globalDeclarations } from "@goblin-forge/runtime/paths";
 
 import type { Diagnostic } from "./diagnostics.ts";
 import { fromTsDiagnostic, loadConfig, type LoadedConfig } from "./tsconfig.ts";
@@ -107,7 +107,7 @@ export class Checker {
  * {@link checkPreludeIsVisibleToEditors}.
  */
 function rootsFor(config: LoadedConfig, extra: readonly string[]): string[] {
-  const roots = new Set<string>([GLOBAL_DECLARATIONS, ...config.fileNames, ...extra]);
+  const roots = new Set<string>([globalDeclarations(), ...config.fileNames, ...extra]);
   return [...roots];
 }
 
@@ -123,7 +123,7 @@ function rootsFor(config: LoadedConfig, extra: readonly string[]): string[] {
  */
 export function checkPreludeIsVisibleToEditors(config: LoadedConfig): Diagnostic[] {
   const named = config.fileNames.some(
-    (file) => normalise(file) === normalise(GLOBAL_DECLARATIONS),
+    (file) => normalise(file) === normalise(globalDeclarations()),
   );
   if (named) return [];
 

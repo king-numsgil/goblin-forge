@@ -15,3 +15,7 @@ examples/*/bin/
 examples/*/build/
 tests/.scratch/
 tests/oracle/build/
+
+# The single-file executable, and the generated payload it embeds.
+bin/
+packages/cli/src/*.generated.ts
