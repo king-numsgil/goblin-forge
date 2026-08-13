@@ -331,6 +331,40 @@ describe("`static` methods", () => {
     expect(result.exitCode).toBe(7);
   });
 
+  test("a derived class may shadow a base static, and each keeps its own body", async () => {
+    // Shadowing, not overriding: there is no receiver, so nothing dispatches.
+    // The name is resolved at compile time against the class it was written
+    // on, and a class that declares neither inherits whichever one it reaches
+    // first. Both bodies are emitted, under `A$tag` and `B$tag`.
+    const result = await run(
+      "static-shadowed",
+      `class A { static tag(): i32 { return 1; } }
+       class B extends A { static override tag(): i32 { return 2; } }
+       class C extends B { }
+
+       export function main(): i32 {
+         console.log(\`\${A.tag()} \${B.tag()} \${C.tag()}\`);
+         return 0;
+       }\n`,
+    );
+    expect(result.stdout).toBe("1 2 2\n");
+  });
+
+  test("`override` is required on a shadowing static, as it is on a method", async () => {
+    // tsc's rule under `noImplicitOverride`, and it applies to statics too —
+    // which is easy to be surprised by, because nothing is being overridden in
+    // the dispatch sense.
+    const { result } = await compileSource(
+      "static-no-override",
+      `class A { static tag(): i32 { return 1; } }
+       class B extends A { static tag(): i32 { return 2; } }
+
+       export function main(): i32 { return B.tag(); }\n`,
+    );
+    expect(result.ok).toBe(false);
+    expect(errorCodes(result)).toContain("TS4114");
+  });
+
   test("a static and an instance method may share a class", async () => {
     const result = await run(
       "static-beside-instance",
