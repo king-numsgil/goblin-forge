@@ -2576,10 +2576,10 @@ fn addressed_locals(func: &Function) -> std::collections::HashSet<LocalId> {
             // The callee too, when it is a value: `fs[0]()` reads the code
             // address out of an array, and that read needs an address like any
             // other projected place.
-            if let Callee::Indirect { operand, .. } = callee {
-                if let Operand::Copy(p) | Operand::Move(p) | Operand::Borrow(p) = operand {
-                    note(&mut set, p);
-                }
+            if let Callee::Indirect { operand, .. } = callee
+                && let Operand::Copy(p) | Operand::Move(p) | Operand::Borrow(p) = operand
+            {
+                note(&mut set, p);
             }
             for operand in args {
                 if let Operand::Copy(p) | Operand::Move(p) | Operand::Borrow(p) = operand {

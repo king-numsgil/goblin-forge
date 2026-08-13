@@ -126,6 +126,40 @@ describe("the intrinsics that are implemented", () => {
     expect(result.stdout).toBe("2\n");
     expect(result.leaked).toBe(0);
   });
+
+  test("`stringFromCString` copies borrowed bytes into an owned string", async () => {
+    const result = await run(
+      "intr-string-from-cstring",
+      `export function main(): i32 {
+         const built: string = "a" + "b";
+         const copied: string = stringFromCString(cstring(built));
+         console.log(\`\${copied} \${copied.length}\`);
+         return 0;
+       }\n`,
+    );
+    expect(result.stdout).toBe("ab 2\n");
+    // Two allocations, both released: `built` by its own binding, `copied` by
+    // its. If this were an adoption rather than a copy it would be a double
+    // free rather than a leak, and the count would not say so.
+    expect(result.leaked).toBe(0);
+  });
+
+  test("`p.address`, `p.deref()` and `p.offset()` — see `tests/heap.test.ts`", async () => {
+    const result = await run(
+      "intr-pointer-methods",
+      `export function main(): i32 {
+         const p = alloc<i32>();
+         p[0] = 7;
+         const q = p.offset(0);
+         const same: boolean = q.address === p.address;
+         const v: i32 = q[0];
+         p.free();
+         return same ? v : 0;
+       }\n`,
+    );
+    expect(result.exitCode).toBe(7);
+    expect(result.leaked).toBe(0);
+  });
 });
 
 describe("the intrinsics the prelude declares and the lowerer does not have", () => {
@@ -134,9 +168,8 @@ describe("the intrinsics the prelude declares and the lowerer does not have", ()
   // failure, and never a wrong number.
   const cases: [string, string][] = [
     ["allocArray", "  const p = allocArray<u8>(4);\n  p.freeArray();\n  return 0;"],
-    ["offset", "  const p = alloc<i32>();\n  const q = p.offset(1);\n  p.free();\n  return 0;"],
     ["erase", "  const p = alloc<i32>();\n  const e = p.erase();\n  p.free();\n  return 0;"],
-    ["stringFromCString", '  const s: string = stringFromCString(cstring("hi"));\n  return 0;'],
+    ["reify", "  const p = alloc<i32>();\n  const r = p.reify<u8>();\n  p.free();\n  return 0;"],
   ];
 
   for (const [name, body] of cases) {

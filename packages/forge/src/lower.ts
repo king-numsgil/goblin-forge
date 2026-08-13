@@ -58,6 +58,7 @@ import {
   classNameOf,
   contractOf,
   isCStringType,
+  isPointerType,
   referentOf,
 } from "@goblin-forge/checker";
 import {
@@ -114,6 +115,30 @@ const ALLOC = "alloc";
 /** `sizeOf<T>()` and `alignOf<T>()` — the layout, as constants. */
 const NATIVE_SIZE_OF = "sizeOf";
 const NATIVE_ALIGN_OF = "alignOf";
+/** `stringFromCString(p)` — copy a `const char *` into a managed `string`. */
+const STRING_FROM_CSTRING = "stringFromCString";
+
+/** `p.address` — the pointer's bits, as a `usize`. */
+const POINTER_ADDRESS = "address";
+
+/**
+ * The methods `CorePointer<T>` declares.
+ *
+ * Recognised as a *set* rather than one name at a time, and resolved before the
+ * class path in both passes, because `Pointer<C>` is `C & CorePointer<C>`: a
+ * name in here reached through a pointer would otherwise be looked for on the
+ * pointee. `RESERVED_ON_POINTER` in `classes.ts` is the other half of that
+ * bargain — a class may not declare any of them, so this always winning is
+ * never a silent shadow.
+ */
+const POINTER_METHODS: ReadonlySet<string> = new Set([
+  "free",
+  "freeArray",
+  "deref",
+  "offset",
+  "erase",
+  "reify",
+]);
 
 /**
  * Runtime entry points the lowerer names directly.
@@ -157,6 +182,13 @@ const RUNTIME = {
    */
   alloc: "gf_alloc",
   free: "gf_free",
+  /**
+   * `gf_string_from_cstr(p)` — `strlen`, allocate, copy, NUL-terminate.
+   *
+   * The one direction that has to copy. A `CString` has no header, so it cannot
+   * be adopted as a `string`; the length would have nowhere to live.
+   */
+  fromCString: "gf_string_from_cstr",
 } as const;
 
 /** `console` methods, and which stream each writes to. */
@@ -236,6 +268,8 @@ type Width =
 const STRING: MachineType = { kind: "string" };
 const CSTRING_TYPE: MachineType = { kind: "cstring" };
 const USIZE: MachineType = { kind: "scalar", name: "usize" };
+/** `offset` counts in elements and counts **backwards** too, hence signed. */
+const ISIZE: MachineType = { kind: "scalar", name: "isize" };
 const VOID: MachineType = { kind: "void" };
 
 const POLY: Width = { kind: "poly" };
@@ -3033,6 +3067,18 @@ class BodyLowerer {
 
   /** `s.length` on a string, or a field of a struct or a class. */
   #propertyWidth(expression: ts.PropertyAccessExpression): Width {
+    // `p.address`, before everything, and for the reason the pointer *methods*
+    // come before the class path: `Pointer<C>` is `C & CorePointer<C>`, so a
+    // field of that name on the pointee would be found first. There is never
+    // such a field — `RESERVED_ON_POINTER` refuses one at the declaration — and
+    // this is the half of that rule that makes it worth having.
+    if (
+      expression.name.text === POINTER_ADDRESS &&
+      this.#outer.tryErase(expression.expression)?.kind === "pointer"
+    ) {
+      return typed(USIZE);
+    }
+
     // Before the general path, and asked of tsc rather than of the width pass,
     // so that a field reached through a `Reference<C>` resolves the same way a
     // field of a value does.
@@ -3380,6 +3426,14 @@ class BodyLowerer {
       return typed(VOID);
     }
 
+    // `stringFromCString(p)` is a `string`, and an owned one — it is the copy
+    // that turns bytes nobody tracks into bytes a scope releases.
+    if (expression.expression.text === STRING_FROM_CSTRING) {
+      const argument = expression.arguments[0];
+      if (argument !== undefined && this.width(argument).kind === "error") return ERROR;
+      return typed(STRING);
+    }
+
     // `move(x)` has whatever type `x` has; it changes ownership, not type.
     if (expression.expression.text === MOVE) {
       const argument = expression.arguments[0];
@@ -3434,12 +3488,17 @@ class BodyLowerer {
       }
     }
 
-    // `p.free()`. Before the class path, because a `Pointer<C>` auto-
-    // dereferences to a `C` and would otherwise look for a method called
-    // `free` on it.
-    if (access.name.text === "free") {
+    // `p.free()`, `p.deref()`, `p.offset(n)`. Before the class path, because a
+    // `Pointer<C>` auto-dereferences to a `C` and would otherwise look for a
+    // method of that name on it.
+    if (POINTER_METHODS.has(access.name.text)) {
       const pointer = this.#outer.tryErase(access.expression);
-      if (pointer?.kind === "pointer") return typed(VOID);
+      if (pointer?.kind === "pointer") {
+        for (const argument of expression.arguments) {
+          if (this.width(argument).kind === "error") return ERROR;
+        }
+        return this.#pointerMethodWidth(access, pointer);
+      }
     }
 
     // `C.f(…)` — a static method. The receiver is a *class name*, not a value,
@@ -3499,6 +3558,44 @@ class BodyLowerer {
       if (this.width(argument).kind === "error") return ERROR;
     }
     return typed(record.signature.returns);
+  }
+
+  /**
+   * What one of {@link POINTER_METHODS} answers with, for a `Pointer<T>`.
+   *
+   * The three that are lowered give a type; the three that are not say so here,
+   * once, rather than in two passes with two different messages.
+   */
+  #pointerMethodWidth(
+    access: ts.PropertyAccessExpression,
+    pointer: Extract<MachineType, { kind: "pointer" }>,
+  ): Width {
+    switch (access.name.text) {
+      case "free":
+        return typed(VOID);
+      case "offset":
+        return typed(pointer);
+      case "deref": {
+        // Only a class, because `Reference<T>` is only *writable* for a class
+        // or a contract — so anything else would hand back a value whose type
+        // the programmer could not name and the next expression could not use.
+        // Everything else already has the spelling it needs: `p.field` reaches
+        // a struct's members and `p[0]` is C's `*p`.
+        if (pointer.pointee.kind === "class") {
+          return typed({ kind: "reference", referent: pointer.pointee });
+        }
+        this.#outer.unsupported(
+          access,
+          `\`deref\` on a \`${renderType(pointer)}\` — a \`Reference<T>\` can only ` +
+            "be written for a class or a contract so far. Read through the " +
+            "pointer instead: `p.field` for a struct's members, `p[0]` for C's `*p`",
+        );
+        return ERROR;
+      }
+      default:
+        this.#outer.unsupported(access, `\`${access.name.text}\` on a \`${renderType(pointer)}\``);
+        return ERROR;
+    }
   }
 
   #consoleWidth(expression: ts.CallExpression): Width {
@@ -4537,6 +4634,114 @@ class BodyLowerer {
   }
 
   /**
+   * One of {@link POINTER_METHODS}, with the receiver already lowered.
+   *
+   * The width pass has already refused the three that are not implemented, so
+   * anything arriving here is one of the three that are.
+   */
+  #pointerMethod(
+    expression: ts.CallExpression,
+    access: ts.PropertyAccessExpression,
+    subject: Typed,
+  ): Typed | undefined {
+    switch (access.name.text) {
+      case "free":
+        return this.#free(expression, subject);
+      case "deref":
+        return this.#deref(expression, subject);
+      case "offset":
+        return this.#offset(expression, subject);
+      default:
+        this.#outer.unsupported(access, `\`${access.name.text}\` on a pointer`);
+        return undefined;
+    }
+  }
+
+  /**
+   * `p.deref()` — the pointee, borrowed.
+   *
+   * A retype and nothing else at runtime: a `Pointer<T>` and a `Reference<T>`
+   * are the same machine word holding the same address. It is written out as
+   * `Ref` of the dereferenced place rather than handed back as the pointer's
+   * own operand so that the local really has the reference's type — the ABI
+   * classifies a call's arguments from the MIR types, and a pointer wearing a
+   * reference's label is exactly the kind of thing that agrees until it does
+   * not.
+   *
+   * Needed where the auto-dereference cannot reach: `draw(p)` is `GF0161`,
+   * because a pointer is not a reference, and `draw(p.deref())` is how you say
+   * you meant to borrow rather than to copy.
+   */
+  #deref(expression: ts.CallExpression, subject: Typed): Typed | undefined {
+    if (expression.arguments.length !== 0) {
+      this.#outer.error(expression, "GF0002", "`deref` takes no arguments.");
+      return undefined;
+    }
+    if (subject.type.kind !== "pointer") return undefined;
+    const pointee = subject.type.pointee;
+
+    const place = this.#placeOfSubject(expression, subject);
+    if (place === undefined) return undefined;
+    const target: Place = {
+      local: place.local,
+      projection: [...place.projection, { kind: "Deref" }],
+    };
+    return {
+      operand: this.#refTo(expression, target, pointee),
+      type: { kind: "reference", referent: pointee },
+    };
+  }
+
+  /**
+   * `p.offset(n)` — `p + n`, in units of `T`.
+   *
+   * The address of `p[n]`, which is what C's pointer arithmetic means and is
+   * also literally how it is built: the same `Index` projection indexing emits,
+   * with `AddrOf` instead of a load. So the stride comes from the layout engine
+   * and this function does no arithmetic of its own.
+   *
+   * The count is an `isize` because it counts backwards too. On a 64-bit target
+   * that is already pointer width, so a negative offset scales and wraps to the
+   * right address without a widening step to get wrong.
+   */
+  #offset(expression: ts.CallExpression, subject: Typed): Typed | undefined {
+    const argument = expression.arguments[0];
+    if (expression.arguments.length !== 1 || argument === undefined) {
+      this.#outer.error(expression, "GF0002", "`offset` takes exactly one element count.");
+      return undefined;
+    }
+    if (subject.type.kind !== "pointer") return undefined;
+
+    const count = this.#expressionTyped(argument, ISIZE);
+    if (count === undefined) return undefined;
+    const base = this.#placeOfSubject(expression, subject);
+    if (base === undefined) return undefined;
+
+    // Materialised into a local because `Projection::Index` names one — the
+    // same step `#elementPlace` takes, and for the same reason: a projection
+    // must not refer back to an operand.
+    const slot = this.#f.addLocal({
+      ty: this.#outer.tyOf(ISIZE, expression),
+      storage: "Temporary",
+    });
+    this.#temporaries.push(slot);
+    this.#push({ kind: "StorageLive", value: slot });
+    this.#push({
+      kind: "Init",
+      place: placeOf(slot),
+      rvalue: { kind: "Use", value: count.operand },
+    });
+
+    return this.#temporaryTyped(expression, subject.type, {
+      kind: "AddrOf",
+      value: {
+        local: base.local,
+        projection: [...base.projection, { kind: "Index", value: slot }],
+      },
+    });
+  }
+
+  /**
    * `xs.push(v)` — grow by one, then store the element into the new slot.
    *
    * Two steps because they belong to two halves of the compiler. Making room
@@ -4903,6 +5108,23 @@ class BodyLowerer {
   }
 
   #property(expression: ts.PropertyAccessExpression): Typed | undefined {
+    // `p.address` — the bits, as a number. First, for the reason the width pass
+    // takes it first: `Pointer<C>` is `C & CorePointer<C>`, and a field of the
+    // pointee would otherwise win.
+    if (expression.name.text === POINTER_ADDRESS) {
+      const pointer = this.#outer.tryErase(expression.expression);
+      if (pointer?.kind === "pointer") {
+        const subject = this.#value(expression.expression, undefined);
+        if (subject === undefined) return undefined;
+        return this.#temporaryTyped(expression, USIZE, {
+          kind: "Cast",
+          op: "PtrToInt",
+          operand: this.#forRead(subject),
+          to: this.#outer.tyOf(USIZE, expression),
+        });
+      }
+    }
+
     // A fixed array's length is in its type, so it is a constant rather than a
     // load — which is the whole difference between it and `T[]`.
     if (expression.name.text === "length") {
@@ -5310,6 +5532,7 @@ class BodyLowerer {
     if (name === CSTRING) return this.#cstring(expression);
     if (name === CSTRING_FREE) return this.#cstringFree(expression);
     if (name === ALLOC) return this.#alloc(expression, natural);
+    if (name === STRING_FROM_CSTRING) return this.#stringFromCString(expression);
     if (name === NATIVE_SIZE_OF || name === NATIVE_ALIGN_OF) {
       return this.#layoutQuery(expression, name === NATIVE_SIZE_OF);
     }
@@ -5460,15 +5683,19 @@ class BodyLowerer {
       return this.#superMethodCall(expression, access);
     }
 
-    // `p.free()`, before the class path for the same reason the width pass
-    // takes it first: a `Pointer<C>` auto-dereferences to a `C`.
-    if (access.name.text === "free" && this.#outer.tryErase(access.expression)?.kind === "pointer") {
+    // `p.free()`, `p.deref()`, `p.offset(n)`, before the class path for the
+    // same reason the width pass takes them first: a `Pointer<C>`
+    // auto-dereferences to a `C`.
+    if (
+      POINTER_METHODS.has(access.name.text) &&
       // Probed silently first: `C.free()` on a class *name* has no value to
       // lower, and asking for one reports a name that does not resolve before
       // anything has decided this was not a pointer at all.
+      this.#outer.tryErase(access.expression)?.kind === "pointer"
+    ) {
       const subject = this.#value(access.expression, undefined);
       if (subject !== undefined && subject.type.kind === "pointer") {
-        return this.#free(expression, subject);
+        return this.#pointerMethod(expression, access, subject);
       }
     }
 
@@ -5609,6 +5836,14 @@ class BodyLowerer {
     if (isCStringType(this.#outer.checker, type)) {
       return { subject, equals };
     }
+    // And a `Pointer<T>`, for the same reason and rather more often: `malloc`,
+    // `fopen`, `SDL_CreateWindow`. `Pointer<T> | null` erases to the same
+    // machine word as `Pointer<T>` — the null is representable in the value —
+    // so nullability stays tsc's view of the program and the check is a
+    // comparison against zero.
+    if (isPointerType(this.#outer.checker, type)) {
+      return { subject, equals };
+    }
     return undefined;
   }
 
@@ -5630,11 +5865,15 @@ class BodyLowerer {
     if (place === undefined) return undefined;
 
     const bool: MachineType = { kind: "bool" };
-    // A class reference and a `CString` are each a single word, so they compare
-    // against a null constant like any other address. A contract reference is a
-    // pair, and what is null is its itab word — a different read, hence a
-    // different node.
-    if (value.type.kind === "reference" || value.type.kind === "cstring") {
+    // A class reference, a `CString` and a `Pointer<T>` are each a single word,
+    // so they compare against a null constant like any other address. A
+    // contract reference is a pair, and what is null is its itab word — a
+    // different read, hence a different node.
+    if (
+      value.type.kind === "reference" ||
+      value.type.kind === "cstring" ||
+      value.type.kind === "pointer"
+    ) {
       return this.#temporaryTyped(expression, bool, {
         kind: "Binary",
         op: test.equals ? "Eq" : "Ne",
@@ -5748,6 +5987,45 @@ class BodyLowerer {
       return undefined;
     }
     return this.#callRuntime(expression, RUNTIME.stringFree, [value], VOID);
+  }
+
+  /**
+   * `stringFromCString(p)` — copy NUL-terminated bytes into a managed `string`.
+   *
+   * The direction that has to allocate, and the asymmetry is the point:
+   * {@link #cstring} hands the same pointer back because a Goblin `string` is
+   * already a valid `const char *`, while going the other way needs a length
+   * header that a `CString` has nowhere to have kept.
+   *
+   * The result is an ordinary owned temporary, so binding it makes the binding's
+   * scope responsible and dropping it on the floor releases it at the end of the
+   * statement. Nothing is done to the pointer; whoever allocated it still owns
+   * it, which is exactly the C rule and exactly why this copies.
+   */
+  #stringFromCString(expression: ts.CallExpression): Typed | undefined {
+    const argument = expression.arguments[0];
+    if (expression.arguments.length !== 1 || argument === undefined) {
+      this.#outer.error(
+        expression,
+        "GF0002",
+        "`stringFromCString` takes exactly one `CString` or `Pointer<u8>`.",
+      );
+      return undefined;
+    }
+    const value = this.#value(argument, CSTRING_TYPE);
+    if (value === undefined) return undefined;
+    // A `Pointer<u8>` as well as a `CString`, because that is what the
+    // declaration says and because `argv`'s entries arrive as one.
+    if (value.type.kind !== "cstring" && value.type.kind !== "pointer") {
+      this.#outer.error(
+        argument,
+        "GF0002",
+        `\`stringFromCString\` reads a \`CString\` or a \`Pointer<u8>\`, and this ` +
+          `is a \`${renderType(value.type)}\`.`,
+      );
+      return undefined;
+    }
+    return this.#callRuntime(expression, RUNTIME.fromCString, [value], STRING);
   }
 
   /** The contract `tryCast<T>(…)` was asked for, or `undefined`. */

@@ -96,14 +96,12 @@ backend failure:
 | Not implemented | Where it is refused | Milestone |
 |---|---|---|
 | interface-to-interface conversion, and a contract extending another | nothing lowers either | later |
-| `T[]` — the owning, runtime-length array | `checker/src/types.ts`, `isArrayType` branch | later |
 | `Reference<T>` for anything but a class or a contract | `checker/src/types.ts`, the `isReferenceType` branch | later |
 | an interface mixing methods and data | `checker/src/types.ts`, `contractOf` — a rule, not a gap | — |
-| `nativeSizeOf`/`nativeAlignOf`/`nativeNew`/`alloc`/… | lowerer, no intrinsic case | later |
-| `allocArray` / `freeArray()` | declared in the prelude, not lowered | later |
-| static fields and methods, getters, setters | `classes.ts`, `describeMember` | later |
+| `allocArray` / `p.freeArray()` | `lower.ts`, `#pointerMethodWidth` — needs a per-element destructor loop | later |
+| `p.erase()` / `p.reify<U>()` | `lower.ts`, `#pointerMethodWidth` — needs a decision about what `Pointer<unknown>` erases to | later |
+| static fields | `classes.ts`, `describeMember` | later |
 | parameter properties (`constructor(private x)`) | `classes.ts`, `#classFnParams` | later |
-| calling through a `FnPtr` value | `translate.rs`, `Callee::Indirect` | later |
 | `switch` | lowerer `#statement` | — |
 | `main(argc, argv)` | `#checkEntryPoint` | needs `T[]` |
 | two classes with the same name in two modules | `classes.ts`, `collectClasses` — a stated restriction, see DECISIONS §11.8 | later |
@@ -111,7 +109,8 @@ backend failure:
 | `throw` / unwinding | `Terminator::Resume` errors | later |
 
 `Rvalue::Ref` and `Rvalue::AddrOf` **are** implemented now — the lowerer emits a
-`Ref` for every `this` and every method receiver.
+`Ref` for every `this`, every method receiver and every `p.deref()`, and an
+`AddrOf` for `p.offset(n)`.
 
 MIR already has `Terminator::Call`'s `unwind` edge, `BlockKind::Cleanup` and
 `Terminator::Resume` — put in at milestone 4 because retrofitting them is a

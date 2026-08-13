@@ -350,12 +350,179 @@ describe("the layout intrinsics", () => {
   });
 });
 
+describe("the pointer's own members", () => {
+  test("`address` is the bits, and two allocations differ", async () => {
+    const result = await run(
+      "heap-address",
+      `export function main(): i32 {
+         const a = alloc<i32>();
+         const b = alloc<i32>();
+         const distinct: boolean = a.address !== b.address;
+         const aligned: boolean = a.address % alignOf<i32>() === 0;
+         a.free();
+         b.free();
+         return (distinct ? 2 : 0) + (aligned ? 1 : 0);
+       }\n`,
+    );
+    expect(result.exitCode).toBe(3);
+    expect(result.leaked).toBe(0);
+  });
+
+  test("`address` wins over a field of the pointee, which cannot exist", async () => {
+    // The other half of `RESERVED_ON_POINTER`. A class declaring `address`
+    // would have a member unreachable through every pointer to it, so the
+    // declaration is refused rather than the access being ambiguous.
+    const diagnostic = await expectRejected(
+      "heap-address-reserved",
+      `class Node {
+         address: i32 = 0;
+       }
+
+       export function main(): i32 { return 0; }\n`,
+      "GF0002",
+    );
+    expect(diagnostic.message).toContain("address");
+  });
+
+  test("`offset` strides by the element, forwards and backwards", async () => {
+    // C's `p + n`, with the stride from the layout engine rather than from
+    // anything written here. `i32` strides by four, so three elements apart is
+    // twelve bytes apart, and that is the assertion.
+    const result = await run(
+      "heap-offset",
+      `export function main(): i32 {
+         const p = alloc<i32>();
+         const three = p.offset(3);
+         const gap: usize = three.address - p.address;
+         const back: usize = three.offset(-3).address;
+         console.log(\`\${gap} \${back === p.address}\`);
+         p.free();
+         return 0;
+       }\n`,
+    );
+    expect(result.stdout).toBe("12 true\n");
+    expect(result.leaked).toBe(0);
+  });
+
+  test("`offset` walks a run of storage, as C does", async () => {
+    // What the arithmetic is *for*, over storage that really does hold four
+    // elements. A pointer to one `T` and a pointer to the first of many are the
+    // same type here, so this is written exactly as it is in C — including the
+    // part where nothing checks that the fourth element exists.
+    const result = await run(
+      "heap-offset-walk",
+      `declare function malloc(size: usize): Pointer<i32> | null;
+       declare function free(block: Pointer<i32>): void;
+
+       export function main(): i32 {
+         const buf = malloc(sizeOf<i32>() * 4);
+         if (buf === null) { return 1; }
+         buf[0] = 10;
+         buf[1] = 20;
+         buf[2] = 30;
+         buf[3] = 40;
+         const third = buf.offset(2);
+         console.log(\`\${third[0]} \${third[1]} \${third.offset(-2)[0]}\`);
+         free(buf);
+         return 0;
+       }\n`,
+    );
+    expect(result.stdout).toBe("30 40 10\n");
+    // Nothing here is Goblin's: `malloc` allocated it and `free` released it,
+    // and the counter correctly sees none of it.
+    expect(result.leaked).toBe(0);
+  });
+
+  test("`deref` borrows the pointee, keeping its dynamic type", async () => {
+    // The reason `deref` exists: passing a `Pointer<A>` where a
+    // `Reference<A>` is wanted is not a conversion the language does, and a
+    // *value* parameter would slice. This is the written form of "borrow it".
+    const result = await run(
+      "heap-deref",
+      `class A { speak(): string { return "A"; } }
+       class B extends A { override speak(): string { return "B"; } }
+
+       function say(a: Reference<A>): void { console.log(a.speak()); }
+
+       export function main(): i32 {
+         const p: Pointer<A> = alloc(B);
+         say(p.deref());
+         p.free();
+         return 0;
+       }\n`,
+    );
+    expect(result.stdout).toBe("B\n");
+    expect(result.leaked).toBe(0);
+  });
+
+  test("`deref` of a pointer to a primitive is GF0001, and says what to write", async () => {
+    // `Reference<i32>` is not a type that can be written yet, so handing one
+    // back would produce a value whose type the next line could not name.
+    // `p[0]` is C's `*p` and already works.
+    const diagnostic = await expectRejected(
+      "heap-deref-primitive",
+      `export function main(): i32 {
+         const p = alloc<i32>();
+         const r = p.deref();
+         p.free();
+         return 0;
+       }\n`,
+      "GF0001",
+    );
+    expect(diagnostic.message).toContain("p[0]");
+  });
+});
+
+describe("nullable pointers", () => {
+  test("a C function returning null is checked, and the check lowers", async () => {
+    // `char *` is a `Pointer<u8>`, and `getenv` is the shape half of libc has:
+    // a pointer that is null when the answer is "no". The `| null` makes tsc
+    // refuse to read it without asking, which is the whole benefit — and worth
+    // nothing unless the asking compiles, which is what this pins.
+    const result = await run(
+      "heap-nullable",
+      `declare function getenv(name: CString): Pointer<u8> | null;
+
+       export function main(): i32 {
+         const missing = getenv(cstring("GOBLIN_FORGE_DEFINITELY_UNSET_9F2A"));
+         if (missing === null) { console.log("unset"); } else { console.log("set"); }
+
+         const path = getenv(cstring("PATH"));
+         if (path !== null) {
+           const copied: string = stringFromCString(path);
+           console.log(\`PATH is \${copied.length > 0} \${path.address !== 0}\`);
+         }
+         return 0;
+       }\n`,
+    );
+    expect(result.stdout).toBe("unset\nPATH is true true\n");
+    // The copy is Goblin's and is released; the bytes `getenv` returned are
+    // the C library's and are never touched.
+    expect(result.leaked).toBe(0);
+  });
+
+  test("reading a nullable pointer without checking is tsc's error, not the compiler's", async () => {
+    const { result } = await compileSource(
+      "heap-nullable-unchecked",
+      `declare function getenv(name: CString): Pointer<u8> | null;
+
+       export function main(): i32 {
+         const p = getenv(cstring("PATH"));
+         return cast<i32>(p[0]);
+       }\n`,
+    );
+    expect(result.ok).toBe(false);
+    expect(errorCodes(result).some((code) => code.startsWith("TS"))).toBe(true);
+  });
+});
+
 describe("what is still missing", () => {
-  test("`allocArray` and the raw-pointer intrinsics are GF0001", async () => {
+  test("`allocArray`, `freeArray`, `erase` and `reify` are GF0001", async () => {
     for (const [name, body] of [
       ["allocArray", "  const p = allocArray<u8>(4);\n  return 0;"],
-      ["offset", "  const p = alloc<i32>();\n  const q = p.offset(1);\n  p.free();\n  return 0;"],
+      ["freeArray", "  const p = alloc<i32>();\n  p.freeArray();\n  return 0;"],
       ["erase", "  const p = alloc<i32>();\n  const e = p.erase();\n  p.free();\n  return 0;"],
+      ["reify", "  const p = alloc<i32>();\n  const r = p.reify<u8>();\n  p.free();\n  return 0;"],
     ] as const) {
       await expectRejected(
         `heap-missing-${name}`,
