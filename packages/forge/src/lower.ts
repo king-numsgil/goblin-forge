@@ -2794,6 +2794,36 @@ class BodyLowerer {
     const subject = this.#value(target.expression, undefined);
     if (subject === undefined) return;
 
+    // `p.x = 1` through a `Pointer<S>`: one dereference, then the field. A
+    // class goes down the `#asClass` path below, which already sees through a
+    // pointer; a struct has no such path and needs this.
+    if (subject.type.kind === "pointer" && subject.type.pointee.kind === "struct") {
+      const struct = subject.type.pointee;
+      const index = this.#fieldIndex(struct, target.name.text);
+      const field = struct.fields[index];
+      if (field === undefined) {
+        this.#outer.unsupported(target, `the field \`${target.name.text}\``);
+        return;
+      }
+      const place = this.#placeOfSubject(target, subject);
+      if (place === undefined) return;
+      const value = this.#expressionTyped(source, field.type);
+      if (value === undefined) return;
+      this.#push({
+        kind: "Assign",
+        place: {
+          local: place.local,
+          projection: [
+            ...place.projection,
+            { kind: "Deref" },
+            { kind: "Field", value: FieldId(index) },
+          ],
+        },
+        rvalue: { kind: "Use", value: this.#forStorage(value) },
+      });
+      return;
+    }
+
     const asClass = this.#asClass(subject);
     if (asClass !== undefined) {
       // `x.name = v` where `name` is a setter: a call, not a store. Checked
@@ -3067,8 +3097,14 @@ class BodyLowerer {
       return ERROR;
     }
 
-    if (subject.type.kind === "struct") {
-      const field = subject.type.fields.find((f) => f.name === expression.name.text);
+    // A `Pointer<S>` reaches a struct's fields the same way it reaches a
+    // class's: one dereference, written by nobody.
+    const pointed =
+      subject.type.kind === "pointer" && subject.type.pointee.kind === "struct"
+        ? subject.type.pointee
+        : subject.type;
+    if (pointed.kind === "struct") {
+      const field = pointed.fields.find((f) => f.name === expression.name.text);
       if (field === undefined) {
         this.#outer.unsupported(expression, `the field \`${expression.name.text}\``);
         return ERROR;
@@ -4302,8 +4338,20 @@ class BodyLowerer {
    */
   #alloc(expression: ts.CallExpression, natural: MachineType): Typed | undefined {
     const [klass, ...args] = expression.arguments;
-    if (klass === undefined || !ts.isIdentifier(klass)) {
-      this.#outer.error(expression, "GF0002", "`alloc` takes a class, then its constructor's arguments.");
+
+    // `alloc<T>()` — no class, so nothing to construct beyond zeroing. One
+    // operation with two spellings rather than two operations: the storage is
+    // default-initialised either way, so `free()` has something well-defined
+    // to destroy in both.
+    if (klass === undefined) return this.#allocDefault(expression, natural);
+
+    if (!ts.isIdentifier(klass)) {
+      this.#outer.error(
+        expression,
+        "GF0002",
+        "`alloc` takes a class and its constructor's arguments, or a type " +
+          "argument and nothing: `alloc(Rect, 6, 7)` or `alloc<i32>()`.",
+      );
       return undefined;
     }
     const info = this.#outer.classInfo(klass.text);
@@ -4356,6 +4404,66 @@ class BodyLowerer {
     const record = this.#outer.fn(info.constructorSymbol!);
     if (record === undefined || record.kind !== "defined") return undefined;
     this.#callDirect(record.id, marshalled, undefined);
+    return { operand: raw.operand, type: pointer };
+  }
+
+  /**
+   * `alloc<T>()` — storage for one `T`, default-initialised.
+   *
+   * The same `Default` a local gets, and for the same reason: there is no
+   * uninitialised form anywhere in this language, because a destructor releases
+   * what a slot holds and on uninitialised memory that is a garbage pointer.
+   * `alloc<string>()` followed by `free()` has to be well defined, and zeroing
+   * is what makes it so.
+   */
+  #allocDefault(expression: ts.CallExpression, natural: MachineType): Typed | undefined {
+    const pointee =
+      natural.kind === "pointer"
+        ? natural.pointee
+        : this.#outer.erase(expression, this.#outer.checker.getTypeAtLocation(expression));
+    if (pointee === undefined) return undefined;
+    if (pointee.kind === "pointer") {
+      // `erase` gave the whole `Pointer<T>` back rather than the pointee, which
+      // means tsc could not work out what `T` is.
+      this.#outer.error(
+        expression,
+        "GF0002",
+        "`alloc` needs the type written out when there is no class: `alloc<i32>()`.",
+      );
+      return undefined;
+    }
+
+    // A class with a constructor reached this way would be allocated and never
+    // constructed, which is a trap rather than a shorthand.
+    if (pointee.kind === "class") {
+      const info = this.#outer.classInfo(pointee.name);
+      if (info?.ctor !== undefined) {
+        this.#outer.error(
+          expression,
+          "GF0002",
+          `\`${pointee.name}\` has a constructor, so write \`alloc(${pointee.name}, …)\` ` +
+            "— naming the type instead would allocate it without constructing it.",
+        );
+        return undefined;
+      }
+    }
+
+    const pointer: MachineType = { kind: "pointer", pointee };
+    const ty = this.#outer.tyOf(pointee, expression);
+    const size = this.#temporaryTyped(expression, USIZE, { kind: "SizeOf", value: ty });
+    const align = this.#temporaryTyped(expression, USIZE, { kind: "AlignOf", value: ty });
+    if (size === undefined || align === undefined) return undefined;
+
+    const raw = this.#callRuntime(expression, RUNTIME.alloc, [size, align], pointer);
+    if (raw === undefined) return undefined;
+
+    const place = this.#placeOfSubject(expression, raw);
+    if (place === undefined) return undefined;
+    this.#push({
+      kind: "Init",
+      place: { local: place.local, projection: [...place.projection, { kind: "Deref" }] },
+      rvalue: { kind: "Default" },
+    });
     return { operand: raw.operand, type: pointer };
   }
 
@@ -4848,19 +4956,28 @@ class BodyLowerer {
       };
     }
 
-    if (subject.type.kind === "struct") {
-      const index = this.#fieldIndex(subject.type, expression.name.text);
-      const field = subject.type.fields[index];
+    const pointedTo =
+      subject.type.kind === "pointer" && subject.type.pointee.kind === "struct"
+        ? subject.type.pointee
+        : subject.type;
+    if (pointedTo.kind === "struct") {
+      const index = this.#fieldIndex(pointedTo, expression.name.text);
+      const field = pointedTo.fields[index];
       if (field === undefined) {
         this.#outer.unsupported(expression, `the field \`${expression.name.text}\``);
         return undefined;
       }
       const place = this.#placeOfSubject(expression, subject);
       if (place === undefined) return undefined;
+      // Through the pointer first, when there is one.
+      const base =
+        subject.type.kind === "pointer"
+          ? [...place.projection, { kind: "Deref" as const }]
+          : place.projection;
       return {
         operand: {
           kind: "Copy",
-          value: { local: place.local, projection: [...place.projection, { kind: "Field", value: FieldId(index) }] },
+          value: { local: place.local, projection: [...base, { kind: "Field", value: FieldId(index) }] },
         },
         type: field.type,
       };

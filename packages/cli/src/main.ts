@@ -143,17 +143,18 @@ async function main(argv: readonly string[]): Promise<number> {
   // except where the project has its own copies, which `init` writes and the
   // editor reads. Preferring those is not a nicety: adding a second prelude to
   // the program would declare every global twice.
-  const cache = materialise(cacheRoot());
   const local = join(root, PROJECT_DIR);
-  useRuntimeFiles(
-    existsSync(join(local, "global.d.ts"))
-      ? {
-          globalDeclarations: join(local, "global.d.ts"),
-          tsconfigBase: join(local, "tsconfig.base.json"),
-          runtimeCrate: cache.runtimeCrate,
-        }
-      : cache,
-  );
+  if (existsSync(join(local, "global.d.ts"))) {
+    // **Refreshed, not just read.** The project's copy is the compiler's file
+    // rather than the user's, and a stale one silently shadows an upgrade: the
+    // build fails on a global that the executable does in fact know about, with
+    // a message from tsc about a language it is no longer describing. Writing
+    // it back costs nothing — `materialise` only touches what differs.
+    const files = materialise(local);
+    useRuntimeFiles({ ...files, runtimeCrate: materialise(cacheRoot()).runtimeCrate });
+  } else {
+    useRuntimeFiles(materialise(cacheRoot()));
+  }
   const result = await compile({
     ...config,
     root,

@@ -112,6 +112,20 @@ describe("`init`", () => {
     expect(result.stdout).toContain("built");
   }, TIMEOUT);
 
+  test("a stale project prelude is refreshed by a build, not obeyed", () => {
+    // The project's copy is the compiler's file rather than the user's, and it
+    // wins over the embedded one so that the editor and the build agree. That
+    // makes a stale copy silently shadow an upgrade: the build would fail on a
+    // global the executable knows about, with a message from tsc about a
+    // language it is no longer describing.
+    writeFileSync(join(dir, ".goblin", "global.d.ts"), "// stale\n", "utf8");
+    const result = run(dir);
+    expect(result.status).toBe(0);
+    expect(readFileSync(join(dir, ".goblin", "global.d.ts"), "utf8")).toContain(
+      "declare function alloc",
+    );
+  }, TIMEOUT);
+
   test("does not overwrite what is already there", () => {
     writeFileSync(join(dir, "src", "main.ts"), "// mine\nexport function main(): i32 { return 7; }\n");
     run(dir, "init");

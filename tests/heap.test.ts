@@ -38,6 +38,83 @@ describe("alloc and free", () => {
     expect(result.leaked).toBe(0);
   });
 
+  test("`alloc<T>()` with no class allocates a zeroed `T`", async () => {
+    const result = await run(
+      "heap-plain",
+      // `p[0]` is C's `*p`, and the spelling `CorePointer<T>`'s index signature
+      // gives it. A pointer to one `T` and a pointer to the first of many are
+      // the same type here, as they are in C.
+      `export function main(): i32 {
+         const n = alloc<i32>();
+         const before: i32 = n[0];
+         n[0] = 7;
+         const after: i32 = n[0];
+         n.free();
+         return before * 10 + after;
+       }\n`,
+    );
+    expect(result.exitCode).toBe(7);
+    expect(result.leaked).toBe(0);
+  });
+
+  test("`alloc<T>()` of a struct is zeroed, field by field", async () => {
+    const result = await run(
+      "heap-plain-struct",
+      `interface P { x: i32; y: i32; }
+
+       export function main(): i32 {
+         const p = alloc<P>();
+         const zeroed: i32 = p.x + p.y;
+         p.x = 3;
+         p.y = 4;
+         const sum: i32 = p.x + p.y;
+         p.free();
+         return zeroed * 100 + sum;
+       }\n`,
+    );
+    expect(result.exitCode).toBe(7);
+    expect(result.leaked).toBe(0);
+  });
+
+  test("`alloc<T>()` of an owning type is safe to free without ever writing it", async () => {
+    // The reason there is no uninitialised form. `free()` destroys what the
+    // storage holds; on uninitialised memory that is a garbage pointer, and the
+    // crash lands nowhere near the mistake.
+    const result = await run(
+      "heap-plain-owning",
+      `export function main(): i32 {
+         let i: i32 = 0;
+         while (i < 20) {
+           const s = alloc<string>();
+           s.free();
+           i = i + 1;
+         }
+         console.log("done");
+         return 0;
+       }\n`,
+    );
+    expect(result.stdout).toBe("done\n");
+    expect(result.leaked).toBe(0);
+  });
+
+  test("a class with a constructor must be named, not written as a type argument", async () => {
+    const diagnostic = await expectRejected(
+      "heap-ctor-required",
+      `class R {
+         x: i32;
+         constructor(x: i32) { this.x = x; }
+       }
+
+       export function main(): i32 {
+         const r = alloc<R>();
+         r.free();
+         return 0;
+       }\n`,
+      "GF0002",
+    );
+    expect(diagnostic.message).toContain("without constructing it");
+  });
+
   test("fields read and write through the pointer, with no dereference written", async () => {
     // The auto-dereference C++ spells `->`. `Pointer<T>` is `T & CorePointer<T>`
     // in the prelude for exactly this reason.
@@ -277,8 +354,8 @@ describe("what is still missing", () => {
   test("`allocArray` and the raw-pointer intrinsics are GF0001", async () => {
     for (const [name, body] of [
       ["allocArray", "  const p = allocArray<u8>(4);\n  return 0;"],
-      ["nativeNew", "  const p = nativeNew<i32>();\n  return 0;"],
-      ["nativeRead", "  const p = nativeNull<i32>();\n  return 0;"],
+      ["nativeNull", "  const p = nativeNull<i32>();\n  return 0;"],
+      ["nativeOffset", "  const p = nativeNull<i32>();\n  const q = nativeOffset(p, 1);\n  return 0;"],
     ] as const) {
       await expectRejected(
         `heap-missing-${name}`,
@@ -286,6 +363,22 @@ describe("what is still missing", () => {
         "GF0001",
       );
     }
+  });
+
+  test("`nativeNew` is gone — `alloc<T>()` is the one allocation", async () => {
+    // Folded rather than implemented. `nativeNew` handed back *uninitialised*
+    // storage, which is at odds with the rest of the language: a destructor
+    // releases what a slot holds, and on uninitialised memory that is a garbage
+    // pointer. One operation, two spellings, always initialised.
+    const { result } = await compileSource(
+      "heap-no-nativenew",
+      `export function main(): i32 {
+         const p = nativeNew<i32>();
+         return 0;
+       }\n`,
+    );
+    expect(result.ok).toBe(false);
+    expect(errorCodes(result)).toContain("TS2304");
   });
 
   test("a fixed array does not decay to a pointer yet", async () => {

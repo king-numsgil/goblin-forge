@@ -133,10 +133,9 @@ describe("the intrinsics the prelude declares and the lowerer does not have", ()
   // only acceptable answer is GF0001 with a file and a line — never a backend
   // failure, and never a wrong number.
   const cases: [string, string][] = [
-    ["nativeNew", "  const p = nativeNew<i32>();\n  nativeDelete(p);\n  return 0;"],
     ["allocArray", "  const p = allocArray<u8>(4);\n  p.freeArray();\n  return 0;"],
     ["nativeNull", "  const p = nativeNull<i32>();\n  if (nativeIsNull(p)) { return 1; }\n  return 0;"],
-    ["nativeErase", "  const p = nativeNew<i32>();\n  const e = nativeErase(p);\n  return 0;"],
+    ["nativeErase", "  const p = nativeNull<i32>();\n  const e = nativeErase(p);\n  return 0;"],
     ["stringFromCString", '  const s: string = stringFromCString(cstring("hi"));\n  return 0;'],
   ];
 

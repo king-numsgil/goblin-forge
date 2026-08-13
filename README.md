@@ -37,7 +37,7 @@ the same files this compiler does — your editor underlines what the compiler
 will reject, while you type, with no extension installed.
 
 > **Status: experimental.** The language is real and the test suite is large
-> (607 tests, including programs checked against a C compiler and against
+> (650 tests, including programs checked against a C compiler and against
 > equivalent C++), but this is a young project. Expect gaps — they are reported
 > as diagnostics with a file and a line, never as a crash.
 
@@ -310,14 +310,24 @@ and therefore usable as a function pointer where an instance method is not.
 outlives the scope — and leaks if you drop it, exactly as in C++:
 
 ```ts
-const r = alloc(Rect, 6, 7);   // Pointer<Rect>
+const r = alloc(Rect, 6, 7);   // Pointer<Rect>, constructed
 console.log(`${r.area()}`);    // dereferences, like C++'s `->`
 r.free();                      // yours to call, and nobody calls it for you
 
-const p: Pointer<Animal> = alloc(Dog, "Heapy");
-p.speak();                     // the derived override
-p.free();                      // and the derived destructor
+const p = alloc<Point>();      // Pointer<Point>, zeroed
+p.x = 3;
+p.free();
+
+const q: Pointer<Animal> = alloc(Dog, "Heapy");
+q.speak();                     // the derived override
+q.free();                      // and the derived destructor
 ```
+
+Two spellings, **one operation**. Naming a class runs its constructor; naming a
+type does not, because there is none to run — but the storage is
+default-initialised either way. There is deliberately no uninitialised form, for
+the same reason `fixedArray` has none: `free()` destroys what the storage holds,
+and on uninitialised memory that is a garbage pointer.
 
 `free` dispatches destruction through the vtable, so releasing a `Dog` through a
 `Pointer<Animal>` still releases what only a `Dog` has. That is the one place
@@ -452,7 +462,7 @@ on two machines.
 
 ### Not there yet
 
-`allocArray` and the raw-pointer intrinsics (`nativeNew`, `nativeRead`,
+`allocArray` and the raw-pointer intrinsics (`nativeRead`, `nativeNull`,
 `nativeOffset`, …), array-to-pointer decay, `String.substring`/`indexOf`/
 `codePointAt`, closures, generics, `switch`, `do`/`while`, `for…of`,
 exceptions, static fields, top-level statements and top-level `const`.

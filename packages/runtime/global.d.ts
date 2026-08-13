@@ -384,21 +384,36 @@ type Reference<T> = T extends GfPrimitive ? ReferenceCore<T> : T & ReferenceCore
 
 // ---------------------------------------------------------------------------
 // Memory intrinsics. Manual, C++-style, unverified. There is no GC, no
-// refcount, and no borrow checker: `nativeDelete` on a pointer that is still
+// refcount, and no borrow checker: `free()` on a pointer that is still
 // live is your bug, and the compiler will not find it for you.
 // ---------------------------------------------------------------------------
 
 /**
  * Construct a `T` on the heap and hand back its address — C++ `new T(...)`.
  *
- *     const r = alloc(Rect, 6, 7);   // Pointer<Rect>
- *     console.log(`${r.area()}`);    // dereferences
- *     r.free();                      // yours to call, and nobody calls it for you
+ *     const r = alloc(Rect, 6, 7);      // Pointer<Rect>, constructed
+ *     console.log(`${r.area()}`);       // dereferences
+ *     r.free();                         // yours to call, and nobody calls it
+ *
+ *     const n = alloc<i32>();           // Pointer<i32>, zeroed
+ *     n.free();
+ *
+ * Two spellings and **one operation**. Naming a class runs its constructor;
+ * naming a type does not, because there is no constructor to run — but the
+ * storage is default-initialised either way, which is the part worth being
+ * precise about.
+ *
+ * There is deliberately no uninitialised form, for the same reason
+ * {@link fixedArray} has none: a destructor releases what a slot holds, and on
+ * uninitialised memory that is a garbage pointer. An allocation that hands back
+ * bytes nobody has written is a `free()` away from a crash, and the crash is
+ * nowhere near the mistake.
  *
  * Where `new Rect(6, 7)` gives a value that its scope releases, this gives a
  * pointer that outlives the scope and leaks if you drop it. That is the whole
  * distinction, and it is the same one C++ draws.
  */
+declare function alloc<T>(): Pointer<T>;
 declare function alloc<T extends object, A extends readonly unknown[]>(
   klass: new (...args: A) => T,
   ...args: A
@@ -470,12 +485,6 @@ declare function move<T>(value: T): T;
  */
 declare function tryCast<T>(value: object): Reference<T> | null;
 
-/** Allocate uninitialised storage for one `T`. Analogous to C++ `new T`. */
-declare function nativeNew<T>(): Pointer<T>;
-
-/** Release storage obtained from `nativeNew`. Analogous to C++ `delete`. */
-declare function nativeDelete<T>(ptr: CorePointer<T>): void;
-
 /**
  * Allocate `count` contiguous `T` on the heap — C++ `new T[n]`.
  *
@@ -505,7 +514,7 @@ declare function nativeIsNull<T>(ptr: CorePointer<T>): boolean;
  * Size of `T` in bytes, as laid out by this compiler.
  *
  * This is the *storage* size — what an array of `T` strides by and what
- * `nativeNew<T>()` allocates — never "what a register holds". The two are
+ * `alloc<T>()` reserves — never "what a register holds". The two are
  * different questions and this answers only one of them.
  */
 declare function nativeSizeOf<T>(): usize;
@@ -558,7 +567,7 @@ declare function nativeCast<T extends number>(value: number): T;
 // Parameters are borrowed: a function may read a string it was passed, but the
 // caller keeps ownership, so passing one costs nothing.
 //
-// Raw memory is still yours to manage — `nativeNew` and `nativeDelete` have not
+// Raw memory is still yours to manage — `alloc` and `free` have not
 // changed. This is the same split C++ draws between a container and a pointer.
 // ---------------------------------------------------------------------------
 
