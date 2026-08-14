@@ -1,0 +1,495 @@
+# Linking against C libraries
+
+How a Goblin program reaches C, how C reaches back, and what the linker is
+actually doing while it happens.
+
+Every recipe and every caveat below was **run on Linux**, including the ones
+that fail — the failure messages are transcripts, not reconstructions. The
+Windows and macOS rows come from the source and from the suite that covers
+them, not from a machine sitting here, so treat those as read rather than
+witnessed.
+
+---
+
+## What actually runs
+
+There is no bundled linker and no attempt to write one. The system linker does
+the job, and `crates/goblin-codegen/src/link.rs` contributes only *finding* it
+and assembling an argument list that is right on the first try.
+
+| | Executables and shared libraries | Static libraries |
+|---|---|---|
+| Linux, macOS, BSD | `cc` — or `$CC` if set | `ar` — or `$AR` if set |
+| Windows (MSVC) | `link.exe` | `lib.exe` |
+
+On Unix the platform *C compiler* is driven rather than `ld` directly, because
+it is the thing that knows where the CRT startup files live. On MSVC the tools
+are found through the same registry probing `cc` uses for build scripts, so a
+Developer Command Prompt is not required.
+
+**A static library is archived, not linked.** Nothing is resolved, nothing is
+discarded, and no runtime is pulled in. That is deliberate: two Goblin static
+libraries in one program must not each carry a copy of `gf_string_free`. The
+final executable link is what supplies the runtime, once.
+
+### The command it builds
+
+For an executable on Linux, in this order:
+
+```console
+cc  main.o                       # your objects
+    yourlib.a                    # everything in `nativeLibs`, in your order
+    libgoblin_runtime.a          # the Goblin runtime
+    -lgcc_s -lutil -lrt -lpthread -lm -ldl -lc
+    -o app
+```
+
+**The order is the ABI of a static link.** GNU `ld` resolves left to right and
+only looks forward, so a dependency must come *after* whatever needs it. Your
+archives land before the runtime and the system libraries, which is right for
+the common case — your library needs libc, libc needs nothing. If one of your
+archives needs a symbol from another, order them yourself inside `nativeLibs`.
+
+The system library list is not hardcoded. It comes from
+`rustc --print native-static-libs` on the runtime crate, because a hardcoded
+list is right on the day it is written and rots at the next toolchain bump —
+and the failure is an unresolved symbol from inside the Rust standard library
+that means nothing to whoever hits it.
+
+---
+
+## Calling C from Goblin
+
+### Declaring the function
+
+A function with **no body** is an `extern "C"` import:
+
+```ts
+declare function mylib_triple(x: i32): i32;
+
+export function main(): i32 {
+  console.log(`${mylib_triple(14)}`);
+  return 0;
+}
+```
+
+**The name is the C symbol, spelled exactly.** There is no mangling, no prefix
+and no lookup table — which also means a typo is not a compile error. It
+compiles cleanly and fails at the link:
+
+```
+error[GF9005]: linking failed:
+  cc … -o app
+
+/usr/bin/ld: main.o: in function `main':
+main:(.text+0x77): undefined reference to `mylib_tripel'
+```
+
+This is the single most common surprise. `GF9005` carries the exact command, so
+the failure can be reproduced by hand.
+
+### What is allowed to cross
+
+An import, and the **entry module's** exports, are classified by the platform's
+C rules — Win64 or System V — so both sides agree about registers, stack slots
+and hidden return pointers without either being told. Sub-register-width
+integers carry `zeroext`/`signext`, because a C callee is entitled to use the
+whole register without masking first.
+
+**Only the entry module's exports are a boundary.** `export` is TypeScript's
+word for *importable*, and a program is one compilation, so an exported function
+another Goblin module calls is an ordinary internal call — free to take a
+`string`, a class, anything. What a `static-lib` publishes, what the header
+declares and what a DLL names is the entry module's surface, and only that is
+restricted.
+
+What may cross is **plain data**: the fixed widths, `boolean`, a struct of
+those, a `FixedArray` of those, `Pointer<T>` — and `string`, which is a special
+case worth its own section below. Structs are passed by value under the
+platform's own rules: `{ float, float }` travels in one SSE register on System
+V, and one *integer* register on Win64.
+
+What may not is anything whose bytes are not the whole of its value, and the
+refusal is `GF0301` with a caret under the offending parameter:
+
+| Refused | Why | Pass instead |
+|---|---|---|
+| `T[]` | owns a buffer whose element layout nothing outside this build knows | `Pointer<T>` and a length |
+| a class | carries a vtable pointer into *this build's* read-only data | its fields, or a `Pointer<T>` |
+| `Reference<I>` | a pair of pointers into this build's own tables | — |
+| a struct with a `string` field | the question of who frees it is buried where no doc comment can answer it | pass the `string` as its own parameter |
+| a `FixedArray` of owning elements | same | — |
+
+**A callback is checked one level in.** A function pointer is only a word, so it
+would otherwise sail through carrying a signature nothing outside this build can
+call; its parameters and return are checked as boundary types too.
+
+### Strings cross, and this is the surprising part
+
+`string` is deliberately *not* on the refused list. The runtime lays one out as
+nul-terminated bytes on purpose, so C reads one as a `const char *` with no
+conversion at all. Ownership becomes the documented, manual thing it is in every
+C API that hands out memory.
+
+When a `string` crosses, the generated header carries the type and the three
+functions that operate on it:
+
+```c
+typedef const char* GoblinString;
+
+GoblinString gf_string_from_cstr(const char* bytes);
+GoblinString gf_string_clone(GoblinString s);
+void gf_string_free(GoblinString s);
+
+GoblinString greet(GoblinString p0);
+```
+
+The header's own comment is worth repeating, because it is the trap:
+
+- **Reading one is free.** `printf`, `strlen` and every other `const char *`
+  reader work unchanged.
+- **Making one is not.** A length header sits *sixteen bytes behind* the
+  pointer, so a plain C string is not a `GoblinString` — passing one reads a
+  length out of whatever precedes your literal. Use `gf_string_from_cstr`,
+  which copies. The typedef is a warning label, not a safety net.
+- **Freeing one is `gf_string_free`, never `free`**, because the allocation
+  starts at the header rather than at the pointer you were handed.
+
+Which strings the caller owns is your library's business to document, exactly as
+it is for any C API.
+
+### `CString`, going the other way
+
+`CString` is the borrowed half of the pair, for calling *into* C. `cstring(s)`
+borrows a `string`'s bytes for as long as `s` lives; `cstring(move(s))` hands
+them over for good.
+
+A `CString` is **never** released by the scope holding it, and there is
+deliberately no `.free()` method — there would be no right answer for it. The
+two real shapes:
+
+```ts
+declare function getenv(name: CString): CString | null;   // library-owned, do NOT free
+declare function strdup(source: CString): CString | null; // yours, freed with ITS free
+declare function free(mem: CString): void;
+
+export function main(): i32 {
+  const path = getenv(cstring("PATH"));
+  if (path !== null) { console.log("PATH is set"); }
+
+  const copy = strdup(cstring("borrowed then owned"));
+  if (copy !== null) { free(copy); }
+  return 0;
+}
+```
+
+Use `cstringFree` **only** on a `CString` that came from `cstring(move(…))` —
+same sixteen-byte header, so handing it anything else is not a leak, it is
+memory corruption. `stringFromCString` goes the other way and copies.
+
+### Opaque handles — `FILE *`, and every library like it
+
+Most C libraries hand back a pointer to a struct you are never meant to look
+inside. Declare the type with `declare class` and a private member, exactly as
+the prelude's pointer commentary describes:
+
+```ts
+declare class FILE { private _opaque: never }
+
+declare function fopen(path: CString, mode: CString): Pointer<FILE> | null;
+declare function fputs(text: CString, stream: Pointer<FILE>): i32;
+declare function fclose(stream: Pointer<FILE>): i32;
+
+export function main(): i32 {
+  const f = fopen(cstring("/tmp/out.txt"), cstring("w"));
+  if (f === null) { console.log("open failed"); return 1; }
+  fputs(cstring("through FILE*"), f);
+  fclose(f);
+  return 0;
+}
+```
+
+`declare` is the whole rule: it says the implementation lives somewhere else,
+and for a class that means the *layout* does too. So `FILE` is C's incomplete
+type — no size, no fields, no value form — and the only thing that travels is
+the pointer.
+
+**`private _opaque: never` is tsc's half.** It makes the class *nominal*, so
+two handles declared the same way are still different types and one cannot be
+passed where the other belongs. The compiler never reads the member; it is
+there so your editor underlines the mistake while you type. The name is
+conventional — any private member does the job.
+
+**`Pointer<T> | null` works**, and the null check is the only way to reach the
+value, so a failed `fopen` cannot be used by accident.
+
+**Everything that would need the layout is refused**, with a code and a line:
+
+```
+error[GF0302]: `FILE` is declared elsewhere, so this build does not know its size
+               or its alignment, and `offset` needs both.
+```
+
+That covers `p[i]`, `p.offset(n)`, `p.deref()`, `p.free()`, `p.freeArray()`,
+`alloc`, `allocArray`, `sizeOf`, `alignOf`, and holding one by value anywhere —
+a parameter, a return, a struct field, an array element. `p.address` is the one
+member that still works, because it is the one that never needed a size.
+
+None of those refusals is optional politeness. A type with no layout does not
+refuse them on its own: the obvious stand-ins for "no layout" — a zero-field
+struct, a `void` pointee — have a size of zero and an alignment of one, so
+`p[i]` strides by nothing and `free` hands the allocator a size of zero. That is
+a corrupt heap rather than a diagnostic, and `POINTER-ERASURE.md` is the long
+version of why.
+
+**In a library you publish**, the generated header forward-declares the handle
+and leaves it incomplete, which is what C does for its own:
+
+```c
+/* Handles this library passes through but does not define. */
+struct FILE;
+
+struct FILE* passThrough(struct FILE* p0);
+```
+
+`Pointer<u8>` also works as a handle and is shorter, but then every handle in
+the program is the same type and nothing catches a `FILE *` passed where a
+`DIR *` was meant. Prefer the `declare class`.
+
+### The C standard library is already linked
+
+It needs no configuration at all. `cc` links libc, and the runtime already
+drags in `-lm -lpthread -ldl` and the rest of the list above, so `sqrt` works
+with nothing more than a declaration:
+
+```ts
+declare function sqrt(x: f64): f64;
+```
+
+One portability note: **`strdup` is POSIX, `_strdup` is the MSVC spelling.**
+A `declare` names the symbol exactly, so cross-platform code has to pick.
+
+### Adding your own library
+
+`nativeLibs` takes **paths**, resolved against the build script's directory —
+not the working directory, so the build works from anywhere:
+
+```ts
+// build.ts
+export default {
+  entry: "./src/main.ts",
+  output: "./bin/app",
+  type: "bin",
+  nativeLibs: ["../vendor/libmylib.a"],
+};
+```
+
+A static `.a` (or `.lib`) is the case with no surprises. It is copied into the
+link line and resolved like any other archive.
+
+### Shared objects, and the two ways they bite
+
+A `.so` may be passed the same way and it will link — but what the loader does
+afterwards depends on something the file itself carries.
+
+**If the `.so` has no SONAME**, the linker records the path you gave it. Pass an
+absolute path and that absolute path is baked into the binary:
+
+```console
+$ ldd bin/app
+  /home/you/scratch/libmylib.so (0x00007f...)     # your build machine's layout
+```
+
+It runs on your machine and nowhere else.
+
+**If the `.so` has a SONAME**, the linker records the *soname* instead, and the
+binary will not start until the loader can find it:
+
+```console
+$ ./bin/app
+  error while loading shared libraries: libmylib.so.1: cannot open shared object
+  file: No such file or directory
+```
+
+goblin-forge has no `-rpath` hook, so the remedy is the loader's own:
+`LD_LIBRARY_PATH`, an `ldconfig` directory, or installing the library properly.
+
+```console
+$ LD_LIBRARY_PATH=/path/to/lib ./bin/app
+45
+```
+
+**Prefer static archives** unless you have a reason not to. Neither failure
+above can happen to a `.a`.
+
+---
+
+## The escape hatch, and why you need one
+
+`nativeLibs` entries are treated as filesystem paths and resolved. There is
+**no `-l`, no `-L` and no `-rpath`** — `"-lmylib"` becomes a request for a file
+of that name next to your build script, and says so:
+
+```
+/usr/bin/ld: cannot find /your/project/-lmylib: No such file or directory
+```
+
+Three ways out, in order of how much you should like them.
+
+**Give it the archive's path.** The compiler driver knows where its own
+libraries live:
+
+```console
+$ gcc --print-file-name=libm.a
+/usr/lib/gcc/x86_64-linux-gnu/15/../../../x86_64-linux-gnu/libm.a
+```
+
+Beware that it **echoes the name back unchanged when it finds nothing**, so
+`libz.a` as an answer means "not installed", not a path. Check for a `/`.
+
+**Ask pkg-config**, for anything that ships a `.pc` file:
+
+```console
+$ pkg-config --variable=libdir libssl
+/usr/lib/x86_64-linux-gnu
+```
+
+**Wrap the linker.** `link.rs` honours `$CC`, so a wrapper script can append
+whatever the argument list is missing — and this is the only route that reaches
+`-rpath`:
+
+```sh
+#!/bin/sh
+# ccwrap.sh
+exec cc "$@" -L/opt/mylib/lib -lmylib -Wl,-rpath,/opt/mylib/lib
+```
+
+```console
+$ CC=./ccwrap.sh goblin-forge
+```
+
+The flags land after everything goblin-forge passes, which is the correct end
+of the line for a dependency. Treat it as a last resort: it is invisible to the
+build script, so a build that needs it will fail confusingly for the next person
+who does not have it set.
+
+---
+
+## Being called from C
+
+The **entry module's** exports are what becomes C-callable. `type` decides what
+is produced.
+
+### A static library
+
+```ts
+export default { entry: "./src/main.ts", output: "./bin/mymath", type: "static-lib" };
+```
+
+This writes `bin/mymath.a` and a C header beside the objects, generated from the
+same signature data that drives the classification, so the two cannot disagree:
+
+```c
+/* Generated by goblin-forge for `main`. Do not edit. */
+#ifndef GOBLIN_MAIN_H
+#define GOBLIN_MAIN_H
+#include <stdint.h>
+#include <stdbool.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+int32_t add(int32_t p0, int32_t p1);
+
+#ifdef __cplusplus
+} /* extern "C" */
+#endif
+#endif /* GOBLIN_MAIN_H */
+```
+
+**The consumer must also link the Goblin runtime**, because the archive
+deliberately does not carry it:
+
+```console
+$ gcc consumer.c bin/mymath.a "$RUNTIME/libgoblin_runtime.a" -o consumer
+$ ./consumer
+42
+```
+
+The runtime archive's path comes back as `runtimeLibrary` on the compile
+result. If you are driving the compiler from a build script, read it from there
+rather than hardcoding — it moves between a repo checkout
+(`packages/runtime/native/target/release/`) and the single-file executable,
+which extracts its embedded copy under `~/.cache/goblin-forge/<version>/`.
+
+On a platform where the naive command is not enough, the full list from
+`rustc --print native-static-libs` goes last:
+`-lgcc_s -lutil -lrt -lpthread -lm -ldl -lc`.
+
+### A shared library
+
+```ts
+export default { entry: "./src/main.ts", output: "./bin/mymath", type: "shared-lib" };
+```
+
+An ELF shared object publishes every symbol with default visibility, so there is
+nothing to configure. **Windows is the platform that has to be told**: a DLL
+exports nothing unless named, so a `.def` file is generated from the module's
+own defined symbols, and an import library is written beside the DLL — Windows
+has no equivalent of linking straight against a `.so`. Its path comes back as
+`importLibrary`.
+
+Unlike a static library, a shared one *is* linked, so it carries the runtime and
+its system libraries already.
+
+---
+
+## When it goes wrong
+
+**`GF9005` is not necessarily a compiler bug.** A missing toolchain, an
+unreadable archive, or a symbol nothing defines all land there. The message
+carries the exact command; `linkCommand` on the compile result carries it too,
+even on success.
+
+| Symptom | Usually |
+|---|---|
+| `undefined reference to 'foo'` | a typo in a `declare`, or a library not in `nativeLibs` |
+| `undefined reference` to something you *did* pass | archive order — the dependency must come after the dependent |
+| `error while loading shared libraries` | a SONAME'd `.so` that the loader cannot find; see above |
+| unresolved Rust-looking symbols | the system library list; the runtime archive is missing or last |
+| `cannot find /your/project/-lfoo` | a `-l` flag in `nativeLibs`, which takes paths — it got resolved into one |
+
+`ldd` on the output answers the load-time questions, and `nm -g --defined-only`
+on an archive answers "does this actually define what I think it does".
+
+---
+
+## Platform differences worth knowing
+
+| | Linux / BSD | macOS | Windows (MSVC) |
+|---|---|---|---|
+| Executable | *(none)* | *(none)* | `.exe` |
+| Static library | `.a` | `.a` | `.lib` |
+| Shared library | `.so` | `.so` | `.dll` + import `.lib` |
+| Struct ABI | System V | System V | Win64 |
+| Shared-lib exports | automatic | automatic | generated `.def` |
+| `strdup` | `strdup` | `strdup` | `_strdup` |
+
+**macOS gets `.so`, not `.dylib`.** `extension_for` asks only whether the target
+is Windows, so the conventional macOS spelling is not produced. Nothing breaks —
+the loader does not care about the extension — but a build script that globs for
+`*.dylib` will find nothing.
+
+The struct ABI row is the one that changes behaviour rather than spelling. A
+struct of 1, 2, 4 or 8 bytes goes in one integer register on Win64 and anything
+else by address; System V splits up to sixteen bytes into eightbytes classified
+INTEGER or SSE. Both are implemented and both are differentially tested against
+the platform's own C compiler in `tests/struct-abi.test.ts` — which is the only
+reason to believe either of them.
+
+---
+
+## Reserved, and not yet wired
+
+`manifests` appears in `CompileOptions` and nothing reads it, in the same way
+`incremental` does. Setting it has no effect today.

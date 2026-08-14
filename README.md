@@ -447,6 +447,10 @@ Linux.
 Building a library instead of an executable emits a C header alongside it, so a
 C program can `#include` it and link the archive.
 
+[`LINKING.md`](LINKING.md) is the practical half: which linker actually runs,
+how to put a C library on the link line, what `nativeLibs` does and does not
+accept, and what a consumer of a Goblin `static-lib` has to link alongside it.
+
 ### Modules
 
 A program is many files and one compilation. tsc resolves the imports and
