@@ -113,8 +113,8 @@ describe("CString", () => {
   test("a foreign `CString` is freed by whoever allocated it", async () => {
     // The question this type exists to answer, with the two real shapes:
     //
-    //   `getenv`  — library-owned, do **not** free   (SDL_GetError)
-    //   `_strdup` — yours, freed with *its* free     (SDL_GetPrefPath / SDL_free)
+    //   `getenv` — library-owned, do **not** free   (SDL_GetError)
+    //   `strdup` — yours, freed with *its* free     (SDL_GetPrefPath / SDL_free)
     //
     // Goblin never needs to know which allocator was used, because it is never
     // asked to free them. That is the whole content of "untracked", and it is
@@ -122,17 +122,24 @@ describe("CString", () => {
     //
     // The leak count is zero because the runtime correctly counts *nothing*
     // here — none of this memory is Goblin's.
+    //
+    // The duplicating call is spelled per platform: POSIX standardised it as
+    // `strdup`, and the MSVC CRT publishes it as `_strdup` because the
+    // unprefixed name is not reserved to the implementation there. A `declare`
+    // names the C symbol exactly, so this is the test's business rather than
+    // the compiler's — nothing here is being papered over.
+    const strdup = process.platform === "win32" ? "_strdup" : "strdup";
     const result = await run(
       "cstring-foreign",
       `declare function getenv(name: CString): CString | null;
-       declare function _strdup(source: CString): CString | null;
+       declare function ${strdup}(source: CString): CString | null;
        declare function free(mem: CString): void;
 
        export function main(): i32 {
          const path = getenv(cstring("PATH"));
          if (path !== null) { console.log("PATH is set"); } else { console.log("unset"); }
 
-         const copy = _strdup(cstring("borrowed then owned"));
+         const copy = ${strdup}(cstring("borrowed then owned"));
          if (copy !== null) {
            console.log(\`copy len=\${copy.length}\`);
            free(copy);

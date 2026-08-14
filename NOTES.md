@@ -8,11 +8,18 @@ person — or the next session — can pick it up cold.
   answers. Read it before re-litigating anything.
 - This file is *where the code is* and *what it does not do yet*.
 
-248 TS tests, 6 Rust test binaries, `tsc --noEmit` clean, `cargo fmt --all
---check` clean, `cargo clippy --workspace --all-targets -D warnings` clean.
+727 TS tests, 6 Rust test binaries, `tsc --noEmit` clean, `cargo clippy
+--workspace --all-targets -D warnings` clean. `cargo fmt --all --check` is clean
+on the toolchain this was written against but not on rustfmt 1.9 — see the last
+section for why that was left alone.
 
 REWRITE-PLAN §12's build order is finished. What is left is not a milestone: it
-is the list under "What it does not have yet", plus running System V for real.
+is the list under "What it does not have yet".
+
+**System V has now been run for real** — Ubuntu, x86_64, GCC 15, the whole suite
+green from a cold checkout. §6 asked for that on day one and it took until after
+milestone 10; see "What the first System V run found" below for the two things
+it caught, only one of which was about System V.
 
 ---
 
@@ -428,3 +435,72 @@ rather than inside an operand is invisible to it — the result is
 answer. `rvalue_places` is the list to extend, and it sits next to
 `rvalue_operands` for that reason. `Rvalue::Len` had this bug from milestone 5
 and nothing reached it until class references existed.
+
+---
+
+## What the first System V run found
+
+The Linux job in `.github/workflows/ci.yml` had never run, and §6 is blunt about
+what that is worth: "the classification is the part of a compiler where 'looks
+right' is worth nothing." So it was finally run, on Ubuntu with GCC 15 and
+CMake, against a cold checkout.
+
+**The System V classification was right.** Every case in
+`tests/struct-abi.test.ts` passed on the first attempt — the eightbyte split,
+`struct { float, float }` into one SSE register, `struct { int, float }` into one
+integer register, the twelve-byte two-eightbyte case Win64 passes by address, the
+hidden return pointer, and the sub-register-width extensions. The half of this
+compiler that had never been executed turned out to be correct as written, which
+is a pleasant answer and not one that could have been assumed.
+
+What the run *did* find was in code that has nothing to do with the C ABI.
+
+**Self-assignment was corrupting memory, on every platform.** `Assign` destroyed
+the destination before evaluating the source, so `s = s` released a buffer and
+then cloned it. glibc turns that into `SIGABRT`; Windows' heap had been quietly
+handing back a plausible answer, which is why 727 tests and a C++ oracle had
+never noticed. It is not a Linux bug — Linux is only where it stopped being
+silent, which is exactly the argument §6 makes for running the second platform.
+
+The fix is `assignment_overlaps` / `assign_overlapping` in `translate.rs`: when
+an assignment reads the local it writes, the new value is built *before* the old
+one is destroyed. Aggregates clone into a stack temporary and then move the bytes
+home; a one-word handle needs no temporary, because the clone is already a
+separate value by the time the old handle is released. A move out of the very
+place being assigned is a no-op — the value is already there, and destroying
+would release the thing being moved in.
+
+The overlap test is **by local, not by place**: `a[i] = a[j]` takes the careful
+path whether or not the indices turn out to be equal. Paying for a temporary is
+the better half of that trade — the other half is proving two indices differ,
+and being wrong about it corrupts the heap.
+
+`rvalue_reads` is the third member of the `rvalue_places` / `rvalue_operands`
+pair, and the same warning applies: **an rvalue that reads a place and is not
+listed there will miscompile a self-assignment.** It errs towards naming a place
+that is not really read, because that costs a temporary, and the other error
+costs a use-after-free.
+
+**`_strdup` is not a POSIX name.** `tests/cstring.test.ts` declared the MSVC
+spelling; POSIX standardised it unprefixed. A `declare` names the C symbol
+exactly, so this was the test's bug and not the compiler's — the test now picks
+the spelling per platform.
+
+### Two things to know before running this on a fresh Linux box
+
+**The runtime staticlib must be built before the suite, not inside it.** A cold
+`cargo` build of `packages/runtime/native` takes tens of seconds, `buildRuntime`
+caches per process, and so whichever test compiled first was billed for a fixture
+against bun's five-second timeout — and lost. Worse, the timeout killed cargo
+mid-build, so the report was "building the Goblin runtime failed:" followed by
+nothing at all, on three tests in `modules.test.ts` that had no connection to the
+runtime. `bunfig.toml` now preloads `tests/preload.ts`, which builds it once with
+no test's clock running.
+
+**`cargo fmt --all --check` is not clean on rustfmt 1.9.** Ten hunks in
+`goblin-codegen`, all of them rustfmt changing its own mind about line breaking
+since the version this was written against. None is a real formatting problem and
+none was introduced by the System V work — reformatting was left alone rather
+than mixed into an unrelated change, which is the rule this file's neighbours
+already follow. Whoever bumps the pinned toolchain should do it in a commit of
+its own.

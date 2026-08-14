@@ -107,7 +107,7 @@ $ goblin-forge init
   src/main.ts
 
 $ goblin-forge
-built ./bin/app.exe
+built ./bin/app          # .exe on Windows
 ```
 
 A build script *exports* what it wants built rather than calling the compiler:

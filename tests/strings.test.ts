@@ -388,6 +388,42 @@ describe("what a string is made of", () => {
     expect(result.leaked).toBe(0);
   });
 
+  test("assigning a string to itself is not a self-destruction", async () => {
+    // The same corner as `struct edges > assigning a struct to itself`, on a
+    // bare handle rather than through a field. Release-then-copy on the same
+    // storage clones a buffer that has already been freed; glibc aborts on it
+    // and a quieter allocator hands back a plausible wrong answer, which is
+    // the version that survives to somebody else's machine.
+    const result = await run(
+      "string-self-assign",
+      `export function main(): i32 {
+         let s: string = "a" + "b";
+         s = s;
+         console.log(s);
+         return 0;
+       }\n`,
+    );
+    expect(result.stdout).toBe("ab\n");
+    expect(result.leaked).toBe(0);
+  });
+
+  test("moving a string to itself leaves it where it is", async () => {
+    // `move` out of the very place being assigned: the value is already in
+    // its destination, so the assignment has nothing to copy and — the part
+    // that bites — nothing it is allowed to destroy.
+    const result = await run(
+      "string-self-move",
+      `export function main(): i32 {
+         let s: string = "a" + "b";
+         s = move(s);
+         console.log(s);
+         return 0;
+       }\n`,
+    );
+    expect(result.stdout).toBe("ab\n");
+    expect(result.leaked).toBe(0);
+  });
+
   test("a `let` grown inside a loop does not accumulate", async () => {
     const result = await run(
       "string-grow",

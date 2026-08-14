@@ -1,0 +1,5 @@
+# The runtime staticlib is a fixture of the whole suite, not the work of
+# whichever test compiles first. See tests/preload.ts for what goes wrong when
+# it is left to be built inside a test's five-second timeout.
+[test]
+preload = ["./tests/preload.ts"]

@@ -291,6 +291,39 @@ describe("value semantics", () => {
     expect(result.leaked).toBe(0);
   });
 
+  test("assigning an array to itself is not a self-destruction", async () => {
+    const result = await run(
+      "vec-self-assign",
+      `export function main(): i32 {
+         let xs: string[] = ["a" + "b", "c" + "d"];
+         xs = xs;
+         console.log(xs[0] + xs[1]);
+         return 0;
+       }\n`,
+    );
+    expect(result.stdout).toBe("abcd\n");
+    expect(result.leaked).toBe(0);
+  });
+
+  test("an element may be assigned from another element of the same array", async () => {
+    // `xs[i] = xs[j]` reads and writes the same buffer, and whether the two
+    // indices are equal is not something the compiler can see. The element
+    // being overwritten is therefore copied *before* the old one is released,
+    // for both `i === j` and `i !== j` — the first is the one that corrupts.
+    const result = await run(
+      "vec-element-self-assign",
+      `export function main(): i32 {
+         let xs: string[] = ["a" + "b", "c" + "d"];
+         xs[0] = xs[0];
+         xs[1] = xs[0];
+         console.log(xs[0] + " " + xs[1]);
+         return 0;
+       }\n`,
+    );
+    expect(result.stdout).toBe("ab ab\n");
+    expect(result.leaked).toBe(0);
+  });
+
   test("a by-value parameter is a copy the callee cannot write back through", async () => {
     const result = await run(
       "vec-by-value",

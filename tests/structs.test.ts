@@ -257,6 +257,27 @@ describe("struct edges", () => {
     expect(result.leaked).toBe(0);
   });
 
+  test("assigning an owning field from itself is not a self-destruction", async () => {
+    // The same corner one projection down. The destination is `s.s` rather
+    // than `s`, so a check that only compared whole locals would miss it —
+    // which is why the overlap test is by local and not by place.
+    const result = await run(
+      "struct-field-self-assign",
+      `interface S { s: string; t: string; }
+
+       export function main(): i32 {
+         let s: S = { s: "a" + "b", t: "c" + "d" };
+         s.s = s.s;
+         s.t = s.s;
+         console.log(\`\${s.s} \${s.t}\`);
+         return 0;
+       }\n`,
+    );
+    expect(result.stdout).toBe("ab ab\n");
+    expect(result.exitCode).toBe(0);
+    expect(result.leaked).toBe(0);
+  });
+
   test("a field may be read straight off a returned temporary", async () => {
     const result = await run(
       "struct-temp-field",

@@ -566,6 +566,13 @@ impl<'a, 'm, M: ClifModule> FunctionTranslator<'a, 'm, M> {
                 self.write_place_with(place, value, moving)
             }
             Statement::Assign { place, rvalue } => {
+                // When the source overlaps the destination, the old value
+                // cannot be destroyed first: the copy that follows would read
+                // the buffer it has just released. `s = s` is the small case;
+                // `a[i] = a[j]` is the one that does not look like it.
+                if self.assignment_overlaps(place, rvalue)? {
+                    return self.assign_overlapping(place, rvalue);
+                }
                 self.destroy_before_overwrite(place)?;
                 let moving = is_move(rvalue);
                 let value = self.rvalue(rvalue)?;
@@ -598,6 +605,85 @@ impl<'a, 'm, M: ClifModule> FunctionTranslator<'a, 'm, M> {
         }
         let old = self.read_raw(place)?;
         self.destroy(ty, old)
+    }
+
+    /// Whether an assignment reads the local it is about to write.
+    ///
+    /// Conservative on purpose: sharing the local is enough, and the
+    /// projections are not compared. `a[i] = a[j]` takes the careful path
+    /// whether or not `i` and `j` turn out to be the same index, because
+    /// paying for a temporary is a better trade than proving they differ.
+    ///
+    /// Only owning types can be hurt by the order, so a trivial destination
+    /// answers `false` and keeps the direct path.
+    fn assignment_overlaps(&mut self, place: &Place, rvalue: &Rvalue) -> Result<bool> {
+        let ty = self.place_type(place)?;
+        if !self.category(ty)?.needs_drop() {
+            return Ok(false);
+        }
+        Ok(rvalue_reads(rvalue)
+            .iter()
+            .any(|read| read.local == place.local))
+    }
+
+    /// Assign when the source overlaps the destination.
+    ///
+    /// The new value is built *before* the old one is destroyed. That
+    /// reordering is the whole content of this path: with the destruction
+    /// first, `s = s` frees the buffer it is about to clone, and the clone
+    /// reads freed memory — which a hardened allocator turns into an abort and
+    /// a quiet one turns into a plausible wrong answer.
+    fn assign_overlapping(&mut self, place: &Place, rvalue: &Rvalue) -> Result<()> {
+        let ty = self.place_type(place)?;
+
+        // A move out of the very place being assigned leaves the value where
+        // it already is. Nothing is copied, and nothing may be destroyed —
+        // destroying here would release the value being moved *in*.
+        if let Rvalue::Use(Operand::Move(source)) = rvalue {
+            if source == place {
+                return Ok(());
+            }
+            // A move whose source is a different part of the same local would
+            // have to destroy the parts it does not cover, which no node here
+            // can express. It is unreachable from source — a whole-local move
+            // into one of its own fields could not typecheck — so this is a
+            // broken compiler rather than a program to report on.
+            internal_error!("a move overlapping its destination without being it");
+        }
+
+        if matches!(self.layouts.repr(ty)?, Repr::Aggregate) {
+            // Field by field into a temporary, so every clone reads the old
+            // value while it is still alive. The bytes then move into place,
+            // which hands over what the temporary owns without cloning twice.
+            let layout = self.layouts.layout(ty)?;
+            let pointer = self.target.pointer_type();
+            let slot = self.builder.create_sized_stack_slot(StackSlotData::new(
+                StackSlotKind::ExplicitSlot,
+                layout.size.max(1),
+                layout.align.clamp(1, 16).trailing_zeros() as u8,
+            ));
+            let temp = self.builder.ins().stack_addr(pointer, slot, 0);
+            let Some(source) = self.rvalue(rvalue)? else {
+                return Ok(());
+            };
+            self.copy_aggregate(temp, source, ty)?;
+            self.destroy_before_overwrite(place)?;
+            let (address, offset) = self.place_address(place)?;
+            let dest = if offset == 0 {
+                address
+            } else {
+                self.builder.ins().iadd_imm_s(address, i64::from(offset))
+            };
+            self.copy_bytes(dest, temp, layout.size, layout.align);
+            return Ok(());
+        }
+
+        // A one-word handle needs no storage of its own: by the time the old
+        // handle is released, the clone is already a separate value.
+        let value = self.rvalue(rvalue)?;
+        let old = self.read_raw(place)?;
+        self.destroy(ty, old)?;
+        self.write_place_with(place, value, false)
     }
 
     fn drop_place(
@@ -2626,6 +2712,29 @@ fn rvalue_operands(rvalue: &Rvalue) -> Vec<&Operand> {
         | Rvalue::InterfaceIsNull(_)
         | Rvalue::TryClass { .. } => Vec::new(),
     }
+}
+
+/// Every place an rvalue *reads*, whether directly or through an operand.
+///
+/// This is what decides whether an assignment's source overlaps its
+/// destination, so it errs towards naming a place rather than omitting one:
+/// a place listed here that is not really read costs a temporary, and one
+/// omitted that is read costs a use-after-free.
+///
+/// `Ref` and `AddrOf` are not reads — they take an address without touching
+/// what is behind it — and their results are trivial types, which the caller
+/// has already excluded.
+fn rvalue_reads(rvalue: &Rvalue) -> Vec<&Place> {
+    let mut out = rvalue_places(rvalue);
+    for operand in rvalue_operands(rvalue) {
+        match operand {
+            Operand::Copy(place) | Operand::Move(place) | Operand::Borrow(place) => {
+                out.push(place);
+            }
+            Operand::Const(_) => {}
+        }
+    }
+    out
 }
 
 /// A stable hash, for naming a literal's data symbol.

@@ -21,6 +21,17 @@ name: CI
 # machine once milestones 9 and 10 land, which is the point at which the answer
 # actually matters.
 #
+# That check has since been done by hand, on Ubuntu with GCC 15: the whole suite
+# passes from a cold checkout and every case in `tests/struct-abi.test.ts` passed
+# on the first attempt. The classification was right as written. What the run
+# caught was elsewhere — self-assignment released a value before cloning it, on
+# every platform, and only glibc was strict enough to say so. NOTES.md, "What the
+# first System V run found", has the details.
+#
+# Which is the argument for turning this back on rather than against it: the
+# second platform paid for itself in a bug that was never about the second
+# platform.
+#
 # The file stays because it is the *record* of how to check this, and the note
 # below about why the Linux job is not routine coverage is the part worth
 # keeping. Turn it back on by restoring the push/pull_request triggers.
