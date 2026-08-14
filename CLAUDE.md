@@ -13,6 +13,10 @@ how the thing is put together and which mistakes it is designed to prevent.
 - [`DECISIONS.md`](DECISIONS.md) — the answers to the questions the plan left
   open, recorded as they land.
 - [`NOTES.md`](NOTES.md) — working notes.
+- [`POINTER-ERASURE.md`](POINTER-ERASURE.md) — an open question worked out far
+  enough to probe and then set aside. Read it before designing `erase()` /
+  `reify<U>()`, because the obvious answer to both halves is wrong in a way that
+  is silent.
 
 Read the relevant section before changing behaviour it describes. Where the
 code and a document disagree, that is a bug in one of them, and which one is a
