@@ -215,6 +215,13 @@ export function collectClasses(
     if (source.isDeclarationFile || program.isSourceFileFromExternalLibrary(source)) continue;
     for (const statement of source.statements) {
       if (!ts.isClassDeclaration(statement)) continue;
+      // A `declare class` is an opaque handle, not a class this build lays
+      // out: there are no bodies to emit and no field offsets anything here
+      // could know. `types.ts` erases it to `{ kind: "opaque" }`, and
+      // analysing it as a class would only produce diagnostics about members
+      // that were never meant to be lowered — `private _opaque: never` being
+      // exactly the idiom people write.
+      if ((ts.getCombinedModifierFlags(statement) & ts.ModifierFlags.Ambient) !== 0) continue;
       if (statement.name === undefined) {
         report.unsupported(statement, "an anonymous class");
         continue;

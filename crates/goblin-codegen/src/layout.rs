@@ -163,6 +163,19 @@ impl<'m> Layouts<'m> {
             // `{ i32, i8 }` occupies five bytes and strides by eight. Using the
             // size here overlaps the array with itself, and it prints plausible
             // values for a while before it stops (REWRITE-PLAN §10).
+            // No layout, by construction. Every operation that would need one
+            // is refused by the frontend, so reaching here is a missing check
+            // rather than a program to report on — and answering "zero bytes,
+            // aligned to one" instead would be a stride of nothing and a
+            // `dealloc` with the wrong size (see `TyKind::Opaque`).
+            TyKind::Opaque(name) => {
+                let name = self.module.sym(*name).unwrap_or("an opaque type");
+                internal_error!(
+                    "`{name}` is declared elsewhere and has no layout here. \
+                     Something asked for its size; the frontend should have \
+                     refused whatever did."
+                );
+            }
             TyKind::FixedArray { element, length } => {
                 let element_layout = self.layout(*element)?;
                 Layout {
@@ -261,6 +274,16 @@ impl<'m> Layouts<'m> {
             | TyKind::Struct(_)
             | TyKind::Class(_)
             | TyKind::Interface(_) => Repr::Aggregate,
+            // An opaque type has no value form at all — it is only ever
+            // something a pointer points at — so there is no register that
+            // holds one and no aggregate to travel by address.
+            TyKind::Opaque(name) => {
+                let name = self.module.sym(*name).unwrap_or("an opaque type");
+                internal_error!(
+                    "`{name}` is declared elsewhere and has no value form here. \
+                     Only a `Pointer<{name}>` can travel."
+                );
+            }
         })
     }
 }
@@ -308,6 +331,7 @@ pub fn render_type(module: &Module, ty: TyId) -> String {
             .and_then(|def| module.sym(def.name))
             .unwrap_or("<interface>")
             .into(),
+        TyKind::Opaque(name) => module.sym(*name).unwrap_or("<opaque>").into(),
         TyKind::FixedArray { element, length } => {
             format!("FixedArray<{}, {length}>", render_type(module, *element))
         }

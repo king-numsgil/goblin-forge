@@ -396,6 +396,8 @@ function tyKind(module: Module, kind: TyKind): string {
       return sym(module, module.classes[kind.value]?.name ?? 0);
     case "Interface":
       return sym(module, module.interfaces[kind.value]?.name ?? 0);
+    case "Opaque":
+      return sym(module, kind.value);
   }
 }
 

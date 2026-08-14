@@ -361,6 +361,37 @@ int main(void) {
     // banner's prose about hidden return pointers.
     expect(lib.headerText).not.toContain("hidden(");
   });
+
+  test("an opaque handle is forward-declared, and C round-trips one", async () => {
+    // The header has to say `struct FILE *` and nothing more: the layout
+    // belongs to whoever hands the handle out, and emitting a definition would
+    // be this build inventing one. A C compiler is the arbiter of whether an
+    // incomplete type is spelled correctly, so it gets the last word.
+    const lib = await library(
+      "lib-opaque",
+      `declare class FILE { private _opaque: never }
+
+       export function passThrough(f: Pointer<FILE>): Pointer<FILE> { return f; }\n`,
+    );
+
+    expect(lib.headerText).toContain("struct FILE;");
+    expect(lib.headerText).toContain("struct FILE* passThrough(struct FILE* p0);");
+
+    const stdout = buildConsumer({
+      ...lib,
+      main: `#include <stdio.h>
+#include "main.h"
+
+int main(void) {
+  /* An incomplete type is all C needs to hold the pointer. */
+  struct FILE *given = (struct FILE *) 0x1234;
+  printf("%d\\n", passThrough(given) == given);
+  return 0;
+}
+`,
+    });
+    expect(stdout).toBe("1\n");
+  }, CMAKE_TIMEOUT);
 });
 
 describe("library targets", () => {

@@ -92,6 +92,19 @@ export function emitHeader(module: Module, options: HeaderOptions): string {
     out.push("");
   }
 
+  const opaques = opaqueNames(module);
+  if (opaques.length > 0) {
+    out.push("/* Handles this library passes through but does not define.");
+    out.push(" *");
+    out.push(" * Incomplete on purpose: the layout belongs to whoever hands the handle");
+    out.push(" * out, and neither this header nor the Goblin side has ever seen it. A");
+    out.push(" * pointer to an incomplete type is all C needs, and all anyone should");
+    out.push(" * want — dereferencing one is a compile error on both sides.");
+    out.push(" */");
+    for (const name of opaques) out.push(`struct ${identifier(name)};`);
+    out.push("");
+  }
+
   const structs = emitStructs(module);
   if (structs.length > 0) {
     out.push(...structs);
@@ -291,6 +304,11 @@ function spell(module: Module, kind: TyKind): string {
     // callback an ordinary noun everywhere it appears.
     case "FnPtr":
       return fnPtrName(kind.value);
+    // An incomplete type, forward-declared in the preamble. C asks for nothing
+    // more than this to hold a pointer to one, which is the only way one ever
+    // appears.
+    case "Opaque":
+      return `struct ${identifier(sym(module, kind.value))}`;
     case "Array":
     case "Class":
     case "Interface":
@@ -323,6 +341,32 @@ function usesStrings(module: Module): boolean {
     if (signature === undefined) return false;
     return signature.params.some((param) => isStr(param.ty)) || isStr(signature.ret);
   });
+}
+
+/**
+ * Every opaque handle an exported signature mentions, in first-seen order.
+ *
+ * Only ever reached through a pointer — an opaque type has no value form — so
+ * this looks one level through `Pointer` and no further.
+ */
+function opaqueNames(module: Module): string[] {
+  const names: string[] = [];
+  const note = (ty: number): void => {
+    const kind = module.types[ty]?.kind;
+    if (kind?.kind !== "Pointer") return;
+    const pointee = module.types[kind.value]?.kind;
+    if (pointee?.kind !== "Opaque") return;
+    const name = sym(module, pointee.value);
+    if (!names.includes(name)) names.push(name);
+  };
+  for (const func of module.funcs) {
+    if (func.linkage !== "Export") continue;
+    const signature = module.sigs[func.sig];
+    if (signature === undefined) continue;
+    for (const param of signature.params) note(param.ty);
+    note(signature.ret);
+  }
+  return names;
 }
 
 function sym(module: Module, id: number): string {

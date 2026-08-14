@@ -675,6 +675,167 @@ describe("allocArray and freeArray", () => {
   });
 });
 
+/**
+ * `declare class FILE { private _opaque: never }` — C's incomplete type, and
+ * the shape every library that hands out a handle uses.
+ *
+ * The pointer travels; the pointee does not exist here. What makes this worth
+ * a suite of its own is that nothing about it fails loudly on its own: a type
+ * with no layout, represented as a zero-field struct or a `void` pointee, has
+ * a size of zero and an alignment of one, and answers every layout question
+ * wrongly rather than refusing it (POINTER-ERASURE.md). So every refusal below
+ * is a check somebody had to write, and the backend panics if one is missing.
+ */
+describe("opaque handles", () => {
+  const FILE = `declare class FILE { private _opaque: never }
+
+       declare function fopen(path: CString, mode: CString): Pointer<FILE> | null;
+       declare function fputs(text: CString, stream: Pointer<FILE>): i32;
+       declare function fclose(stream: Pointer<FILE>): i32;
+`;
+
+  test("a handle round-trips through the C library that owns it", async () => {
+    const result = await run(
+      "opaque-file",
+      `${FILE}
+       export function main(): i32 {
+         const f = fopen(cstring("/tmp/gf-opaque-suite.txt"), cstring("w"));
+         if (f === null) { console.log("open failed"); return 1; }
+         fputs(cstring("through FILE*"), f);
+         fclose(f);
+         console.log("ok");
+         return 0;
+       }\n`,
+    );
+    expect(result.stdout).toBe("ok\n");
+    // Nothing here is Goblin's: the handle is a borrow, and the runtime
+    // correctly counts none of it.
+    expect(result.leaked).toBe(0);
+  });
+
+  test("`address` works, because it is the one member needing no layout", async () => {
+    const result = await run(
+      "opaque-address",
+      `${FILE}
+       export function main(): i32 {
+         const f = fopen(cstring("/tmp/gf-opaque-suite.txt"), cstring("r"));
+         if (f === null) { return 1; }
+         const at: usize = f.address;
+         console.log(at === 0 ? "null" : "not null");
+         fclose(f);
+         return 0;
+       }\n`,
+    );
+    expect(result.stdout).toBe("not null\n");
+  });
+
+  test("handles of different types do not convert into each other", async () => {
+    // The property the `private` member buys, and the reason this is a class
+    // rather than a type alias: tsc keeps them apart nominally even though the
+    // two declarations are identical.
+    await expectRejected(
+      "opaque-nominal",
+      `declare class FILE { private _opaque: never }
+       declare class DIR { private _opaque: never }
+       declare function fopen(p: CString, m: CString): Pointer<FILE>;
+       declare function closedir(d: Pointer<DIR>): i32;
+
+       export function main(): i32 {
+         return closedir(fopen(cstring("/tmp/x"), cstring("r")));
+       }\n`,
+      "TS2345",
+    );
+  });
+
+  test("a pointer to one lives in a struct and in an array", async () => {
+    const result = await run(
+      "opaque-containers",
+      `${FILE}
+       interface Handle { stream: Pointer<FILE>; tag: i32; }
+
+       export function main(): i32 {
+         const f = fopen(cstring("/tmp/gf-opaque-suite.txt"), cstring("r"));
+         if (f === null) { return 1; }
+         const h: Handle = { stream: f, tag: 7 };
+         const all: Pointer<FILE>[] = [];
+         all.push(h.stream);
+         console.log(\`\${all.length} \${h.tag}\`);
+         fclose(h.stream);
+         return 0;
+       }\n`,
+    );
+    expect(result.stdout).toBe("1 7\n");
+    expect(result.leaked).toBe(0);
+  });
+
+  test("every operation that would need the layout is GF0302", async () => {
+    // The list is the point. Each of these reached the backend and panicked
+    // before the checks existed, because none of them refuses itself.
+    for (const [name, body] of [
+      ["index", "const g = f[1];"],
+      ["offset", "const g = f.offset(1);"],
+      ["deref", "const r = f.deref();"],
+      ["free", "f.free();"],
+      ["freeArray", "f.freeArray();"],
+    ] as const) {
+      await expectRejected(
+        `opaque-refuse-${name}`,
+        `declare class FILE { private _opaque: never }
+         declare function fopen(p: CString, m: CString): Pointer<FILE>;
+
+         export function main(): i32 {
+           const f = fopen(cstring("/tmp/x"), cstring("r"));
+           ${body}
+           return 0;
+         }\n`,
+        "GF0302",
+      );
+    }
+  });
+
+  test("allocating one is GF0302 — there is no size to ask for", async () => {
+    for (const [name, body] of [
+      ["alloc", "const p = alloc<FILE>();"],
+      ["allocArray", "const p = allocArray<FILE>(4);"],
+      ["sizeOf", "const n: usize = sizeOf<FILE>();"],
+      ["alignOf", "const n: usize = alignOf<FILE>();"],
+    ] as const) {
+      await expectRejected(
+        `opaque-alloc-${name}`,
+        `declare class FILE { private _opaque: never }
+
+         export function main(): i32 {
+           ${body}
+           return 0;
+         }\n`,
+        "GF0302",
+      );
+    }
+  });
+
+  test("holding one by value is GF0302, wherever it is held", async () => {
+    for (const [name, source] of [
+      ["param", "function take(f: FILE): i32 { return 0; }"],
+      ["return", "declare function get(): FILE;"],
+      // A struct lays its fields out inline, so a field with no size gives
+      // the struct no size. Reached through a signature, because an interface
+      // nothing mentions is never erased at all.
+      ["field", "interface S { f: FILE; }\n         export function take(s: S): i32 { return 0; }"],
+      ["nestedField", "interface In { f: FILE; }\n         interface Out { i: In; }\n         export function take(o: Out): i32 { return 0; }"],
+      ["array", "declare function all(): FILE[];"],
+    ] as const) {
+      await expectRejected(
+        `opaque-value-${name}`,
+        `declare class FILE { private _opaque: never }
+         ${source}
+
+         export function main(): i32 { return 0; }\n`,
+        "GF0302",
+      );
+    }
+  });
+});
+
 describe("what is still missing", () => {
   test("`erase` and `reify` are GF0001", async () => {
     for (const [name, body] of [

@@ -10,10 +10,10 @@
 // module, which is the failure mode this whole arrangement exists to remove.
 
 /** Fingerprint of the wire format these bindings were generated from. */
-export const SCHEMA_FINGERPRINT = 0x63a11b7913cd4b31n;
+export const SCHEMA_FINGERPRINT = 0xf416c6ee2b03269bn;
 
 /** The same value as hex, for comparing against the addon's report. */
-export const SCHEMA_FINGERPRINT_HEX = "63a11b7913cd4b31";
+export const SCHEMA_FINGERPRINT_HEX = "f416c6ee2b03269b";
 
 // ---------------------------------------------------------------------------
 // postcard writer
@@ -196,6 +196,7 @@ export type TyKind =
   | { kind: "Struct"; value: StructId }
   | { kind: "Class"; value: ClassId }
   | { kind: "Interface"; value: InterfaceId }
+  | { kind: "Opaque"; value: SymId }
 ;
 
 export type Category =
@@ -612,6 +613,11 @@ export function writeTyKind(w: Writer, v: TyKind): void {
     case "Interface": {
       w.varint(13);
       writeInterfaceId(w, v.value);
+      break;
+    }
+    case "Opaque": {
+      w.varint(14);
+      writeSymId(w, v.value);
       break;
     }
   }

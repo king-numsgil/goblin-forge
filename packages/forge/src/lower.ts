@@ -1203,6 +1203,7 @@ class Lowerer {
       // which is the property that mattered when this was refused.
       const type = this.erase(parameter, this.#checker.getTypeAtLocation(parameter));
       if (type === undefined) return undefined;
+      if (!this.requireValueForm(type, parameter, "a parameter")) return undefined;
       params.push({ name: parameter.name.text, type });
     }
     return params;
@@ -1521,6 +1522,7 @@ class Lowerer {
       }
       const type = this.erase(parameter, this.#checker.getTypeAtLocation(parameter));
       if (type === undefined) return undefined;
+      if (!this.requireValueForm(type, parameter, "a parameter")) return undefined;
       params.push({ name: parameter.name.text, type });
     }
 
@@ -1534,6 +1536,7 @@ class Lowerer {
       this.#checker.getReturnTypeOfSignature(signature),
     );
     if (returns === undefined) return undefined;
+    if (!this.requireValueForm(returns, node.type ?? node, "a return type")) return undefined;
 
     return { params, returns };
   }
@@ -1783,17 +1786,32 @@ class Lowerer {
       }
       case "interface":
         return this.#interfaceTy(type, at);
+      // No layout, and no value form — the backend panics if anything asks for
+      // either. It reaches the MIR at all so that a `Pointer<FILE>` keeps the
+      // handle's *name*, which is what the generated C header forward-declares
+      // and what a diagnostic can say out loud.
+      case "opaque":
+        return this.#mir.ty({ kind: "Opaque", value: this.#mir.sym(type.name) });
       case "reference":
         return this.#mir.ty({ kind: "Reference", value: this.tyOf(type.referent, at) });
       case "pointer":
         return this.#mir.ty({ kind: "Pointer", value: this.tyOf(type.pointee, at) });
+      // Both hold their elements **inline**, so an element with no size is not
+      // a thing either can be made of. A `Pointer<FILE>[]` is fine and is what
+      // anyone actually wants: the pointer has a size, whatever it points at.
       case "fixedArray":
+        if (!this.requireValueForm(type.element, at, "a `FixedArray` element")) {
+          return this.#mir.ty({ kind: "Void" });
+        }
         return this.#mir.ty({
           kind: "FixedArray",
           element: this.tyOf(type.element, at),
           length: BigInt(type.length),
         });
       case "array":
+        if (!this.requireValueForm(type.element, at, "an array element")) {
+          return this.#mir.ty({ kind: "Void" });
+        }
         return this.#mir.ty({ kind: "Array", value: this.tyOf(type.element, at) });
       // Always the C classification. A function pointer exists so that a call
       // site and a definition agree without sharing a declaration, and C's
@@ -1852,6 +1870,15 @@ class Lowerer {
   #structTy(type: Extract<MachineType, { kind: "struct" }>, at: ts.Node): TyId {
     const existing = this.#structs.get(type.name);
     if (existing !== undefined) return existing;
+
+    // Fields are laid out **inline**, so a field with no size gives the struct
+    // no size either — and the failure would land in the backend's layout pass
+    // with no field to point at. `Pointer<FILE>` is the field anyone means.
+    for (const field of type.fields) {
+      if (!this.requireValueForm(field.type, at, `the field \`${field.name}\``)) {
+        return this.#mir.ty({ kind: "Void" });
+      }
+    }
 
     // Reserved before the fields are erased, so a struct that (later) contains
     // a pointer to itself does not recurse forever.
@@ -2018,6 +2045,54 @@ class Lowerer {
       `${what} is not supported yet. This is a gap in the compiler rather than a ` +
         `rule about the language.`,
     );
+  }
+
+  /**
+   * Refuse an operation that needs a layout the build does not have.
+   *
+   * Every arithmetic or allocation operation on a pointer needs the pointee's
+   * size: a stride to index by, a size and an alignment to hand `dealloc`. An
+   * opaque handle has none of those, and the backend **panics** rather than
+   * inventing them — so this is the check that turns the panic into a sentence
+   * with a line number. POINTER-ERASURE.md is the long form: a type with no
+   * layout does not refuse these operations on its own, because the obvious
+   * stand-ins (a zero-field struct, `void`) have a size of zero and an
+   * alignment of one, and answer every question wrongly rather than not at all.
+   *
+   * Returns `false` when it reported, so callers read as a guard.
+   */
+  /**
+   * Refuse an opaque handle used as a *value*.
+   *
+   * A `Pointer<FILE>` travels; a `FILE` does not exist here at all. Without
+   * this the type reaches the backend, which has no register width and no
+   * aggregate size for it and panics — correctly, but with no line to point at.
+   */
+  requireValueForm(type: MachineType, at: ts.Node, what: string): boolean {
+    if (type.kind !== "opaque") return true;
+    this.error(
+      at,
+      "GF0302",
+      `\`${type.name}\` is declared elsewhere, so this build has never seen its ` +
+        `fields and cannot hold one: ${what} needs a size, and there is none. ` +
+        `Use \`Pointer<${type.name}>\`, which is an address and is exactly what ` +
+        "the library hands out.",
+    );
+    return false;
+  }
+
+  requireKnownLayout(type: MachineType, at: ts.Node, what: string): boolean {
+    if (type.kind !== "opaque") return true;
+    this.error(
+      at,
+      "GF0302",
+      `\`${type.name}\` is declared elsewhere, so this build does not know its ` +
+        `size or its alignment, and ${what} needs both. A \`Pointer<${type.name}>\` ` +
+        "can be passed, returned, stored and compared — that is the whole point of " +
+        "an opaque handle — but only the library that defines it can do arithmetic " +
+        "on one.",
+    );
+    return false;
   }
 
   error(node: ts.Node, code: string, message: string): void {
@@ -4180,6 +4255,12 @@ class BodyLowerer {
     access: ts.PropertyAccessExpression,
     pointer: Extract<MachineType, { kind: "pointer" }>,
   ): Width {
+    // Before the per-member answers: every one of them needs the pointee's
+    // layout, so an opaque handle gets the reason it is actually being
+    // refused rather than advice to use `p[0]`, which is refused too.
+    if (!this.#outer.requireKnownLayout(pointer.pointee, access, `\`${access.name.text}\``)) {
+      return ERROR;
+    }
     switch (access.name.text) {
       case "free":
       case "freeArray":
@@ -5027,6 +5108,8 @@ class BodyLowerer {
     }
     const type = this.#outer.erase(argument, this.#outer.checker.getTypeAtLocation(argument));
     if (type === undefined) return undefined;
+    const query = size ? NATIVE_SIZE_OF : NATIVE_ALIGN_OF;
+    if (!this.#outer.requireKnownLayout(type, argument, `\`${query}\``)) return undefined;
     const ty = this.#outer.tyOf(type, argument);
     return this.#temporaryTyped(expression, USIZE, size ? { kind: "SizeOf", value: ty } : { kind: "AlignOf", value: ty });
   }
@@ -5051,7 +5134,15 @@ class BodyLowerer {
     // operation with two spellings rather than two operations: the storage is
     // default-initialised either way, so `free()` has something well-defined
     // to destroy in both.
-    if (klass === undefined) return this.#allocDefault(expression, natural);
+    if (klass === undefined) {
+      if (
+        natural.kind === "pointer" &&
+        !this.#outer.requireKnownLayout(natural.pointee, expression, "`alloc`")
+      ) {
+        return undefined;
+      }
+      return this.#allocDefault(expression, natural);
+    }
 
     if (!ts.isIdentifier(klass)) {
       this.#outer.error(
@@ -5348,6 +5439,9 @@ class BodyLowerer {
       return undefined;
     }
     const element = natural.pointee;
+    if (!this.#outer.requireKnownLayout(element, expression, "`allocArray`")) {
+      return undefined;
+    }
 
     // The same trap `alloc<T>()` refuses, for the same reason: there is nowhere
     // to put the constructor's arguments, so every element would be allocated
@@ -5475,6 +5569,21 @@ class BodyLowerer {
     access: ts.PropertyAccessExpression,
     subject: Typed,
   ): Typed | undefined {
+    // Every one of these needs the pointee's layout — a stride to step by, a
+    // size and an alignment to return to the allocator, a shape to read
+    // through. `address` is the member that does not, which is why it is a
+    // property and not here.
+    if (
+      subject.type.kind === "pointer" &&
+      !this.#outer.requireKnownLayout(
+        subject.type.pointee,
+        access,
+        `\`${access.name.text}\``,
+      )
+    ) {
+      return undefined;
+    }
+
     switch (access.name.text) {
       case "free":
         return this.#free(expression, subject);
@@ -5848,6 +5957,8 @@ class BodyLowerer {
       this.#outer.unsupported(expression, `indexing a \`${renderType(subject.type)}\``);
       return undefined;
     }
+    // Indexing is `base + i * stride`, and an opaque handle has no stride.
+    if (!this.#outer.requireKnownLayout(element, expression, "indexing")) return undefined;
 
     const base = array?.place ?? this.#placeOfSubject(expression, subject);
     if (base === undefined) return undefined;

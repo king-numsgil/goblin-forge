@@ -8,7 +8,7 @@ person — or the next session — can pick it up cold.
   answers. Read it before re-litigating anything.
 - This file is *where the code is* and *what it does not do yet*.
 
-727 TS tests, 6 Rust test binaries, `tsc --noEmit` clean, `cargo clippy
+736 TS tests, 6 Rust test binaries, `tsc --noEmit` clean, `cargo clippy
 --workspace --all-targets -D warnings` clean. `cargo fmt --all --check` is clean
 on the toolchain this was written against but not on rustfmt 1.9 — see the last
 section for why that was left alone.
@@ -94,6 +94,9 @@ assignment, `.length`, and **classes**: fields, a constructor, methods,
 vtable, slicing on copy, and a generated destructor that chains to the base's.
 Accessibility modifiers (`public`/`private`/`protected`) are accepted and
 erased — tsc enforces them, and they have no run-time meaning.
+
+**Opaque handles**: `declare class FILE { private _opaque: never }`, C's
+incomplete type, usable only as `Pointer<FILE>`. See below.
 
 ## What it does not have yet
 
@@ -435,6 +438,44 @@ rather than inside an operand is invisible to it — the result is
 answer. `rvalue_places` is the list to extend, and it sits next to
 `rvalue_operands` for that reason. `Rvalue::Len` had this bug from milestone 5
 and nothing reached it until class references existed.
+
+---
+
+## Opaque handles
+
+`declare class FILE { private _opaque: never }` — the shape the prelude's
+pointer commentary has always recommended, now implemented. **An ambient class
+is an opaque handle**, and that is the whole rule: `declare` says the
+implementation lives elsewhere, and for a class the layout lives there too. The
+private member is tsc's business — it is what keeps two handles nominal — and
+the compiler never reads it.
+
+It is its own MIR variant, `TyKind::Opaque(SymId)`, and the reason is worth not
+losing. The tempting representations for "no layout" are a zero-field struct or
+a `Void` pointee, and **both have a layout**: size 0, align 1. So `p[i]` strides
+by nothing, `offset` adds nothing, and `free` hands `dealloc` a size of zero —
+a corrupt heap rather than a diagnostic. POINTER-ERASURE.md worked this out for
+`erase()` and it applies unchanged here. `Opaque` has no layout at all, so
+`layouts.layout` and `layouts.repr` both `internal_error!` on one, and a missed
+frontend check is a loud panic instead of a silent wrong answer.
+
+Which matters, because **nothing here refuses itself**. Eleven operations
+reached the backend and panicked before the checks existed. They are now
+`GF0302`, from two guards in `lower.ts`:
+
+- `requireKnownLayout` — `p[i]`, `p.offset(n)`, `p.deref()`, `p.free()`,
+  `p.freeArray()`, `alloc`, `allocArray`, `sizeOf`, `alignOf`.
+- `requireValueForm` — a parameter, a return, a struct field (including a
+  nested one), an array or `FixedArray` element.
+
+`p.address` is deliberately still allowed: it is the one member that never
+needed a size. If you add a member to `CorePointer<T>`, ask which of those two
+guards it belongs behind — the answer is almost never "neither".
+
+The C header forward-declares each handle it mentions (`struct FILE;`) and
+spells the pointer `struct FILE*`, which is C's own incomplete type.
+`tests/libraries.test.ts` builds a real C consumer against one, because a C
+compiler is the arbiter of whether that spelling is right.
 
 ---
 

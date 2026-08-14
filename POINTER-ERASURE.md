@@ -21,8 +21,12 @@ the ambient surface — there is deliberately no `any` and no unchecked cast
 between two concrete pointee types." The uses are C-shaped: callback userdata,
 `memcpy`, a `qsort` comparator, any C parameter declared `void *`.
 
-Opaque *handles* are not one of the uses. Those already have a better answer —
-`declare class MetisWorld { private _opaque: never }` — and stay nominal.
+Opaque *handles* are not one of the uses. Those have a better answer —
+`declare class MetisWorld { private _opaque: never }` — which stays nominal and
+is **implemented**: it erases to `TyKind::Opaque`, a type with no layout, and
+every operation that would need one is `GF0302` rather than a wrong stride. The
+`free()` hazard below is the reason it is its own MIR variant instead of a
+`void` pointee.
 
 ## Why they are stuck
 

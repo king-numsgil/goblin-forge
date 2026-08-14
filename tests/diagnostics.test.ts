@@ -196,6 +196,22 @@ describe("codes raised by a program", () => {
     );
   });
 
+  test("GF0302 — an operation needing a layout the build does not have", async () => {
+    await expectRejected(
+      "diag-0302",
+      // An opaque handle can be passed and returned all day. What it cannot do
+      // is arithmetic, because there is no stride to do it with.
+      `declare class FILE { private _opaque: never }
+       declare function fopen(p: CString, m: CString): Pointer<FILE>;
+
+       export function main(): i32 {
+         const f = fopen(cstring("/tmp/x"), cstring("r"));
+         return cast<i32>(f.offset(1).address);
+       }\n`,
+      "GF0302",
+    );
+  });
+
   test("GF9004 — an output kind the backend does not know", async () => {
     const { result } = await compileSource(
       "diag-9004",
@@ -241,6 +257,7 @@ describe("the registry and the suite agree", () => {
       "GF0235",
       "GF0236",
       "GF0301",
+      "GF0302",
       "GF9004",
       "GF9005",
     ]);

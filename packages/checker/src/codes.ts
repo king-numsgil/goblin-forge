@@ -210,6 +210,25 @@ export const CODES = {
       "it is only `export` that makes this a boundary.",
   },
 
+  GF0302: {
+    title: "this type's layout is not known here",
+    explanation:
+      "`declare class FILE { private _opaque: never }` is an opaque handle — " +
+      "C's incomplete type. `declare` says the implementation lives somewhere " +
+      "else, and for a class that means the *layout* does too: this build has " +
+      "never seen the fields and cannot know the size or the alignment.\n\n" +
+      "A `Pointer<FILE>` is still a perfectly good value. It can be passed, " +
+      "returned, stored, compared and checked against null, and `.address` " +
+      "works — that is the whole job of a handle, and none of it needs to know " +
+      "what is behind the pointer.\n\n" +
+      "What is refused is everything that does: `p[i]` and `p.offset(n)` need a " +
+      "stride, `p.free()` and `p.freeArray()` need the size and alignment the " +
+      "allocator was given, `p.deref()` needs a shape to read through, and " +
+      "`alloc`, `allocArray`, `sizeOf` and `alignOf` need the layout by name. " +
+      "The library that defines the type is the one that can do those; call the " +
+      "function it gives you for it — `fclose`, not `free`.",
+  },
+
   // -- The compiler is broken ----------------------------------------------
   GF9001: {
     title: "the backend could not decode the MIR",

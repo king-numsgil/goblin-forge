@@ -148,6 +148,24 @@ pub enum TyKind {
     /// filling two registers. That is a *later* optimisation, and an isolated
     /// one: it changes how the pair travels, not what it is.
     Interface(InterfaceId),
+    /// A type declared elsewhere, whose layout this build does not know.
+    ///
+    /// `declare class FILE { private _opaque: never }` — C's incomplete type,
+    /// and the shape every library that hands out a handle uses. It carries a
+    /// name and nothing else, because there is nothing else to carry.
+    ///
+    /// **It has no layout, and asking for one is an [`InternalError`].** That
+    /// is the whole reason it is its own variant rather than a zero-field
+    /// struct or a `Void` pointee: those have a size of zero and an alignment
+    /// of one, so `p[i]` would stride by nothing and `free` would hand the
+    /// allocator a size of zero — a corrupt heap rather than a diagnostic.
+    /// POINTER-ERASURE.md is the long version of why that matters.
+    ///
+    /// So it may only ever appear as the pointee of a [`TyKind::Pointer`],
+    /// which is one machine word whatever it points at. The frontend refuses
+    /// every operation that would need the layout; this variant is what makes
+    /// a missed refusal a loud panic instead of a silent wrong answer.
+    Opaque(SymId),
 }
 
 /// REWRITE-PLAN §4.1: every type has a category, and the category decides copy

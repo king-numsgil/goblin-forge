@@ -116,6 +116,24 @@ export type MachineType =
        */
       readonly kind: "class";
       readonly name: string;
+    }
+  | {
+      /**
+       * A type declared elsewhere, whose layout this build does not know.
+       *
+       * `declare class FILE { private _opaque: never }` — C's incomplete type.
+       * A `declare` says the implementation is somewhere else, and for a class
+       * that means the *layout* is somewhere else too, so there is nothing here
+       * to lay out and nothing to construct.
+       *
+       * It has no value form. The only thing it can appear as is the pointee of
+       * a `Pointer<T>`, which is one machine word whatever it points at, and
+       * every operation that would need the layout is refused with a code and a
+       * line. The private member in the idiom above is tsc's business, not this
+       * compiler's: it is what stops two handles converting to each other.
+       */
+      readonly kind: "opaque";
+      readonly name: string;
     };
 
 export interface StructField {
@@ -250,6 +268,12 @@ export function erase(checker: ts.TypeChecker, type: ts.Type): MachineType {
   // Before the object case, and before `isArrayType`: a class is nominal, so
   // it must not fall through to structural erasure and become an aggregate
   // that happens to have the same fields.
+  // Ambient first: a `declare class` is a handle whose layout lives in someone
+  // else's build, and treating it as a class would ask this one to lay out
+  // fields it cannot see.
+  const opaqueName = ambientClassNameOf(type);
+  if (opaqueName !== null) return { kind: "opaque", name: opaqueName };
+
   const className = classNameOf(type);
   if (className !== null) return { kind: "class", name: className };
 
@@ -278,6 +302,19 @@ export function erase(checker: ts.TypeChecker, type: ts.Type): MachineType {
       // `Reference<C>` for a class: one machine word holding the object's
       // address. This is how polymorphism travels — a `Reference<Base>` keeps
       // the dynamic type, where copying to a `Base` value would slice it.
+      // A `Reference<T>` is bound once and dereferenced without asking, which
+      // needs a layout to read through. An opaque handle has none, and the
+      // type that carries an address you may only pass along is `Pointer<T>`.
+      const opaqueReferent = ambientClassNameOf(referent);
+      if (opaqueReferent !== null) {
+        throw new ErasureError(
+          `\`${opaqueReferent}\` is declared elsewhere, so this build does not ` +
+            `know its layout and a \`Reference<${opaqueReferent}>\` has nothing ` +
+            `to read through. Use \`Pointer<${opaqueReferent}>\`, which is an ` +
+            "address and nothing more.",
+          "GF0302",
+        );
+      }
       const className = classNameOf(referent);
       if (className !== null) {
         return { kind: "reference", referent: { kind: "class", name: className } };
@@ -392,6 +429,26 @@ export function classNameOf(type: ts.Type): string | null {
   if (symbol === undefined) return null;
   const declaration = symbol.declarations?.find(ts.isClassDeclaration);
   return declaration?.name?.text ?? null;
+}
+
+/**
+ * The name of an **ambient** class — one written `declare class` — or `null`.
+ *
+ * `declare` is TypeScript's word for "the implementation is elsewhere", and for
+ * a class that means the layout is elsewhere too: there are no method bodies to
+ * emit, no constructor to run, no field offsets that anything here could know.
+ * So an ambient class is an opaque handle type rather than a class this
+ * compiler lays out, and that is the whole rule — the `private _opaque: never`
+ * in the idiom is what makes *tsc* keep two handles apart, and this compiler
+ * never reads it.
+ */
+export function ambientClassNameOf(type: ts.Type): string | null {
+  const symbol = type.getSymbol();
+  if (symbol === undefined) return null;
+  const declaration = symbol.declarations?.find(ts.isClassDeclaration);
+  if (declaration === undefined || declaration.name === undefined) return null;
+  const ambient = ts.getCombinedModifierFlags(declaration) & ts.ModifierFlags.Ambient;
+  return ambient === 0 ? null : declaration.name.text;
 }
 
 /**
@@ -640,6 +697,7 @@ export function renderType(type: MachineType): string {
       return `Reference<${renderType(type.referent)}>`;
     case "struct":
     case "class":
+    case "opaque":
       return type.name;
     case "interface":
       return `Reference<${type.name}>`;

@@ -79,6 +79,8 @@ function tyKindKey(kind: TyKind): string {
       return `Class:${kind.value}`;
     case "Interface":
       return `Interface:${kind.value}`;
+    case "Opaque":
+      return `Opaque:${kind.value}`;
   }
 }
 
@@ -149,6 +151,11 @@ export class ModuleBuilder {
       case "Int":
       case "Float":
       case "FnPtr":
+        return "Trivial";
+      // A type with no value form: nothing here is ever copied or destroyed,
+      // because nothing here is ever *held*. Only a `Pointer` to one travels,
+      // and that pointer is a `Borrow` in its own right.
+      case "Opaque":
         return "Trivial";
       // An address into somebody else's storage. Never destroyed — that is the
       // entire content of `Reference<T>`, and of `CString`: the compiler has
