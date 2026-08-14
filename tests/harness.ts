@@ -46,6 +46,25 @@ function scratchRoot(): string {
   return SCRATCH;
 }
 
+/**
+ * An absolute path inside the scratch directory, for a test whose program has
+ * to touch a real file.
+ *
+ * **Forward slashes on every platform, deliberately.** The result is pasted
+ * into Goblin source as a string literal, and a Windows path written with
+ * backslashes would be read as escape sequences rather than separators —
+ * `C:\temp\gf` carries a tab and a form feed. Every C runtime accepts `/`,
+ * including the MSVC one, so the separator is the portable half of the problem
+ * and the drive letter takes care of itself.
+ *
+ * It lives here rather than in a test because `.scratch` is the harness's
+ * directory: it is wiped once per test process, so a file written into it is
+ * cleaned on the next run like everything else.
+ */
+export function scratchPath(name: string): string {
+  return posix(join(scratchRoot(), name));
+}
+
 let counter = 0;
 
 export interface ProjectOptions {

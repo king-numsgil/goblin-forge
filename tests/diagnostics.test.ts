@@ -205,7 +205,7 @@ describe("codes raised by a program", () => {
        declare function fopen(p: CString, m: CString): Pointer<FILE>;
 
        export function main(): i32 {
-         const f = fopen(cstring("/tmp/x"), cstring("r"));
+         const f = fopen(cstring("never-opened"), cstring("r"));
          return cast<i32>(f.offset(1).address);
        }\n`,
       "GF0302",

@@ -14,7 +14,7 @@
 
 import { describe, expect, test } from "bun:test";
 
-import { compileSource, errorCodes, expectRejected, run } from "./harness.ts";
+import { compileSource, errorCodes, expectRejected, run, scratchPath } from "./harness.ts";
 
 describe("alloc and free", () => {
   test("constructs on the heap, and the object works", async () => {
@@ -694,12 +694,16 @@ describe("opaque handles", () => {
        declare function fclose(stream: Pointer<FILE>): i32;
 `;
 
+  // Each of these opens its *own* file, in the harness's scratch directory
+  // rather than in `/tmp`, which does not exist on Windows. `scratchPath`
+  // hands back forward slashes on every platform, because the result is
+  // pasted into Goblin source where a backslash would be an escape.
   test("a handle round-trips through the C library that owns it", async () => {
     const result = await run(
       "opaque-file",
       `${FILE}
        export function main(): i32 {
-         const f = fopen(cstring("/tmp/gf-opaque-suite.txt"), cstring("w"));
+         const f = fopen(cstring("${scratchPath("opaque-roundtrip.txt")}"), cstring("w"));
          if (f === null) { console.log("open failed"); return 1; }
          fputs(cstring("through FILE*"), f);
          fclose(f);
@@ -718,7 +722,7 @@ describe("opaque handles", () => {
       "opaque-address",
       `${FILE}
        export function main(): i32 {
-         const f = fopen(cstring("/tmp/gf-opaque-suite.txt"), cstring("r"));
+         const f = fopen(cstring("${scratchPath("opaque-address.txt")}"), cstring("w"));
          if (f === null) { return 1; }
          const at: usize = f.address;
          console.log(at === 0 ? "null" : "not null");
@@ -741,7 +745,7 @@ describe("opaque handles", () => {
        declare function closedir(d: Pointer<DIR>): i32;
 
        export function main(): i32 {
-         return closedir(fopen(cstring("/tmp/x"), cstring("r")));
+         return closedir(fopen(cstring("never-opened"), cstring("r")));
        }\n`,
       "TS2345",
     );
@@ -754,7 +758,7 @@ describe("opaque handles", () => {
        interface Handle { stream: Pointer<FILE>; tag: i32; }
 
        export function main(): i32 {
-         const f = fopen(cstring("/tmp/gf-opaque-suite.txt"), cstring("r"));
+         const f = fopen(cstring("${scratchPath("opaque-containers.txt")}"), cstring("w"));
          if (f === null) { return 1; }
          const h: Handle = { stream: f, tag: 7 };
          const all: Pointer<FILE>[] = [];
@@ -784,7 +788,7 @@ describe("opaque handles", () => {
          declare function fopen(p: CString, m: CString): Pointer<FILE>;
 
          export function main(): i32 {
-           const f = fopen(cstring("/tmp/x"), cstring("r"));
+           const f = fopen(cstring("never-opened"), cstring("r"));
            ${body}
            return 0;
          }\n`,
