@@ -30,6 +30,10 @@
         "typescript": "~6.0.3",
       },
     },
+    "packages/cli": {
+      "name": "@goblin-forge/cli",
+      "version": "0.1.0",
+    },
     "packages/forge": {
       "name": "goblin-forge",
       "version": "0.1.0",
@@ -55,6 +59,8 @@
     "@goblin-forge/backend": ["@goblin-forge/backend@workspace:packages/backend"],
 
     "@goblin-forge/checker": ["@goblin-forge/checker@workspace:packages/checker"],
+
+    "@goblin-forge/cli": ["@goblin-forge/cli@workspace:packages/cli"],
 
     "@goblin-forge/runtime": ["@goblin-forge/runtime@workspace:packages/runtime"],
 
