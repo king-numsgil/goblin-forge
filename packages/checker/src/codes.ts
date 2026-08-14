@@ -70,10 +70,13 @@ export const CODES = {
   GF0004: {
     title: "entry point is missing or has the wrong shape",
     explanation:
-      "A `bin` target needs an exported function named `main`. It is called " +
-      "by the platform C runtime, so its signature has to look like C's: it " +
-      "returns `i32`, and it takes either no arguments or the conventional " +
-      "argc/argv pair.",
+      "A `bin` target needs an exported function named `main`, returning " +
+      "`i32` — it is called by the platform C runtime and its result becomes " +
+      "the process exit code. It takes either nothing or one `string[]`. The " +
+      "C runtime really does hand over an argc/argv pair, and the emitted " +
+      "`main` really does take one; the runtime copies it into an array " +
+      "before your first statement, so there is no version of this signature " +
+      "that names the two halves separately.",
   },
 
   // -- Widths and arithmetic ----------------------------------------------

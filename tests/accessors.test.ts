@@ -226,6 +226,126 @@ describe("setters", () => {
   });
 });
 
+describe("static accessors", () => {
+  test("a static getter is a static method with property syntax", async () => {
+    const result = await run(
+      "acc-static-get",
+      `class Limits {
+         static get max(): i32 { return 42; }
+       }
+
+       export function main(): i32 {
+         return Limits.max;
+       }\n`,
+    );
+    expect(result.exitCode).toBe(42);
+  });
+
+  test("a static getter may compute, and may call another static", async () => {
+    const result = await run(
+      "acc-static-get-computed",
+      `class Config {
+         static base(): i32 { return 20; }
+         static get doubled(): i32 { return Config.base() * 2; }
+         // Not \`name\`: tsc reserves it on a constructor function (TS2699).
+         static get label(): string { return "cfg" + "g"; }
+       }
+
+       export function main(): i32 {
+         console.log(Config.label);
+         return Config.doubled;
+       }\n`,
+    );
+    expect(result.stdout).toBe("cfgg\n");
+    expect(result.exitCode).toBe(40);
+    expect(result.leaked).toBe(0);
+  });
+
+  test("a static setter is called by assignment", async () => {
+    // With no static *fields* yet there is nowhere for one to keep a value, so
+    // what this pins is the call: the right-hand side arrives as the argument.
+    const result = await run(
+      "acc-static-set",
+      `class Log {
+         static set line(value: string) { console.log(value); }
+       }
+
+       export function main(): i32 {
+         Log.line = "a" + "b";
+         return 0;
+       }\n`,
+    );
+    expect(result.stdout).toBe("ab\n");
+    expect(result.leaked).toBe(0);
+  });
+
+  test("a static accessor is inherited by name, and emitted once", async () => {
+    const result = await run(
+      "acc-static-inherited",
+      `class Base { static get tag(): i32 { return 7; } }
+       class Derived extends Base { }
+
+       export function main(): i32 {
+         return Base.tag + Derived.tag;
+       }\n`,
+    );
+    expect(result.exitCode).toBe(14);
+  });
+
+  test("a static accessor and an instance one of the same name do not collide", async () => {
+    // Two symbols, `C$get$x` and `C$static$get$x`, because they are two
+    // functions — one takes a receiver and the other does not.
+    const result = await run(
+      "acc-static-and-instance",
+      `class Both {
+         get x(): i32 { return 1; }
+         static get x(): i32 { return 2; }
+       }
+
+       export function main(): i32 {
+         const b = new Both();
+         return b.x * 10 + Both.x;
+       }\n`,
+    );
+    expect(result.exitCode).toBe(12);
+  });
+
+  test("reading a static setter that has no getter is refused", async () => {
+    const diagnostic = await expectRejected(
+      "acc-static-set-only",
+      `class Log {
+         static set line(value: i32) { }
+       }
+
+       export function main(): i32 {
+         return Log.line;
+       }\n`,
+      "GF0002",
+    );
+    expect(diagnostic.message).toContain("static setter");
+  });
+
+  test("writing a static getter that has no setter is tsc's error", async () => {
+    // Better than the compiler's own: a read-only property is a thing
+    // TypeScript understands, so the editor underlines it while you type. The
+    // compiler keeps its check anyway, per REWRITE-PLAN §8 — it is simply not
+    // reachable from a program tsc accepts.
+    const { result } = await compileSource(
+      "acc-static-get-only",
+      `class Limits {
+         static get max(): i32 { return 1; }
+       }
+
+       export function main(): i32 {
+         Limits.max = 2;
+         return 0;
+       }\n`,
+    );
+    expect(result.ok).toBe(false);
+    expect(errorCodes(result)).toContain("TS2540");
+  });
+});
+
 describe("what an accessor is not", () => {
   test("a name is a field or an accessor, and tsc refuses both", async () => {
     // The compiler refuses it too — the field would be unreachable and every
@@ -244,13 +364,21 @@ describe("what an accessor is not", () => {
     expect(errorCodes(result)).toContain("TS2300");
   });
 
-  test("a `static` accessor is GF0001", async () => {
-    await expectRejected(
-      "acc-static",
+  test("an accessor cannot be taken as a function pointer", async () => {
+    // A getter is reached by *naming* it, so there is no expression that means
+    // "the function" — `C.x` already calls it. Taking its address would need a
+    // syntax the language does not have, and tsc agrees: `C.x` has the
+    // accessor's return type, not a function type.
+    const { result } = await compileSource(
+      "acc-as-fnptr",
       `class A { static get tag(): i32 { return 1; } }
 
-       export function main(): i32 { return 0; }\n`,
-      "GF0001",
+       export function main(): i32 {
+         const f: () => i32 = A.tag;
+         return f();
+       }\n`,
     );
+    expect(result.ok).toBe(false);
+    expect(errorCodes(result).length).toBeGreaterThan(0);
   });
 });

@@ -68,6 +68,13 @@ export interface ProjectOptions {
    * depends on, and there is no other way to build one that does.
    */
   readonly compilerOptions?: Readonly<Record<string, unknown>>;
+  /**
+   * Arguments handed to the compiled program, for `main(args: string[])`.
+   *
+   * They arrive *after* `argv[0]`, which the platform supplies and the runtime
+   * keeps — so a program given `["a"]` sees a two-element array.
+   */
+  readonly args?: readonly string[];
 }
 
 export interface Project {
@@ -188,7 +195,7 @@ export async function run(
     throw new Error(`the compiler reported success but ${result.output} does not exist`);
   }
 
-  const child = spawnSync(result.output, [], {
+  const child = spawnSync(result.output, [...(options.args ?? [])], {
     encoding: "utf8",
     // The runtime prints its live-allocation count on exit when this is set.
     env: { ...process.env, GOBLIN_LEAK_CHECK: "1" },

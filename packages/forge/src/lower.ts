@@ -204,6 +204,14 @@ const RUNTIME = {
    * be adopted as a `string`; the length would have nowhere to live.
    */
   fromCString: "gf_string_from_cstr",
+  /**
+   * `gf_args(argc, argv)` — the platform's arguments, as an owned `string[]`.
+   *
+   * In the runtime because the elements do not come from the program: each is
+   * a C string of the platform's that has to be copied before anything here can
+   * own it. What comes back is an ordinary array handle.
+   */
+  args: "gf_args",
 } as const;
 
 /** `console` methods, and which stream each writes to. */
@@ -413,12 +421,23 @@ class Scopes {
 /** Where `break` and `continue` go, and what they have to release to get there. */
 interface LoopFrame {
   readonly breakTo: BlockId;
-  readonly continueTo: BlockId;
+  /**
+   * Where `continue` goes, or `undefined` when this frame is not a loop.
+   *
+   * A `switch` and a labelled block are both breakable and neither is
+   * continuable, which is exactly JavaScript's rule: `continue` inside a
+   * `switch` continues the loop *around* the switch. Recording that as an
+   * absent target rather than as a second kind of frame means the search skips
+   * it for free.
+   */
+  readonly continueTo: BlockId | undefined;
   /**
    * The scope the loop statement itself lives in. Everything opened inside it
    * is released on the way out; it is not.
    */
   readonly enclosing: Scope;
+  /** The label this frame was introduced with, for `break outer`. */
+  readonly label?: string | undefined;
 }
 
 export function lower(
@@ -890,7 +909,7 @@ class Lowerer {
    * asked of whichever half exists, so that `x.name` and `x.name = v` agree
    * about what `name` is.
    */
-  accessorType(accessor: ClassMethod): MachineType | undefined {
+  accessorType(accessor: ClassMethod | StaticMethod): MachineType | undefined {
     const declaration = accessor.declaration;
     if (ts.isSetAccessorDeclaration(declaration)) {
       const parameter = declaration.parameters[0];
@@ -1048,11 +1067,17 @@ class Lowerer {
         });
       }
 
-      for (const method of info.statics.values()) {
-        // Inherited statics belong to the class that declared them, and the
-        // symbol says which — so emitting only the ones whose symbol starts
-        // with this class's name emits each exactly once.
-        if (method.symbol !== `${info.name}$${method.name}`) continue;
+      for (const method of [
+        ...info.statics.values(),
+        // A static accessor is a static method reached with property syntax, so
+        // it is emitted here rather than beside the instance accessors: no
+        // receiver, no slot, nothing to dispatch on.
+        ...info.staticGetters.values(),
+        ...info.staticSetters.values(),
+      ]) {
+        // Inherited statics belong to the class that declared them and are
+        // emitted once, there.
+        if (method.owner !== info.name) continue;
         const params = this.#classFnParams(method.declaration);
         if (params === undefined) continue;
         const signature = this.#checker.getSignatureFromDeclaration(method.declaration);
@@ -1171,13 +1196,11 @@ class Lowerer {
         this.unsupported(parameter, "an optional, rest, or defaulted parameter");
         return undefined;
       }
-      if (ts.canHaveModifiers(parameter) && (ts.getModifiers(parameter)?.length ?? 0) > 0) {
-        // `constructor(private x: i32)` declares a field as a side effect of a
-        // parameter. It is a real convenience and it is also a second place
-        // fields come from; one place is worth more here than the shorthand.
-        this.unsupported(parameter, "a parameter property");
-        return undefined;
-      }
+      // `constructor(private x: i32)` is still an ordinary parameter here. The
+      // *field* it also declares is collected in `classes.ts`, beside the ones
+      // written the long way, and the constructor assigns one from the other —
+      // so there is one place fields come from and one place they are laid out,
+      // which is the property that mattered when this was refused.
       const type = this.erase(parameter, this.#checker.getTypeAtLocation(parameter));
       if (type === undefined) return undefined;
       params.push({ name: parameter.name.text, type });
@@ -1273,13 +1296,34 @@ class Lowerer {
     const signature = this.#signature(statement);
     if (signature === undefined) return undefined;
 
+    const isEntry = isPublic && name === "main" && statement.body !== undefined;
+    if (isEntry && !this.#checkEntryPoint(statement, signature)) return undefined;
+    // `main(args: string[])` is emitted as C's `main(int, char **)`, because
+    // that is what the platform runtime calls. The `string[]` is built from the
+    // pair by the first thing the body does — so the written signature and the
+    // emitted one differ here, and only here.
+    const entryArgs = isEntry && signature.params.length === 1;
+    const emitted: readonly { name: string; type: MachineType }[] = entryArgs
+      ? [
+          { name: "argc", type: { kind: "scalar", name: "i32" } },
+          {
+            name: "argv",
+            type: { kind: "pointer", pointee: { kind: "pointer", pointee: { kind: "scalar", name: "u8" } } },
+          },
+        ]
+      : signature.params;
+
     // An exported function is a boundary, so what crosses it has to be
     // something both sides can agree about. Checked here rather than left to
     // the backend's classifier: that one panics, and REWRITE-PLAN §8 says a
     // program tsc accepted must never reach it.
+    //
+    // `main` is checked against the *emitted* pair, not the written array: a
+    // `string[]` cannot cross the C boundary and does not have to, because it
+    // never does.
     if (isPublic && statement.body !== undefined) {
       let crossable = true;
-      signature.params.forEach((param, index) => {
+      emitted.forEach((param, index) => {
         const at = statement.parameters[index] ?? statement;
         if (!this.#checkCBoundary(param.type, at, `the parameter \`${param.name}\``)) {
           crossable = false;
@@ -1301,17 +1345,13 @@ class Lowerer {
     // only the convention changes.
     const addressTaken = this.#addressTaken.has(statement);
     const sig = this.#mir.sig({
-      params: signature.params.map((param) => ({
+      params: emitted.map((param) => ({
         ty: this.tyOf(param.type, statement),
         name: null,
       })),
       ret: this.tyOf(signature.returns, statement),
       abi: isPublic || addressTaken ? "C" : "Internal",
     });
-
-    if (isPublic && name === "main" && !this.#checkEntryPoint(statement, signature)) {
-      return undefined;
-    }
 
     const builder = this.#mir.declareFunction({
       name: this.#symbolOf(statement, name, isPublic),
@@ -1510,16 +1550,44 @@ class Lowerer {
       );
       return false;
     }
-    if (signature.params.length !== 0) {
+    if (signature.params.length === 0) return true;
+
+    const only = signature.params[0];
+    if (
+      signature.params.length !== 1 ||
+      only === undefined ||
+      only.type.kind !== "array" ||
+      only.type.element.kind !== "string"
+    ) {
       this.error(
-        node.parameters[0] ?? node,
+        node.parameters[1] ?? node.parameters[0] ?? node,
         "GF0004",
-        "`main` takes no arguments yet. The argc/argv pair arrives with arrays " +
-          "and strings, in milestone 5.",
+        "`main` takes either nothing or one `string[]`: " +
+          "`export function main(args: string[]): i32`. C's `argc`/`argv` pair " +
+          "is what the platform hands over, and the runtime turns it into an " +
+          "array before your first statement — there is nothing here to pass " +
+          "the two halves to separately.",
       );
       return false;
     }
     return true;
+  }
+
+  /**
+   * Whether this function is the entry point *and* asked for its arguments.
+   *
+   * The distinction matters twice: `main`'s emitted signature is C's
+   * `(int, char **)` rather than the one that was written, and its first
+   * statement is the call that turns the two into a `string[]`.
+   */
+  #entryTakesArgs(record: FnRecord): boolean {
+    return (
+      this.#requireMain &&
+      record.kind === "defined" &&
+      record.exported &&
+      record.name === "main" &&
+      record.signature.params.length === 1
+    );
   }
 
   /**
@@ -1639,20 +1707,28 @@ class Lowerer {
     const record = this.#functions.get(this.#keyOf(node, node.name!.text));
     if (record === undefined || node.body === undefined) return;
 
-    const scopes = new Scopes();
-    record.signature.params.forEach((param, index) => {
-      scopes.declare(param.name, {
-        local: LocalId(index + 1),
-        type: param.type,
-        ty: this.tyOf(param.type, node),
-      });
-    });
-
     // The entry point, and only for a `bin`: a library has no `main` of its
     // own, and the program that does have one is somebody else's.
     const isEntry =
       this.#requireMain && record.kind === "defined" && record.exported && record.name === "main";
-    new BodyLowerer(this, builder, scopes, record.signature.returns).run(node.body, isEntry);
+    // `main(args)` is emitted as `(argc, argv)`, so its declared parameter is
+    // not a parameter at all — it is a local the body builds before its first
+    // statement, and nothing may be bound to locals 1 and 2 under its name.
+    const entryArgs = isEntry && this.#entryTakesArgs(record);
+
+    const scopes = new Scopes();
+    if (!entryArgs) {
+      record.signature.params.forEach((param, index) => {
+        scopes.declare(param.name, {
+          local: LocalId(index + 1),
+          type: param.type,
+          ty: this.tyOf(param.type, node),
+        });
+      });
+    }
+
+    const lowerer = new BodyLowerer(this, builder, scopes, record.signature.returns);
+    lowerer.run(node.body, isEntry, entryArgs ? record.signature.params[0] : undefined);
   }
 
   // -- shared services -----------------------------------------------------
@@ -2194,7 +2270,11 @@ class BodyLowerer {
   }
 
 
-  run(body: ts.Block, isEntry = false): void {
+  run(
+    body: ts.Block,
+    isEntry = false,
+    entryArgs?: { name: string; type: MachineType },
+  ): void {
     this.#current = this.#f.block();
     // The runtime's one initialisation point, before the program's first
     // statement. An ordinary `extern "C"` call like every other runtime call —
@@ -2202,10 +2282,48 @@ class BodyLowerer {
     // linked because it is *called* rather than because a platform happened to
     // pull in a constructor.
     if (isEntry) this.#callRuntimeVoid(body, RUNTIME.init);
+    if (entryArgs !== undefined) this.#bindEntryArgs(body, entryArgs);
     this.#block(body);
     // Falling off the end of a `void` function is a return. tsc has already
     // rejected falling off the end of one that returns a value.
     if (this.#current !== undefined) this.#seal({ kind: "Return" });
+  }
+
+  /**
+   * `main(args: string[])` — build the array from the pair the platform passed.
+   *
+   * Locals 1 and 2 are `argc` and `argv`: `main`'s emitted signature is C's,
+   * because the C runtime is what calls it. The declared parameter is bound
+   * here instead, to a **binding** rather than a parameter — which is what
+   * makes the array `main`'s to release, exactly as a `const` would be. That is
+   * also the only honest arrangement: the strings are copies of the platform's
+   * bytes, so somebody has to own them, and the scope that named them is the
+   * obvious somebody.
+   */
+  #bindEntryArgs(at: ts.Node, param: { name: string; type: MachineType }): void {
+    const ty = this.#outer.tyOf(param.type, at);
+    const argc: Typed = {
+      operand: { kind: "Copy", value: placeOf(LocalId(1)) },
+      type: { kind: "scalar", name: "i32" },
+    };
+    const argv: Typed = {
+      operand: { kind: "Copy", value: placeOf(LocalId(2)) },
+      type: { kind: "pointer", pointee: { kind: "pointer", pointee: { kind: "scalar", name: "u8" } } },
+    };
+    const built = this.#callRuntime(at as ts.Expression, RUNTIME.args, [argc, argv], param.type);
+    if (built === undefined) return;
+
+    const local = this.#f.addLocal({ ty, storage: "Owned", name: param.name });
+    this.#push({ kind: "StorageLive", value: local });
+    // `Move`, not `Copy`: the runtime built this array for us and nothing else
+    // holds it. Copying would duplicate every string and leave the original to
+    // the temporary's drop, which is an allocation per argument for nothing.
+    this.#push({
+      kind: "Init",
+      place: placeOf(local),
+      rvalue: { kind: "Use", value: { kind: "Move", value: this.#placeOfSubject(at, built)! } },
+    });
+    this.#scopes.declare(param.name, { local, type: param.type, ty });
   }
 
   /** Call a `void` runtime function that takes nothing, purely for its effect. */
@@ -2286,6 +2404,30 @@ class BodyLowerer {
    * rule.
    */
   #fieldInitialisers(info: ClassInfo): void {
+    // Parameter properties first, so that a field initialiser may read one:
+    // `class C { double = this.x * 2; constructor(private x: i32) {} }` only
+    // means anything in this order. They are assignments from a parameter
+    // rather than from an expression, so there is no full-expression to open —
+    // and they are **copies**, because the caller still owns the argument and
+    // releases it when the call ends.
+    for (const field of info.parameterProperties) {
+      const index = info.fields.indexOf(field);
+      const binding = this.#scopes.lookup(field.name);
+      if (index < 0 || binding === undefined) continue;
+      const value: Typed = {
+        operand: { kind: "Copy", value: placeOf(binding.local) },
+        type: field.type,
+      };
+      this.#push({
+        kind: "Assign",
+        place: {
+          local: LocalId(1),
+          projection: [{ kind: "Deref" }, { kind: "Field", value: FieldId(index) }],
+        },
+        rvalue: { kind: "Use", value: this.#forStorage(value) },
+      });
+    }
+
     for (const field of info.initialisedFields) {
       const initialiser = field.declaration.initializer;
       if (initialiser === undefined) continue;
@@ -2346,7 +2488,11 @@ class BodyLowerer {
     if (ts.isVariableStatement(statement)) return this.#declaration(statement);
     if (ts.isIfStatement(statement)) return this.#if(statement);
     if (ts.isWhileStatement(statement)) return this.#while(statement);
+    if (ts.isDoStatement(statement)) return this.#doWhile(statement);
     if (ts.isForStatement(statement)) return this.#for(statement);
+    if (ts.isForOfStatement(statement)) return this.#forOf(statement);
+    if (ts.isSwitchStatement(statement)) return this.#switch(statement);
+    if (ts.isLabeledStatement(statement)) return this.#labelled(statement);
     if (ts.isBreakStatement(statement)) return this.#break(statement);
     if (ts.isContinueStatement(statement)) return this.#continue(statement);
     if (ts.isBlock(statement)) return this.#block(statement);
@@ -2436,25 +2582,68 @@ class BodyLowerer {
     );
   }
 
+  /**
+   * The frame `break` or `continue` leaves through.
+   *
+   * Innermost first, and a label names one further out. `continue` skips
+   * frames with no continue target, which is how `continue` inside a `switch`
+   * reaches the loop around it.
+   */
+  #frameFor(label: string | undefined, continuing: boolean): LoopFrame | undefined {
+    for (let i = this.#loops.length - 1; i >= 0; i -= 1) {
+      const frame = this.#loops[i]!;
+      if (continuing && frame.continueTo === undefined) continue;
+      if (label === undefined || frame.label === label) return frame;
+    }
+    return undefined;
+  }
+
   #break(statement: ts.BreakStatement): void {
-    const frame = this.#loops[this.#loops.length - 1];
-    if (frame === undefined || statement.label !== undefined) {
-      this.#outer.unsupported(statement, statement.label ? "a labelled break" : "`break` here");
+    // tsc has already rejected a label that names nothing and a bare `break`
+    // outside a breakable statement, so an absent frame here means the two
+    // disagree rather than that the program is wrong.
+    const frame = this.#frameFor(statement.label?.text, false);
+    if (frame === undefined) {
+      this.#outer.unsupported(statement, "`break` here");
       return;
     }
     this.#exitLoop(frame, frame.breakTo);
   }
 
   #continue(statement: ts.ContinueStatement): void {
-    const frame = this.#loops[this.#loops.length - 1];
-    if (frame === undefined || statement.label !== undefined) {
-      this.#outer.unsupported(
-        statement,
-        statement.label ? "a labelled continue" : "`continue` here",
-      );
+    const frame = this.#frameFor(statement.label?.text, true);
+    if (frame?.continueTo === undefined) {
+      this.#outer.unsupported(statement, "`continue` here");
       return;
     }
     this.#exitLoop(frame, frame.continueTo);
+  }
+
+  /**
+   * `outer: while (…) { … }` — a name for a loop, so `break` can leave more
+   * than the innermost one.
+   *
+   * The label is handed to whatever statement it decorates rather than being a
+   * construct of its own, so `outer: while` pushes one frame carrying the
+   * label, not two. Only a labelled *block* needs a frame here, and it needs
+   * one because `outer: { break outer; }` is legal and jumps forward.
+   */
+  #labelled(statement: ts.LabeledStatement): void {
+    const label = statement.label.text;
+    const inner = statement.statement;
+    if (ts.isWhileStatement(inner)) return this.#while(inner, label);
+    if (ts.isDoStatement(inner)) return this.#doWhile(inner, label);
+    if (ts.isForStatement(inner)) return this.#for(inner, label);
+    if (ts.isForOfStatement(inner)) return this.#forOf(inner, label);
+    if (ts.isSwitchStatement(inner)) return this.#switch(inner, label);
+
+    const enclosing = this.#scopes.innermost;
+    const exit = this.#f.block();
+    this.#loops.push({ breakTo: exit, continueTo: undefined, enclosing, label });
+    this.#statement(inner);
+    this.#loops.pop();
+    if (this.#current !== undefined) this.#seal({ kind: "Goto", value: exit });
+    this.#current = exit;
   }
 
   /**
@@ -2668,7 +2857,7 @@ class BodyLowerer {
     this.#current = joinBlock;
   }
 
-  #while(statement: ts.WhileStatement): void {
+  #while(statement: ts.WhileStatement, label?: string): void {
     const enclosing = this.#scopes.innermost;
     const head = this.#f.block();
     const body = this.#f.block();
@@ -2679,10 +2868,38 @@ class BodyLowerer {
     this.#loopCondition(statement.expression, body, exit);
 
     this.#current = body;
-    this.#loops.push({ breakTo: exit, continueTo: head, enclosing });
+    this.#loops.push({ breakTo: exit, continueTo: head, enclosing, label });
     this.#statement(statement.statement);
     this.#loops.pop();
     if (this.#current !== undefined) this.#seal({ kind: "Goto", value: head });
+
+    this.#current = exit;
+  }
+
+  /**
+   * `do { … } while (c)` — a `while` whose first test is skipped.
+   *
+   * The only structural difference is where control enters: at the body rather
+   * than at the head. `continue` still goes to the head, because the test is
+   * what a `do/while` runs between iterations — jumping to the body instead
+   * would skip it and turn the loop into an infinite one.
+   */
+  #doWhile(statement: ts.DoStatement, label?: string): void {
+    const enclosing = this.#scopes.innermost;
+    const head = this.#f.block();
+    const body = this.#f.block();
+    const exit = this.#f.block();
+
+    this.#seal({ kind: "Goto", value: body });
+
+    this.#current = body;
+    this.#loops.push({ breakTo: exit, continueTo: head, enclosing, label });
+    this.#statement(statement.statement);
+    this.#loops.pop();
+    if (this.#current !== undefined) this.#seal({ kind: "Goto", value: head });
+
+    this.#current = head;
+    this.#loopCondition(statement.expression, body, exit);
 
     this.#current = exit;
   }
@@ -2695,7 +2912,7 @@ class BodyLowerer {
    * scopes but not `i`, which is what makes the update expression still able to
    * read it.
    */
-  #for(statement: ts.ForStatement): void {
+  #for(statement: ts.ForStatement, label?: string): void {
     const outer = this.#scopes.push();
 
     if (statement.initializer !== undefined) {
@@ -2724,7 +2941,7 @@ class BodyLowerer {
     this.#current = body;
     // `continue` goes to the update, not to the condition: skipping the update
     // is how a `for` loop turns into an infinite one.
-    this.#loops.push({ breakTo: exit, continueTo: update, enclosing: outer });
+    this.#loops.push({ breakTo: exit, continueTo: update, enclosing: outer, label });
     this.#statement(statement.statement);
     this.#loops.pop();
     if (this.#current !== undefined) this.#seal({ kind: "Goto", value: update });
@@ -2739,6 +2956,291 @@ class BodyLowerer {
 
     this.#current = exit;
     this.#endScope(outer);
+    this.#scopes.pop();
+  }
+
+  /**
+   * `for (const x of xs)` — an index loop, written out.
+   *
+   * There is no iterator protocol here and there is not going to be one: this
+   * is C++'s range-`for` over a contiguous container, which is a counter, a
+   * bound and a subscript. tsc agrees without help — under `noLib` it falls
+   * back to the index signature and binds `x` to the element type, which is why
+   * `tsconfig.base.json` can target ES2015 rather than ES5.
+   *
+   * The binding is a **copy** of the element, as `for (auto x : v)` is in C++.
+   * Writing to it does not write through to the array, and for an owning
+   * element type it costs an allocation per iteration — `Reference<T>` would be
+   * the way to say otherwise, and it is not writable for most element types
+   * yet.
+   *
+   * Only over a `T[]`. A `FixedArray` is rejected by tsc itself (TS2495), so it
+   * never arrives here.
+   */
+  #forOf(statement: ts.ForOfStatement, label?: string): void {
+    if (!ts.isVariableDeclarationList(statement.initializer)) {
+      this.#outer.unsupported(statement.initializer, "a `for…of` binding that is not a declaration");
+      return;
+    }
+    const declaration = statement.initializer.declarations[0];
+    if (statement.initializer.declarations.length !== 1 || declaration === undefined) {
+      this.#outer.unsupported(statement.initializer, "more than one `for…of` binding");
+      return;
+    }
+    if (!ts.isIdentifier(declaration.name)) {
+      this.#outer.unsupported(declaration, "a destructuring binding");
+      return;
+    }
+
+    const outer = this.#scopes.push();
+    const subject = this.#value(statement.expression, undefined);
+    if (subject === undefined) {
+      this.#scopes.pop();
+      return;
+    }
+    const array = this.#asArray(statement.expression, subject);
+    if (array === undefined) {
+      this.#outer.unsupported(
+        statement.expression,
+        `\`for…of\` over a \`${renderType(subject.type)}\``,
+      );
+      this.#scopes.pop();
+      return;
+    }
+
+    const usizeTy = this.#outer.tyOf(USIZE, statement);
+    // `Owned` rather than `Temporary`: the counter is read again after the back
+    // edge, and a temporary is released at the end of the statement that made
+    // it.
+    const counter = this.#f.addLocal({ ty: usizeTy, storage: "Owned" });
+    this.#push({ kind: "StorageLive", value: counter });
+    this.#push({
+      kind: "Init",
+      place: placeOf(counter),
+      rvalue: { kind: "Use", value: { kind: "Const", value: { kind: "Int", bits: 0n, ty: usizeTy } } },
+    });
+
+    const head = this.#f.block();
+    const body = this.#f.block();
+    const update = this.#f.block();
+    const exit = this.#f.block();
+
+    this.#seal({ kind: "Goto", value: head });
+
+    // The bound is re-read every iteration, so a `push` inside the loop is seen
+    // — the same answer `for (i = 0; i < v.size(); ++i)` gives, and the same
+    // hazard, since growing reallocates and moves the elements.
+    this.#current = head;
+    const length = this.#temporaryTyped(statement, USIZE, { kind: "Len", value: array.place });
+    if (length === undefined) return;
+    const test = this.#f.addLocal({ ty: this.#boolTy(), storage: "Temporary" });
+    this.#push({ kind: "StorageLive", value: test });
+    this.#push({
+      kind: "Init",
+      place: placeOf(test),
+      rvalue: {
+        kind: "Binary",
+        op: "Lt",
+        lhs: { kind: "Copy", value: placeOf(counter) },
+        rhs: length.operand,
+      },
+    });
+    this.#seal({
+      kind: "Branch",
+      cond: { kind: "Copy", value: placeOf(test) },
+      thenBlock: body,
+      elseBlock: exit,
+    });
+
+    this.#current = body;
+    const inner = this.#scopes.push();
+    const element = array.element;
+    const local = this.#f.addLocal({
+      ty: this.#outer.tyOf(element, declaration),
+      storage: "Owned",
+      name: declaration.name.text,
+      span: this.#outer.span(declaration),
+    });
+    this.#push({ kind: "StorageLive", value: local });
+    this.#push({
+      kind: "Init",
+      place: placeOf(local),
+      rvalue: {
+        kind: "Use",
+        value: {
+          kind: "Copy",
+          value: {
+            local: array.place.local,
+            projection: [...array.place.projection, { kind: "Index", value: counter }],
+          },
+        },
+      },
+    });
+    this.#scopes.declare(declaration.name.text, {
+      local,
+      type: element,
+      ty: this.#outer.tyOf(element, declaration),
+    });
+
+    this.#loops.push({ breakTo: exit, continueTo: update, enclosing: outer, label });
+    this.#statement(statement.statement);
+    this.#loops.pop();
+    // The element binding is released at the end of every iteration, including
+    // the one `break` leaves through — `#exitLoop` releases every scope opened
+    // inside the loop, and this is one.
+    if (this.#current !== undefined) {
+      this.#endScope(inner);
+      this.#seal({ kind: "Goto", value: update });
+    }
+    this.#scopes.pop();
+
+    this.#current = update;
+    this.#push({
+      kind: "Assign",
+      place: placeOf(counter),
+      rvalue: {
+        kind: "Binary",
+        op: "Add",
+        lhs: { kind: "Copy", value: placeOf(counter) },
+        rhs: { kind: "Const", value: { kind: "Int", bits: 1n, ty: usizeTy } },
+      },
+    });
+    this.#seal({ kind: "Goto", value: head });
+
+    this.#current = exit;
+    this.#push({ kind: "StorageDead", value: counter });
+    this.#endScope(outer);
+    this.#scopes.pop();
+  }
+
+  /**
+   * `switch` — a chain of equality tests, and blocks that fall into each other.
+   *
+   * Not a jump table. The subject is evaluated once and compared against each
+   * case in order, which is what a C compiler emits for a sparse switch anyway
+   * and is the only thing that works for a `string` subject. A dense integer
+   * switch would benefit from `br_table`; that is an optimisation for later and
+   * changes no semantics.
+   *
+   * The clause blocks are chained so that a clause running off its end falls
+   * into the next one, which is what `case 1: case 2:` means. Real fallthrough
+   * between *non-empty* clauses is the same machinery, and it is
+   * `noFallthroughCasesInSwitch` in `tsconfig.base.json` that forbids it — so
+   * the rule lives with tsc, where the editor can show it, rather than here.
+   */
+  #switch(statement: ts.SwitchStatement, label?: string): void {
+    // The frame's enclosing scope is the one *outside* the switch, so that
+    // `break` releases the subject's scope on its way out. Pointing it at the
+    // switch's own scope instead would leave the subject alive on every
+    // breaking path, which for a `string` subject is a leak per iteration.
+    const enclosing = this.#scopes.innermost;
+    const scope = this.#scopes.push();
+    const clauses = statement.caseBlock.clauses;
+    const exit = this.#f.block();
+
+    // Evaluated once, into a binding, before any comparison. That is the whole
+    // difference between a `switch` and the chain of `if`s it expands to — and
+    // it has to be a *binding* rather than a temporary, because the dispatch
+    // branches away on every test and a temporary would only be released on
+    // the one path that fell through all of them.
+    let held: Typed | undefined;
+    this.#fullExpression(() => {
+      const subject = this.#value(statement.expression, undefined);
+      if (subject === undefined) return;
+      // The same rule `===` follows, and only its equality half: a `string`
+      // knows whether it equals another — the runtime compares the bytes —
+      // where an aggregate has no such question to ask, because two values
+      // with equal fields are as interchangeable as two `3`s.
+      if (!isMachineComparable(subject.type) && subject.type.kind !== "string") {
+        this.#outer.error(
+          statement.expression,
+          "GF0002",
+          `a \`switch\` compares its subject with \`===\`, and a ` +
+            `\`${renderType(subject.type)}\` cannot be compared that way. ` +
+            "Switch on one of its fields instead.",
+        );
+        return;
+      }
+      const ty = this.#outer.tyOf(subject.type, statement.expression);
+      const local = this.#f.addLocal({ ty, storage: "Owned" });
+      this.#push({ kind: "StorageLive", value: local });
+      this.#push({
+        kind: "Init",
+        place: placeOf(local),
+        rvalue: { kind: "Use", value: this.#forStorage(subject) },
+      });
+      // Declared under a name no source file can spell, so the scope releases
+      // it exactly as it releases a `const`.
+      this.#scopes.declare("switch\0subject", { local, type: subject.type, ty });
+      held = { operand: { kind: "Copy", value: placeOf(local) }, type: subject.type };
+    });
+    if (held === undefined) {
+      this.#scopes.pop();
+      return;
+    }
+
+    const blocks = clauses.map(() => this.#f.block());
+    const defaultAt = clauses.findIndex((clause) => ts.isDefaultClause(clause));
+
+    // The dispatch: one test per `case`, in order, then the `default` — which
+    // is reached only when every test failed, wherever it was written.
+    for (const [index, clause] of clauses.entries()) {
+      if (!ts.isCaseClause(clause)) continue;
+      const subject = held;
+      // The answer lives in a local declared *outside* the full-expression, so
+      // it survives the `StorageDead`s that close it. Each test is its own
+      // full-expression because a case value may allocate — `case "a" + s:`
+      // does — and the branch leaves this block, so those temporaries have to
+      // be released before the branch rather than after it.
+      const matched = this.#f.addLocal({ ty: this.#boolTy(), storage: "Temporary" });
+      this.#push({ kind: "StorageLive", value: matched });
+      let ok = false;
+      this.#fullExpression(() => {
+        const value = this.#expressionTyped(clause.expression, subject.type);
+        if (value === undefined) return;
+        this.#push({
+          kind: "Init",
+          place: placeOf(matched),
+          rvalue: {
+            kind: "Binary",
+            op: "Eq",
+            lhs: this.#forRead(subject),
+            rhs: this.#forRead(value),
+          },
+        });
+        ok = true;
+      });
+      if (!ok) {
+        this.#scopes.pop();
+        return;
+      }
+      const next = this.#f.block();
+      this.#seal({
+        kind: "Branch",
+        cond: { kind: "Copy", value: placeOf(matched) },
+        thenBlock: blocks[index]!,
+        elseBlock: next,
+      });
+      this.#current = next;
+    }
+    this.#seal({ kind: "Goto", value: defaultAt >= 0 ? blocks[defaultAt]! : exit });
+
+    this.#loops.push({ breakTo: exit, continueTo: undefined, enclosing, label });
+    for (const [index, clause] of clauses.entries()) {
+      this.#current = blocks[index];
+      const clauseScope = this.#scopes.push();
+      for (const inner of clause.statements) this.#statement(inner);
+      if (this.#current !== undefined) {
+        this.#endScope(clauseScope);
+        // Falls into the next clause, or off the end of the switch.
+        this.#seal({ kind: "Goto", value: blocks[index + 1] ?? exit });
+      }
+      this.#scopes.pop();
+    }
+    this.#loops.pop();
+
+    this.#current = exit;
+    this.#endScope(scope);
     this.#scopes.pop();
   }
 
@@ -2840,6 +3342,26 @@ class BodyLowerer {
    * owning field that value is destroyed before the new one lands.
    */
   #fieldAssignment(target: ts.PropertyAccessExpression, source: ts.Expression): void {
+    // `C.x = v` where `x` is `static set x(v)`. First, because `C` is a class
+    // name rather than an object and asking it for a value reports a name that
+    // does not resolve.
+    const staticSet = this.#staticAccessorAt(target, true);
+    if (staticSet !== undefined) {
+      this.#staticAccessorCall(target, staticSet.accessor, [source]);
+      return;
+    }
+    const staticGet = this.#staticAccessorAt(target, false);
+    if (staticGet !== undefined) {
+      this.#outer.error(
+        target,
+        "GF0002",
+        `\`${staticGet.info.name}.${target.name.text}\` is a static getter with no ` +
+          `setter, so it can be read and not written. Add ` +
+          `\`static set ${target.name.text}(value)\` if it should be.`,
+      );
+      return;
+    }
+
     const subject = this.#value(target.expression, undefined);
     if (subject === undefined) return;
 
@@ -3101,6 +3623,25 @@ class BodyLowerer {
     // path, because `C` here is a class *name* rather than an object.
     if (this.#staticAt(expression) !== undefined) return this.#erasedWidth(expression);
 
+    // `C.x` where `x` is `static get x()`: a call, and its type is what the
+    // accessor returns.
+    const staticGet = this.#staticAccessorAt(expression, false);
+    if (staticGet !== undefined) {
+      const returns = this.#outer.accessorType(staticGet.accessor);
+      return returns === undefined ? ERROR : typed(returns);
+    }
+    const staticSet = this.#staticAccessorAt(expression, true);
+    if (staticSet !== undefined) {
+      this.#outer.error(
+        expression,
+        "GF0002",
+        `\`${staticSet.info.name}.${expression.name.text}\` is a static setter with ` +
+          `no getter, so it can be written and not read. Add ` +
+          `\`static get ${expression.name.text}()\` if it should be.`,
+      );
+      return ERROR;
+    }
+
     const className = this.#outer.classNameAt(expression.expression);
     if (className !== undefined) {
       const info = this.#outer.classInfo(className);
@@ -3322,6 +3863,51 @@ class BodyLowerer {
     if (!ts.isIdentifier(access.expression)) return undefined;
     const info = this.#outer.classInfo(access.expression.text);
     return info?.statics.get(access.name.text);
+  }
+
+  /**
+   * `C.x` where `x` is a `static get`, or `C.x = v` where it is a `static set`.
+   *
+   * Resolved from the name for the same reason {@link #staticAt} is: `C` is a
+   * class rather than an object, so asking the width pass for its type would
+   * report a name that does not resolve.
+   */
+  #staticAccessorAt(
+    access: ts.PropertyAccessExpression,
+    writing: boolean,
+  ): { accessor: StaticMethod; info: ClassInfo } | undefined {
+    if (!ts.isIdentifier(access.expression)) return undefined;
+    const info = this.#outer.classInfo(access.expression.text);
+    if (info === undefined) return undefined;
+    const accessor = writing
+      ? info.staticSetters.get(access.name.text)
+      : info.staticGetters.get(access.name.text);
+    return accessor === undefined ? undefined : { accessor, info };
+  }
+
+  /** A static accessor, called: a direct call with no receiver at all. */
+  #staticAccessorCall(
+    at: ts.PropertyAccessExpression,
+    accessor: StaticMethod,
+    args: readonly ts.Expression[],
+  ): Typed | undefined {
+    const record = this.#outer.fn(accessor.symbol);
+    if (record === undefined || record.kind !== "defined") {
+      this.#outer.unsupported(at, `a call to \`${accessor.symbol}\``);
+      return undefined;
+    }
+    const marshalled: Operand[] = [];
+    for (const [index, argument] of args.entries()) {
+      const value = this.#expressionTyped(argument, record.signature.params[index]!.type);
+      if (value === undefined) return undefined;
+      marshalled.push(this.#forArgument(argument, value));
+    }
+    return this.#emitCall(
+      at,
+      { kind: "Direct", value: { kind: "Local", value: record.id } },
+      marshalled,
+      record.signature.returns,
+    );
   }
 
   /**
@@ -5306,6 +5892,12 @@ class BodyLowerer {
     // `C.f` — a static method's address, before anything asks `C` for a value.
     if (this.#staticAt(expression) !== undefined) {
       return this.#functionValue(expression, natural);
+    }
+    // `C.x` where `x` is `static get x()`. Also before, and for the same
+    // reason: `C` is a class name and has no value to ask for.
+    const staticGet = this.#staticAccessorAt(expression, false);
+    if (staticGet !== undefined) {
+      return this.#staticAccessorCall(expression, staticGet.accessor, []);
     }
     return this.#property(expression);
   }

@@ -441,6 +441,34 @@ fn array_layout(cap: u64, stride: u64, align: u64) -> Layout {
     Layout::from_size_align(size, align).expect("array layout")
 }
 
+/// `main(args: string[])` — argv, copied into an owned `string[]`.
+///
+/// Built here rather than by emitted code because it is the one array whose
+/// elements do not come from the program: `argv` is the platform's, its entries
+/// are C strings, and each has to be copied before the program can own it.
+/// Everything after that is an ordinary `string[]` — the same handle a literal
+/// produces, released by the scope that holds it.
+///
+/// `argv[0]` is **included**, as it is in C. Dropping it would be the
+/// convenient choice and the wrong one: which arguments a program gets is not
+/// something a compiler should have an opinion about.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gf_args(argc: i32, argv: *const *const u8) -> GfArray {
+    install_reporter();
+    if argc <= 0 || argv.is_null() {
+        return gf_array_empty();
+    }
+    let count = argc as u64;
+    let stride = core::mem::size_of::<GfStr>() as u64;
+    let array = unsafe { gf_array_new(count, stride, ALIGN as u64) };
+    for i in 0..argc as usize {
+        let entry = unsafe { *argv.add(i) };
+        let owned = unsafe { gf_string_from_cstr(entry) };
+        unsafe { (array as *mut GfStr).add(i).write(owned) };
+    }
+    array
+}
+
 /// The shared empty array. Allocates nothing.
 #[unsafe(no_mangle)]
 pub extern "C" fn gf_array_empty() -> GfArray {

@@ -39,8 +39,8 @@ describe("codes raised by a program", () => {
     await expectRejected(
       "diag-0001",
       `export function main(): i32 {
-         const a: i32 = 1;
-         switch (a) { default: return 0; }
+         const s: string = "abc";
+         return cast<i32>(s.indexOf("b"));
        }\n`,
       "GF0001",
     );

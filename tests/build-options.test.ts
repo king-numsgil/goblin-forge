@@ -171,11 +171,56 @@ describe("`main`", () => {
     expect(result.diagnostics.map((d) => d.code)).toContain("GF0004");
   });
 
-  test("the conventional argc/argv pair is still GF0004, but only that", async () => {
-    // GF0004's own explanation offers the pair as one of the two acceptable
-    // shapes. It is not accepted yet — but now that `Pointer<T>` is a type the
-    // compiler can spell, the complaint is about `main` alone rather than about
-    // the pointer first and `main` afterwards.
+  test("`main(args: string[])` receives the command line", async () => {
+    // `argv[0]` is kept, as it is in C: which arguments a program gets is not
+    // something a compiler should have an opinion about. So a program handed
+    // two arguments sees three elements.
+    const result = await run(
+      "main-args",
+      `export function main(args: string[]): i32 {
+         console.log(\`\${args.length}\`);
+         let i: usize = 1;
+         while (i < args.length) { console.log(args[i]); i = i + 1; }
+         return 0;
+       }\n`,
+      { args: ["alpha", "beta"] },
+    );
+    expect(result.stdout).toBe("3\nalpha\nbeta\n");
+    // The strings are copies of the platform's bytes, so `main`'s scope owns
+    // them and releases them — which the counter is what proves.
+    expect(result.leaked).toBe(0);
+  });
+
+  test("`main(args)` with no arguments still gets `argv[0]`", async () => {
+    const result = await run(
+      "main-args-empty",
+      `export function main(args: string[]): i32 {
+         return cast<i32>(args.length);
+       }\n`,
+    );
+    expect(result.exitCode).toBe(1);
+    expect(result.leaked).toBe(0);
+  });
+
+  test("`args` is an ordinary `string[]`, and may be walked with `for…of`", async () => {
+    const result = await run(
+      "main-args-forof",
+      `export function main(args: string[]): i32 {
+         let total: usize = 0;
+         for (const a of args) { total = total + a.length; }
+         console.log(\`\${total > 0}\`);
+         return 0;
+       }\n`,
+      { args: ["xyz"] },
+    );
+    expect(result.stdout).toBe("true\n");
+    expect(result.leaked).toBe(0);
+  });
+
+  test("the conventional argc/argv pair is GF0004, and the message says what to write", async () => {
+    // C's shape, refused: there is nothing here to hand the two halves to
+    // separately, because the runtime has already turned them into an array by
+    // the time the first statement runs.
     const { result } = await compileSource(
       "main-argv",
       `export function main(argc: i32, argv: Pointer<Pointer<u8>>): i32 { return 0; }\n`,
@@ -184,6 +229,17 @@ describe("`main`", () => {
     const codes = result.diagnostics.map((d) => d.code);
     expect(codes).toContain("GF0004");
     expect(codes).not.toContain("GF0001");
+    const diagnostic = result.diagnostics.find((d) => d.code === "GF0004");
+    expect(diagnostic?.message).toContain("string[]");
+  });
+
+  test("`main` taking anything else is GF0004", async () => {
+    const { result } = await compileSource(
+      "main-wrong-param",
+      `export function main(n: i32): i32 { return n; }\n`,
+    );
+    expect(result.ok).toBe(false);
+    expect(result.diagnostics.map((d) => d.code)).toContain("GF0004");
   });
 
   test("a second exported function beside `main` is fine", async () => {

@@ -241,8 +241,7 @@ describe("diagnostics", () => {
     const diagnostic = await expectRejected(
       "unsupported",
       `export function main(): i32 {
-         do {} while (false);
-         return 0;
+         throw "x";
        }\n`,
       "GF0001",
     );

@@ -99,10 +99,9 @@ backend failure:
 | `Reference<T>` for anything but a class or a contract | `checker/src/types.ts`, the `isReferenceType` branch | later |
 | an interface mixing methods and data | `checker/src/types.ts`, `contractOf` — a rule, not a gap | — |
 | `p.erase()` / `p.reify<U>()` | `lower.ts`, `#pointerMethodWidth` — needs a decision about what `Pointer<unknown>` erases to; see [`POINTER-ERASURE.md`](POINTER-ERASURE.md) | later |
-| static fields | `classes.ts`, `describeMember` | later |
-| parameter properties (`constructor(private x)`) | `classes.ts`, `#classFnParams` | later |
-| `switch` | lowerer `#statement` | — |
-| `main(argc, argv)` | `#checkEntryPoint` | needs `T[]` |
+| static **fields** | `classes.ts`, the `isStatic` branch over property declarations — needs module-level storage the backend has never emitted; see below | later |
+| closures / arrow functions | `lower.ts` — Tier 0 (function pointers) shipped, capture did not | later |
+| generic functions, optional/rest/defaulted/destructured parameters | `lower.ts`, `#classFnParams` and `#signature` | later |
 | two classes with the same name in two modules | `classes.ts`, `collectClasses` — a stated restriction, see DECISIONS §11.8 | later |
 | incremental builds | `CompileOptions.incremental` is reserved and unread | later |
 | `throw` / unwinding | `Terminator::Resume` errors | later |
@@ -110,6 +109,23 @@ backend failure:
 `Rvalue::Ref` and `Rvalue::AddrOf` **are** implemented now — the lowerer emits a
 `Ref` for every `this`, every method receiver and every `p.deref()`, and an
 `AddrOf` for `p.offset(n)`.
+
+**Static fields need a piece the backend does not have.** `Module::globals` and
+`Global` exist in the MIR and nothing reads them: `crates/goblin-codegen` never
+emits a data object, and there is no way to *name* one from a `Place`, whose
+root is always a local. So a `static count: i32` needs a MIR change (a global
+place root, and therefore a new wire-format fingerprint), data emission in the
+codegen, and an answer for initialisation order when the initialiser is not a
+constant. Static *methods* and static *accessors* need none of that, which is
+why they are done and this is not.
+
+**`Reference<T>` for a struct is the next real gap in the value model.** Today
+every struct parameter copies and there is no way to say otherwise. Erasing it
+is one branch in `checker/src/types.ts`; making it work is roughly six sites in
+`lower.ts` — `#propertyWidth` and `#property` (which unwrap a pointer to a
+struct but not a reference to one), `#fieldAssignment`, `#coerce` and
+`#toClassReference`, and argument passing — and each missed site is a wrong
+answer rather than a diagnostic.
 
 MIR already has `Terminator::Call`'s `unwind` edge, `BlockKind::Cleanup` and
 `Terminator::Resume` — put in at milestone 4 because retrofitting them is a

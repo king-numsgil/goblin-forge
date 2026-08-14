@@ -31,7 +31,14 @@ import type { MachineType } from "@goblin-forge/checker";
 export interface ClassField {
   readonly name: string;
   readonly type: MachineType;
-  readonly declaration: ts.PropertyDeclaration;
+  /**
+   * A `ParameterDeclaration` when this is a **parameter property** —
+   * `constructor(private x: i32)`, which declares a field and a parameter with
+   * one piece of syntax. The two are the same field either way; only where the
+   * initial value comes from differs, and that is the constructor's business
+   * rather than the layout's.
+   */
+  readonly declaration: ts.PropertyDeclaration | ts.ParameterDeclaration;
   /** The class that declared it, which is not always the one that has it. */
   readonly owner: string;
 }
@@ -46,9 +53,19 @@ export interface ClassField {
  */
 export interface StaticMethod {
   readonly name: string;
-  readonly declaration: ts.MethodDeclaration;
+  readonly declaration: ts.MethodDeclaration | ts.AccessorDeclaration;
   /** The symbol its function is emitted under: `Class$name`. */
   readonly symbol: string;
+  /**
+   * The class that declared it.
+   *
+   * A static is *inherited* by name — `Derived.helper()` resolves to
+   * `Base.helper` — but emitted once, where it was written. Comparing the owner
+   * is how the emit loop knows which; comparing the symbol against
+   * `` `${name}$${method.name}` `` did the same job until static accessors
+   * arrived with symbols that never take that shape.
+   */
+  readonly owner: string;
 }
 
 /**
@@ -106,6 +123,23 @@ export interface ClassInfo {
    * wearing the same syntax: no receiver, no slot, and therefore no override.
    */
   readonly statics: ReadonlyMap<string, StaticMethod>;
+  /**
+   * `static get x()` and `static set x(v)`, own and inherited.
+   *
+   * Two maps because `get x` and `set x` are two functions, and apart from
+   * {@link ClassInfo.getters} because a static accessor has no receiver to
+   * dispatch on — it is a static method that happens to be reached with
+   * property syntax.
+   */
+  readonly staticGetters: ReadonlyMap<string, StaticMethod>;
+  readonly staticSetters: ReadonlyMap<string, StaticMethod>;
+  /**
+   * The fields this class declared as `constructor(private x: i32)`.
+   *
+   * Own only, never inherited: the base's are assigned by the base's own
+   * constructor, which runs first.
+   */
+  readonly parameterProperties: readonly ClassField[];
   readonly ctor: ts.ConstructorDeclaration | undefined;
   /**
    * Whether this class has a constructor to run, declared or generated.
@@ -306,6 +340,42 @@ function build(
   const fields: ClassField[] = base ? [...base.fields] : [];
   const ownFieldsAt = fields.length;
   for (const member of node.members) {
+    // A parameter property declares a field where the constructor is written,
+    // so it takes its layout position from there. Fields are laid out in
+    // declaration order and never reordered, and this is the order they were
+    // declared in.
+    if (ts.isConstructorDeclaration(member)) {
+      for (const parameter of member.parameters) {
+        if (parameter.modifiers === undefined || parameter.modifiers.length === 0) continue;
+        if (!ts.isIdentifier(parameter.name)) {
+          report.unsupported(parameter, "a destructured parameter property");
+          return undefined;
+        }
+        const type = report.erase(parameter, checker.getTypeAtLocation(parameter));
+        if (type === undefined) return undefined;
+        const parameterName = parameter.name.text;
+        if (RESERVED_ON_POINTER.includes(parameterName)) {
+          report.refuse(
+            parameter,
+            `\`${parameterName}\` is reserved: every \`Pointer<T>\` has one, so a ` +
+              `\`${name}.${parameterName}\` would be unreachable through a pointer. ` +
+              `The reserved names are ${RESERVED_ON_POINTER.join(", ")}.`,
+          );
+          return undefined;
+        }
+        if (fields.some((field) => field.name === parameterName)) {
+          report.refuse(
+            parameter,
+            `\`${name}.${parameterName}\` is declared twice — once as a parameter ` +
+              "property and once as a field or in a base class. One name is one " +
+              "field, and laying it out twice would destroy it twice.",
+          );
+          return undefined;
+        }
+        fields.push({ name: parameterName, type, declaration: parameter, owner: name });
+      }
+      continue;
+    }
     if (!ts.isPropertyDeclaration(member)) continue;
     if (!ts.isIdentifier(member.name)) {
       report.unsupported(member, "a computed or non-identifier field name");
@@ -347,6 +417,8 @@ function build(
   slots[0] = destructorSymbol;
 
   const statics = new Map<string, StaticMethod>();
+  const staticGetters = new Map<string, StaticMethod>();
+  const staticSetters = new Map<string, StaticMethod>();
   const methods = new Map<string, ClassMethod>();
   const getters = new Map<string, ClassMethod>();
   const setters = new Map<string, ClassMethod>();
@@ -359,6 +431,8 @@ function build(
     // TypeScript. There is no overriding to do — the name is looked up at
     // compile time and there is no receiver to dispatch on.
     for (const [staticName, method] of base.statics) statics.set(staticName, method);
+    for (const [accessor, method] of base.staticGetters) staticGetters.set(accessor, method);
+    for (const [accessor, method] of base.staticSetters) staticSetters.set(accessor, method);
   }
   if (base) {
     for (const [methodName, method] of base.methods) methods.set(methodName, method);
@@ -387,6 +461,7 @@ function build(
         name: member.name.text,
         declaration: member,
         symbol: `${name}$${member.name.text}`,
+        owner: name,
       });
       continue;
     }
@@ -420,9 +495,21 @@ function build(
       report.unsupported(member, "an accessor with no body");
       return undefined;
     }
+    // A `static get x()` is a static *method* wearing property syntax: no
+    // receiver, no slot, and therefore no override. Collected apart from the
+    // instance accessors for exactly the reason statics are collected apart
+    // from methods.
     if (isStatic(member)) {
-      report.unsupported(member, "a static accessor");
-      return undefined;
+      const table = isGetter ? staticGetters : staticSetters;
+      table.set(member.name.text, {
+        name: member.name.text,
+        declaration: member,
+        // `static$` in the middle, so a static accessor can never collide with
+        // an instance one, nor with a static method of the same name.
+        symbol: `${name}$static$${isGetter ? "get" : "set"}$${member.name.text}`,
+        owner: name,
+      });
+      continue;
     }
 
     const accessor = member.name.text;
@@ -477,9 +564,16 @@ function build(
   // A field initialiser is construction, so a class that has one needs a
   // constructor whether or not it declares one — and so does a class whose base
   // needs one, because something has to call it.
-  const initialisedFields = fields
-    .slice(ownFieldsAt)
-    .filter((field) => field.declaration.initializer !== undefined);
+  const own = fields.slice(ownFieldsAt);
+  // A parameter property is excluded: its value comes from the parameter, not
+  // from an initialiser, and a `ParameterDeclaration`'s `initializer` is a
+  // *default argument* — a different thing entirely, and one `#classFnParams`
+  // refuses anyway.
+  const initialisedFields = own.filter(
+    (field) =>
+      ts.isPropertyDeclaration(field.declaration) && field.declaration.initializer !== undefined,
+  );
+  const parameterProperties = own.filter((field) => ts.isParameter(field.declaration));
   const needsConstructor =
     ctor !== undefined || initialisedFields.length > 0 || (base?.needsConstructor ?? false);
 
@@ -494,6 +588,9 @@ function build(
     getters,
     setters,
     statics,
+    staticGetters,
+    staticSetters,
+    parameterProperties,
     ctor,
     needsConstructor,
     initialisedFields,

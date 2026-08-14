@@ -405,14 +405,45 @@ describe("classes: what is rejected", () => {
     expect(diagnostic.message).toContain("function pointer");
   });
 
-  test("a parameter property", async () => {
-    const diagnostic = await expectRejected(
-      "class-param-property",
-      `class A { constructor(public x: i32) { } }
+  test("a parameter property that duplicates a field is tsc's error", async () => {
+    // The compiler keeps its own check — laying the field out twice would
+    // destroy it twice — but tsc gets there first, which is where the error
+    // belongs: `x` really is a duplicate identifier.
+    const { result } = await compileSource(
+      "class-param-property-twice",
+      `class A {
+         x: i32 = 0;
+         constructor(public x: i32) { }
+       }
        export function main(): i32 { return 0; }\n`,
-      "GF0001",
     );
-    expect(diagnostic.message).toContain("parameter property");
+    expect(result.ok).toBe(false);
+    expect(errorCodes(result)).toContain("TS2300");
+  });
+
+  test("a parameter property that shadows a base field is the compiler's", async () => {
+    // tsc allows this one: a derived class may redeclare a base's property.
+    // Here it would be laid out twice and destroyed twice.
+    const diagnostic = await expectRejected(
+      "class-param-property-shadow",
+      `class Base { x: i32 = 0; }
+       class Derived extends Base {
+         constructor(public override x: i32) { super(); }
+       }
+       export function main(): i32 { return 0; }\n`,
+      "GF0002",
+    );
+    expect(diagnostic.message).toContain("declared twice");
+  });
+
+  test("a parameter property using a name reserved on `Pointer<T>`", async () => {
+    const diagnostic = await expectRejected(
+      "class-param-property-reserved",
+      `class A { constructor(public address: i32) { } }
+       export function main(): i32 { return 0; }\n`,
+      "GF0002",
+    );
+    expect(diagnostic.message).toContain("reserved");
   });
 
   test("moving out of a by-value parameter", async () => {
@@ -798,6 +829,162 @@ describe("field initialisers", () => {
        }\n`,
     );
     expect(result.exitCode).toBe(0);
+  });
+});
+
+describe("parameter properties", () => {
+  test("`constructor(public x)` declares a field and assigns it", async () => {
+    const result = await run(
+      "class-pp-basic",
+      `class Point {
+         constructor(public x: i32, public y: i32) { }
+         sum(): i32 { return this.x + this.y; }
+       }
+
+       export function main(): i32 {
+         const p = new Point(3, 4);
+         return p.sum() * 10 + p.x;
+       }\n`,
+    );
+    expect(result.exitCode).toBe(73);
+  });
+
+  test("the field takes its layout position from where the constructor is written", async () => {
+    // Fields are laid out in declaration order and never reordered, and a
+    // parameter property is declared where its constructor is. The C++ oracle
+    // has no equivalent syntax, so the check is the offsets themselves.
+    const result = await run(
+      "class-pp-layout",
+      `class Mixed {
+         a: u8 = 1;
+         constructor(public b: i32) { }
+         c: u8 = 3;
+       }
+
+       export function main(): i32 {
+         const m = new Mixed(2);
+         console.log(\`\${sizeOf<Mixed>()} \${m.a} \${m.b} \${m.c}\`);
+         return 0;
+       }\n`,
+    );
+    // vtable(8) + a(1) + pad(3) + b(4) + c(1) + pad(7) = 24.
+    expect(result.stdout).toBe("24 1 2 3\n");
+  });
+
+  test("an owning parameter property is copied in, and the caller keeps its own", async () => {
+    const result = await run(
+      "class-pp-owning",
+      `class Holder {
+         constructor(public label: string) { }
+       }
+
+       export function main(): i32 {
+         let i: i32 = 0;
+         while (i < 20) {
+           const s: string = \`v\${i}\`;
+           const h = new Holder(s);
+           console.log(h.label);
+           i = i + 1;
+         }
+         return 0;
+       }\n`,
+    );
+    expect(result.stdout.split("\n").length).toBe(21);
+    expect(result.leaked).toBe(0);
+  });
+
+  test("a field initialiser may read a parameter property", async () => {
+    // The reason parameter properties are assigned *before* the initialisers:
+    // this program only means anything in that order.
+    const result = await run(
+      "class-pp-before-initialisers",
+      `class Scaled {
+         doubled: i32 = this.base * 2;
+         constructor(public base: i32) { }
+       }
+
+       export function main(): i32 {
+         const s = new Scaled(21);
+         return s.doubled;
+       }\n`,
+    );
+    expect(result.exitCode).toBe(42);
+  });
+
+  test("the constructor body still sees the parameter, and may override the field", async () => {
+    const result = await run(
+      "class-pp-body",
+      `class Clamped {
+         constructor(public n: i32) {
+           if (n > 10) { this.n = 10; }
+         }
+       }
+
+       export function main(): i32 {
+         return new Clamped(3).n + new Clamped(99).n;
+       }\n`,
+    );
+    expect(result.exitCode).toBe(13);
+  });
+
+  test("a derived class gets its base's parameter property too", async () => {
+    const result = await run(
+      "class-pp-inherited",
+      `class Base { constructor(public a: i32) { } }
+       class Derived extends Base {
+         constructor(a: i32, public b: i32) { super(a); }
+       }
+
+       export function main(): i32 {
+         const d = new Derived(4, 5);
+         return d.a * 10 + d.b;
+       }\n`,
+    );
+    expect(result.exitCode).toBe(45);
+  });
+
+  test("`private` and `protected` are accepted and erased, as elsewhere", async () => {
+    const result = await run(
+      "class-pp-private",
+      `class Counter {
+         constructor(private n: i32) { }
+         value(): i32 { return this.n; }
+       }
+
+       export function main(): i32 {
+         return new Counter(9).value();
+       }\n`,
+    );
+    expect(result.exitCode).toBe(9);
+  });
+
+  test("`readonly` alone makes one too, as it does in TypeScript", async () => {
+    const result = await run(
+      "class-pp-readonly",
+      `class Tagged {
+         constructor(readonly tag: i32) { }
+       }
+
+       export function main(): i32 {
+         return new Tagged(6).tag;
+       }\n`,
+    );
+    expect(result.exitCode).toBe(6);
+  });
+
+  test("a plain parameter is still just a parameter", async () => {
+    const { result } = await compileSource(
+      "class-pp-plain",
+      `class A {
+         constructor(x: i32) { }
+       }
+
+       export function main(): i32 {
+         return new A(1).x;
+       }\n`,
+    );
+    expect(result.ok).toBe(false);
+    expect(errorCodes(result).some((code) => code.startsWith("TS"))).toBe(true);
   });
 });
 

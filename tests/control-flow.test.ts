@@ -202,15 +202,13 @@ describe("blocks and empty statements", () => {
 
 describe("statements the language does not have yet", () => {
   const cases: [string, string][] = [
-    ["do/while", "  let i: i32 = 0;\n  do { i = i + 1; } while (i < 3);\n  return i;"],
-    ["switch", "  const a: i32 = 1;\n  switch (a) { case 1: return 1; default: return 0; }"],
-    // Over a `T[]`, which tsc *does* accept as iterable — a `FixedArray` it
-    // rejects itself (TS2495), so it would not reach the compiler at all.
-    ["for-of", "  const xs: i32[] = [1, 2];\n  for (const x of xs) { }\n  return 0;"],
-    ["a labelled statement", "  outer: while (true) { break outer; }\n  return 0;"],
     ["try/catch", "  try { return 0; } catch (e) { return 1; }"],
     ["throw", '  throw "x";'],
     ["a nested function declaration", "  function g(): i32 { return 1; }\n  return g();"],
+    // A `FixedArray` is rejected by tsc itself (TS2495) rather than reaching
+    // here, so `for…of` over one has no GF0001 to assert. Over a `T[]` it works
+    // — see the `for…of` suite below.
+    ["for-in", "  const xs: i32[] = [1];\n  for (const k in xs) { }\n  return 0;"],
   ];
 
   for (const [what, body] of cases) {
@@ -341,5 +339,393 @@ describe("functions", () => {
         "  let i: i32 = 0;\n  while (true) { i = i + 1; if (i === 3) { return i; } }",
       ),
     ).toBe(3);
+  });
+});
+
+describe("`do`/`while`", () => {
+  test("the body runs before the first test", async () => {
+    // The whole difference from `while`, and the only way to see it: a
+    // condition false from the start still runs the body once.
+    expect(
+      await exits("cf-do-once", "  let i: i32 = 0;\n  do { i = i + 1; } while (i < 0);\n  return i;"),
+    ).toBe(1);
+  });
+
+  test("it iterates like a `while` otherwise", async () => {
+    expect(
+      await exits("cf-do-many", "  let i: i32 = 0;\n  do { i = i + 1; } while (i < 5);\n  return i;"),
+    ).toBe(5);
+  });
+
+  test("`continue` goes to the test, not to the body", async () => {
+    // Jumping to the body instead skips the test and the loop never ends —
+    // the same class of mistake as a `for` whose `continue` skips the update.
+    expect(
+      await exits(
+        "cf-do-continue",
+        "  let i: i32 = 0;\n  let seen: i32 = 0;\n" +
+          "  do { i = i + 1; if (i === 2) { continue; } seen = seen + 1; } while (i < 4);\n" +
+          "  return i * 10 + seen;",
+      ),
+    ).toBe(43);
+  });
+
+  test("`break` leaves it", async () => {
+    expect(
+      await exits(
+        "cf-do-break",
+        "  let i: i32 = 0;\n  do { i = i + 1; if (i === 2) { break; } } while (i < 9);\n  return i;",
+      ),
+    ).toBe(2);
+  });
+});
+
+describe("`switch`", () => {
+  test("it dispatches on an integer, and `default` catches the rest", async () => {
+    const body =
+      "  let total: i32 = 0;\n  let i: i32 = 0;\n" +
+      "  while (i < 4) {\n" +
+      "    switch (i) {\n" +
+      "      case 0: total = total + 1; break;\n" +
+      "      case 1: total = total + 10; break;\n" +
+      "      default: total = total + 100; break;\n" +
+      "    }\n" +
+      "    i = i + 1;\n" +
+      "  }\n  return total;";
+    expect(await exits("cf-switch-int", body)).toBe(211);
+  });
+
+  test("empty clauses fall through, which is what `case 1: case 2:` means", async () => {
+    // The clause blocks are chained, so a clause running off its end falls
+    // into the next. `noFallthroughCasesInSwitch` is what stops a *non-empty*
+    // one doing the same, and it is tsc's rule rather than the compiler's — so
+    // the editor underlines it.
+    const body =
+      "  let total: i32 = 0;\n  let i: i32 = 0;\n" +
+      "  while (i < 4) {\n" +
+      "    switch (i) {\n" +
+      "      case 0:\n      case 1:\n      case 2: total = total + 1; break;\n" +
+      "      default: total = total + 100; break;\n" +
+      "    }\n" +
+      "    i = i + 1;\n" +
+      "  }\n  return total;";
+    expect(await exits("cf-switch-fallthrough", body)).toBe(103);
+  });
+
+  test("`default` need not be written last", async () => {
+    // It is reached only when every `case` test failed, wherever it sits, so
+    // lowering it as "the last clause" is wrong for this program.
+    const body =
+      "  let total: i32 = 0;\n  let i: i32 = 0;\n" +
+      "  while (i < 3) {\n" +
+      "    switch (i) {\n" +
+      "      default: total = total + 100; break;\n" +
+      "      case 0: total = total + 1; break;\n" +
+      "    }\n" +
+      "    i = i + 1;\n" +
+      "  }\n  return total;";
+    expect(await exits("cf-switch-default-first", body)).toBe(201);
+  });
+
+  test("a `switch` with no `default` may match nothing", async () => {
+    expect(
+      await exits(
+        "cf-switch-no-default",
+        "  let n: i32 = 7;\n  switch (n) { case 1: n = 0; break; }\n  return n;",
+      ),
+    ).toBe(7);
+  });
+
+  test("a `return` inside a clause returns from the function", async () => {
+    expect(
+      await exits(
+        "cf-switch-return",
+        "  const a: i32 = 1;\n  switch (a) { case 1: return 11; default: return 22; }",
+      ),
+    ).toBe(11);
+  });
+
+  test("`break` leaves the switch and `continue` leaves the loop around it", async () => {
+    // JavaScript's rule, and the reason a switch frame records no continue
+    // target: `continue` inside one continues the *loop*.
+    const body =
+      "  let total: i32 = 0;\n  let i: i32 = 0;\n" +
+      "  while (i < 5) {\n" +
+      "    i = i + 1;\n" +
+      "    switch (i) {\n" +
+      "      case 2: continue;\n" +
+      "      case 3: break;\n" +
+      "      default: total = total + 10; break;\n" +
+      "    }\n" +
+      "    total = total + 1;\n" +
+      "  }\n  return total;";
+    // i=1 default (+10, +1), i=2 continue (neither), i=3 break (+1),
+    // i=4 and i=5 default (+10, +1 each). Kept under 256 on purpose: an exit
+    // code is eight bits, and 304 would observe as 48.
+    expect(await exits("cf-switch-continue", body)).toBe(34);
+  });
+
+  test("it switches on a string, comparing by value", async () => {
+    const result = await run(
+      "cf-switch-string",
+      `function name(n: i32): string {
+         switch (n) {
+           case 1: return "one";
+           case 2: return "two";
+           default: return "many";
+         }
+       }
+
+       export function main(): i32 {
+         const word: string = name(2);
+         switch (word) {
+           case "one": console.log("1"); break;
+           case "two": console.log("2"); break;
+           default: console.log("?"); break;
+         }
+         return 0;
+       }\n`,
+    );
+    expect(result.stdout).toBe("2\n");
+    expect(result.leaked).toBe(0);
+  });
+
+  test("an owning subject is released once, on every path", async () => {
+    // The subject is evaluated once into a *binding* rather than a temporary,
+    // because the dispatch branches away on each test: a temporary would be
+    // released only on the path that fell through all of them.
+    const result = await run(
+      "cf-switch-owning-subject",
+      `export function main(): i32 {
+         let i: i32 = 0;
+         while (i < 20) {
+           switch (\`v\${i % 3}\`) {
+             case "v0": break;
+             case "v1": break;
+             default: break;
+           }
+           i = i + 1;
+         }
+         console.log("done");
+         return 0;
+       }\n`,
+    );
+    expect(result.stdout).toBe("done\n");
+    expect(result.leaked).toBe(0);
+  });
+
+  test("a clause may declare its own bindings", async () => {
+    const result = await run(
+      "cf-switch-clause-scope",
+      `export function main(): i32 {
+         let i: i32 = 0;
+         while (i < 20) {
+           switch (i % 2) {
+             case 0: {
+               const s: string = \`a\${i}\`;
+               console.log(s);
+               break;
+             }
+             default: break;
+           }
+           i = i + 1;
+         }
+         return 0;
+       }\n`,
+    );
+    expect(result.stdout.split("\n").length).toBe(11);
+    expect(result.leaked).toBe(0);
+  });
+
+  test("switching on a struct is refused, as `===` on one is", async () => {
+    await expectRejected(
+      "cf-switch-struct",
+      `interface P { x: i32; }
+
+       export function main(): i32 {
+         const p: P = { x: 1 };
+         switch (p) { default: return 0; }
+       }\n`,
+      "GF0002",
+    );
+  });
+});
+
+describe("`for…of`", () => {
+  test("it walks a `T[]` in order", async () => {
+    expect(
+      await exits(
+        "cf-forof-sum",
+        "  const xs: i32[] = [1, 2, 3, 4];\n  let total: i32 = 0;\n" +
+          "  for (const x of xs) { total = total * 10 + x; }\n  return total;",
+      ),
+    ).toBe(1234 % 256);
+  });
+
+  test("an empty array runs the body no times", async () => {
+    expect(
+      await exits(
+        "cf-forof-empty",
+        "  const xs: i32[] = [];\n  let n: i32 = 0;\n" +
+          "  for (const x of xs) { n = n + x; }\n  return n;",
+      ),
+    ).toBe(0);
+  });
+
+  test("`break` and `continue` work inside it", async () => {
+    expect(
+      await exits(
+        "cf-forof-break",
+        "  const xs: i32[] = [1, 2, 3, 4, 5];\n  let total: i32 = 0;\n" +
+          "  for (const x of xs) { if (x === 2) { continue; } if (x === 4) { break; } total = total + x; }\n" +
+          "  return total;",
+      ),
+    ).toBe(4);
+  });
+
+  test("the bound is re-read, so the array may be read through twice", async () => {
+    const result = await run(
+      "cf-forof-twice",
+      `export function main(): i32 {
+         const xs: i32[] = [1, 2, 3];
+         let total: i32 = 0;
+         for (const x of xs) { total = total + x; }
+         for (const x of xs) { total = total + x; }
+         return total;
+       }\n`,
+    );
+    expect(result.exitCode).toBe(12);
+    expect(result.leaked).toBe(0);
+  });
+
+  test("an owning element is copied in and released every iteration", async () => {
+    const result = await run(
+      "cf-forof-strings",
+      `export function main(): i32 {
+         const xs: string[] = [];
+         let i: i32 = 0;
+         while (i < 20) { xs.push(\`v\${i}\`); i = i + 1; }
+         let n: usize = 0;
+         for (const s of xs) { n = n + s.length; }
+         console.log(\`\${n}\`);
+         return 0;
+       }\n`,
+    );
+    // "v0".."v9" are two bytes and "v10".."v19" are three: 20 + 30 = 50.
+    expect(result.stdout).toBe("50\n");
+    expect(result.leaked).toBe(0);
+  });
+
+  test("`break` out of a `for…of` releases the element binding", async () => {
+    const result = await run(
+      "cf-forof-break-owning",
+      `export function main(): i32 {
+         const xs: string[] = [];
+         let i: i32 = 0;
+         while (i < 20) { xs.push(\`v\${i}\`); i = i + 1; }
+         let n: i32 = 0;
+         while (n < 20) {
+           for (const s of xs) { if (s.length > 0) { break; } }
+           n = n + 1;
+         }
+         console.log("done");
+         return 0;
+       }\n`,
+    );
+    expect(result.stdout).toBe("done\n");
+    expect(result.leaked).toBe(0);
+  });
+});
+
+describe("labels", () => {
+  test("`break outer` leaves both loops", async () => {
+    expect(
+      await exits(
+        "cf-label-break",
+        "  let hits: i32 = 0;\n" +
+          "  outer: while (true) {\n" +
+          "    let j: i32 = 0;\n" +
+          "    while (j < 10) { hits = hits + 1; if (hits === 3) { break outer; } j = j + 1; }\n" +
+          "  }\n  return hits;",
+      ),
+    ).toBe(3);
+  });
+
+  test("a bare `break` still leaves only the inner loop", async () => {
+    expect(
+      await exits(
+        "cf-label-break-inner",
+        "  let hits: i32 = 0;\n  let i: i32 = 0;\n" +
+          "  outer: while (i < 3) {\n" +
+          "    i = i + 1;\n" +
+          "    let j: i32 = 0;\n" +
+          "    while (j < 10) { hits = hits + 1; break; }\n" +
+          "  }\n  return hits;",
+      ),
+    ).toBe(3);
+  });
+
+  test("`continue outer` continues the outer loop", async () => {
+    expect(
+      await exits(
+        "cf-label-continue",
+        "  let hits: i32 = 0;\n  let i: i32 = 0;\n" +
+          "  outer: while (i < 4) {\n" +
+          "    i = i + 1;\n" +
+          "    let j: i32 = 0;\n" +
+          "    while (j < 4) { j = j + 1; if (j === 2) { continue outer; } hits = hits + 1; }\n" +
+          "    hits = hits + 100;\n" +
+          "  }\n  return hits;",
+      ),
+    ).toBe(4);
+  });
+
+  test("`break label` out of a labelled block jumps forward", async () => {
+    expect(
+      await exits(
+        "cf-label-block",
+        "  let n: i32 = 1;\n  done: { n = 2; if (n === 2) { break done; } n = 99; }\n  return n;",
+      ),
+    ).toBe(2);
+  });
+
+  test("a labelled loop releases what it opened when it is left", async () => {
+    const result = await run(
+      "cf-label-owning",
+      `export function main(): i32 {
+         let i: i32 = 0;
+         outer: while (i < 20) {
+           const s: string = \`v\${i}\`;
+           i = i + 1;
+           let j: i32 = 0;
+           while (j < 3) {
+             const t: string = \`w\${j}\`;
+             if (t.length > 0) { continue outer; }
+             j = j + 1;
+           }
+         }
+         console.log("done");
+         return 0;
+       }\n`,
+    );
+    expect(result.stdout).toBe("done\n");
+    expect(result.leaked).toBe(0);
+  });
+
+  test("`break outer` from inside a `switch` leaves the loop, not the switch", async () => {
+    expect(
+      await exits(
+        "cf-label-switch",
+        "  let hits: i32 = 0;\n  let i: i32 = 0;\n" +
+          "  outer: while (i < 5) {\n" +
+          "    i = i + 1;\n" +
+          "    switch (i) {\n" +
+          "      case 3: break outer;\n" +
+          "      default: hits = hits + 1; break;\n" +
+          "    }\n" +
+          "    hits = hits + 10;\n" +
+          "  }\n  return hits;",
+      ),
+    ).toBe(22);
   });
 });
