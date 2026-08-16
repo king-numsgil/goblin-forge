@@ -12,6 +12,8 @@
  * same distinction C++ draws, and the reason `free()` is something you write.
  */
 
+import { readFileSync } from "node:fs";
+
 import { describe, expect, test } from "bun:test";
 
 import { compileSource, errorCodes, expectRejected, run, scratchPath } from "./harness.ts";
@@ -840,20 +842,304 @@ describe("opaque handles", () => {
   });
 });
 
-describe("what is still missing", () => {
-  test("`erase` and `reify` are GF0001", async () => {
+/**
+ * `Pointer<unknown>` — C's `void *`.
+ *
+ * The only type-erased pointer the language has, and the only escape hatch in
+ * the ambient surface. It exists because C's own signatures need one: `memcpy`,
+ * a callback's userdata, anything a library hands back before you know what it
+ * is.
+ *
+ * The asymmetry is C's, for C's reason. Throwing the type away is implicit,
+ * because it cannot be wrong; putting one back is `reify<T>()`, written out,
+ * because it can.
+ */
+describe("void pointers", () => {
+  test("a pointer survives the round trip", async () => {
+    const result = await run(
+      "void-round-trip",
+      `class Rect {
+         w: i32;
+         h: i32;
+         constructor(w: i32, h: i32) { this.w = w; this.h = h; }
+       }
+
+       export function main(): i32 {
+         const r = alloc(Rect, 6, 7);
+         const raw: Pointer<unknown> = r.erase();
+         const back = raw.reify<Rect>();
+         const area: i32 = back.w * back.h;
+         r.free();
+         return area;
+       }\n`,
+    );
+    expect(result.exitCode).toBe(42);
+    expect(result.leaked).toBe(0);
+  });
+
+  test("erasure needs no cast, in an argument or an assignment", async () => {
+    // The whole reason it is implicit. A binding written against a C header
+    // says `void *` where the header does, and the call site stays the call
+    // site rather than growing a conversion that says nothing new.
+    const result = await run(
+      "void-implicit",
+      `interface Frame { pixels: Pointer<unknown>; pitch: i32; }
+
+       function addressOfAnything(p: Pointer<unknown>): usize { return p.address; }
+
+       export function main(): i32 {
+         const r = alloc<i32>();
+         r[0] = 42;
+         const frame: Frame = { pixels: r, pitch: 4 };
+         const same: boolean = addressOfAnything(r) === frame.pixels.address;
+         const value: i32 = frame.pixels.reify<i32>()[0];
+         r.free();
+         return same ? value : 0;
+       }\n`,
+    );
+    expect(result.exitCode).toBe(42);
+    expect(result.leaked).toBe(0);
+  });
+
+  test("`void **` is an ordinary pointer to an erased one", async () => {
+    // The shape of every C out-parameter that hands back a buffer —
+    // `SDL_LockTexture(…, void **pixels, int *pitch)`. The outer pointer's
+    // pointee is a `void *`, which is one word and has a layout, so indexing
+    // through it is allowed where indexing an erased pointer is not.
+    const result = await run(
+      "void-double",
+      `export function main(): i32 {
+         const value = alloc<i32>();
+         value[0] = 42;
+
+         const cell = allocArray<Pointer<unknown>>(1);
+         cell[0] = value;
+
+         const back: i32 = cell[0].reify<i32>()[0];
+         cell.freeArray();
+         value.free();
+         return back;
+       }\n`,
+    );
+    expect(result.exitCode).toBe(42);
+    expect(result.leaked).toBe(0);
+  });
+
+  test("C's own `void *` signature is callable", async () => {
+    // `memcpy` is the reason the type exists, and it is a real C function
+    // rather than a declaration this build could quietly agree with itself
+    // about. Both pointers are erased implicitly at the call.
+    const result = await run(
+      "void-memcpy",
+      `declare function memcpy(
+         dst: Pointer<unknown>,
+         src: Pointer<unknown>,
+         n: usize,
+       ): Pointer<unknown>;
+
+       export function main(): i32 {
+         const src = allocArray<i32>(2);
+         src[0] = 19;
+         src[1] = 23;
+         const dst = allocArray<i32>(2);
+
+         memcpy(dst, src, sizeOf<i32>() * 2);
+
+         const total: i32 = dst[0] + dst[1];
+         src.freeArray();
+         dst.freeArray();
+         return total;
+       }\n`,
+    );
+    expect(result.exitCode).toBe(42);
+    expect(result.leaked).toBe(0);
+  });
+
+  // `fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream)` — libc's
+  // own `const void *`, and the reason the type exists. Nothing about the
+  // declaration says `const`: there is no const in this language, so both C
+  // spellings are one type here, which is truthful rather than lossy — they are
+  // the same machine type and the same ABI.
+  const FWRITE = `declare class FILE { private _opaque: never }
+
+       declare function fopen(path: CString, mode: CString): Pointer<FILE> | null;
+       declare function fwrite(
+         ptr: Pointer<unknown>,
+         size: usize,
+         count: usize,
+         stream: Pointer<FILE>,
+       ): usize;
+       declare function fclose(stream: Pointer<FILE>): i32;
+`;
+
+  test("libc's own `const void *` takes a buffer with no conversion written", async () => {
+    // The buffer is a `Pointer<u32>` rather than a `Pointer<u8>` on purpose:
+    // what crosses is an erasure, not a byte pointer that happened to fit. The
+    // file on disk is the assertion, because libc is the one implementation of
+    // this signature that cannot quietly agree with the compiler.
+    const path = scratchPath("void-fwrite.bin");
+    const result = await run(
+      "void-fwrite",
+      `${FWRITE}
+       export function main(): i32 {
+         const words = allocArray<u32>(4);
+         words[0] = 0x11223344;
+         words[1] = 0x55667788;
+         words[2] = 0x99aabbcc;
+         words[3] = 0xddeeff00;
+
+         const f = fopen(cstring("${path}"), cstring("wb"));
+         if (f === null) { console.log("open failed"); return 1; }
+         const written: usize = fwrite(words, sizeOf<u32>(), 4, f);
+         fclose(f);
+
+         words.freeArray();
+         console.log(\`\${written}\`);
+         return 0;
+       }\n`,
+    );
+    expect(result.stdout).toBe("4\n");
+    expect(result.leaked).toBe(0);
+
+    const bytes = readFileSync(path);
+    expect(bytes.byteLength).toBe(16);
+    expect([0, 1, 2, 3].map((i) => bytes.readUInt32LE(i * 4))).toEqual([
+      0x11223344, 0x55667788, 0x99aabbcc, 0xddeeff00,
+    ]);
+  });
+
+  // The same program written the way C writes it, now that a fixed array
+  // decays. `char buf[1024]` is the spelling every C example uses, and a
+  // binding that could not take one would be a binding nobody wants.
+  test("the same buffer as C's `char buf[1024]`", async () => {
+    const path = scratchPath("void-fwrite-fixed.bin");
+    const result = await run(
+      "void-fwrite-fixed",
+      `${FWRITE}
+       export function main(): i32 {
+         const buf: FixedArray<u8, 1024> = fixedArray(1024, 0);
+         buf[0] = 71;
+         buf[1] = 111;
+         buf[2] = 98;
+
+         const f = fopen(cstring("${path}"), cstring("wb"));
+         if (f === null) { return 1; }
+         const written: usize = fwrite(buf, 1, 3, f);
+         fclose(f);
+         console.log(\`\${written}\`);
+         return 0;
+       }\n`,
+    );
+    expect(result.stdout).toBe("3\n");
+    expect(readFileSync(path, "utf8")).toBe("Gob");
+  });
+
+  test("every operation that would need the pointee is GF0305", async () => {
+    // The same list as the opaque handle's, and for a related reason with a
+    // sharper edge: `void` *has* a layout — nought bytes, aligned to one — so
+    // not one of these refuses itself. `p[i]` would stride by nothing and
+    // `free` would hand the allocator a size of nothing, which is a corrupt
+    // heap rather than a wrong number.
     for (const [name, body] of [
-      ["erase", "  const p = alloc<i32>();\n  const e = p.erase();\n  p.free();\n  return 0;"],
-      ["reify", "  const p = alloc<i32>();\n  const r = p.reify<u8>();\n  p.free();\n  return 0;"],
+      ["index", "const v = raw[1];"],
+      ["offset", "const q = raw.offset(1);"],
+      ["deref", "const d = raw.deref();"],
+      ["free", "raw.free();"],
+      ["freeArray", "raw.freeArray();"],
     ] as const) {
       await expectRejected(
-        `heap-missing-${name}`,
-        `export function main(): i32 {\n${body}\n}\n`,
-        "GF0001",
+        `void-refuse-${name}`,
+        `export function main(): i32 {
+           const p = alloc<i32>();
+           const raw: Pointer<unknown> = p;
+           ${body}
+           p.free();
+           return 0;
+         }\n`,
+        "GF0305",
       );
     }
   });
 
+  test("allocating through one is GF0305 — there is no size to ask for", async () => {
+    for (const [name, body] of [
+      ["alloc", "const p: Pointer<unknown> = alloc<unknown>();"],
+      ["allocArray", "const p: Pointer<unknown> = allocArray<unknown>(4);"],
+    ] as const) {
+      await expectRejected(
+        `void-alloc-${name}`,
+        `export function main(): i32 {
+           ${body}
+           return 0;
+         }\n`,
+        "GF0305",
+      );
+    }
+  });
+
+  test("reifying a pointer that never lost its type is GF0306", async () => {
+    // tsc cannot say "only on an erased pointer", because `reify` is declared
+    // on `CorePointer<T>` and is therefore callable on every pointer. This is
+    // the rule the prelude states — no unchecked cast between two concrete
+    // pointee types — enforced where it can be.
+    await expectRejected(
+      "void-reify-concrete",
+      `class Rect { w: i32; }
+       class Circle { r: i32; }
+
+       export function main(): i32 {
+         const p = alloc(Rect);
+         const q = p.reify<Circle>();
+         p.free();
+         return 0;
+       }\n`,
+      "GF0306",
+    );
+  });
+
+  test("the round trip written out is allowed", async () => {
+    // The point of refusing the short spelling: this one says what it does at
+    // the site that depends on it. It is `reinterpret_cast`, and it looks like
+    // one.
+    const result = await run(
+      "void-reinterpret",
+      `interface Header { tag: i32; }
+       interface Payload { tag: i32; extra: i32; }
+
+       export function main(): i32 {
+         const p = alloc<Payload>();
+         p.tag = 42;
+         p.extra = 1;
+         const h = p.erase().reify<Header>();
+         const tag: i32 = h.tag;
+         p.free();
+         return tag;
+       }\n`,
+    );
+    expect(result.exitCode).toBe(42);
+    expect(result.leaked).toBe(0);
+  });
+
+  test("reification is never implicit", async () => {
+    // tsc's own refusal, and the half of the asymmetry that has to hold: an
+    // erased pointer is not assignable to a concrete one.
+    await expectRejected(
+      "void-not-implicit",
+      `class Rect { w: i32; }
+
+       export function main(): i32 {
+         const p = alloc(Rect);
+         const raw: Pointer<unknown> = p;
+         const back: Pointer<Rect> = raw;
+         p.free();
+         return back.w;
+       }\n`,
+      "TS2322",
+    );
+  });
+});
+
+describe("what is still missing", () => {
   test("`nativeNew` is gone — `alloc<T>()` is the one allocation", async () => {
     // Folded rather than implemented. `nativeNew` handed back *uninitialised*
     // storage, which is at odds with the rest of the language: a destructor
@@ -870,15 +1156,92 @@ describe("what is still missing", () => {
     expect(errorCodes(result)).toContain("TS2304");
   });
 
-  test("a fixed array does not decay to a pointer yet", async () => {
+});
+
+/**
+ * Array-to-pointer decay — C's silent conversion, written out here as an
+ * `AddrOf`.
+ *
+ * A `FixedArray<T, N>` **is** the bytes, which is the whole difference between
+ * it and a pointer. So decay is not a retype of a value: it is the address of
+ * the place the bytes occupy, which is why this could not have come along free
+ * with the pointer type itself.
+ */
+describe("fixed arrays decay", () => {
+  test("to a pointer to the element, and the bytes are the same bytes", async () => {
+    const result = await run(
+      "decay-element",
+      `export function main(): i32 {
+         const buf: FixedArray<i32, 4> = fixedArray(4, 0);
+         buf[2] = 42;
+
+         const p: Pointer<i32> = buf;
+         // Writing through the pointer is writing the array: one object.
+         p[3] = p[2];
+         return buf[3];
+       }\n`,
+    );
+    expect(result.exitCode).toBe(42);
+    expect(result.leaked).toBe(0);
+  });
+
+  test("to a `void *`, which is what a C buffer parameter usually is", async () => {
+    const result = await run(
+      "decay-erased",
+      `function firstByte(p: Pointer<unknown>): u8 { return p.reify<u8>()[0]; }
+
+       export function main(): i32 {
+         const buf: FixedArray<u8, 8> = fixedArray(8, 0);
+         buf[0] = 42;
+         return cast<i32>(firstByte(buf));
+       }\n`,
+    );
+    expect(result.exitCode).toBe(42);
+    expect(result.leaked).toBe(0);
+  });
+
+  test("as an argument, even when the array is a temporary", async () => {
+    // A temporary lives to the end of the enclosing full-expression, so the
+    // call completes inside its lifetime. This is the same rule a borrow gets,
+    // and C++ draws the line in the same place.
+    const result = await run(
+      "decay-temporary-argument",
+      `function firstByte(p: Pointer<u8>): u8 { return p[0]; }
+
+       export function main(): i32 {
+         return cast<i32>(firstByte(zeroed<FixedArray<u8, 4>>()));
+       }\n`,
+    );
+    expect(result.exitCode).toBe(0);
+    expect(result.leaked).toBe(0);
+  });
+
+  test("but a binding may not outlive the temporary it decayed", async () => {
+    // The other half of the same rule. Nothing owns the array, so the pointer
+    // would be dangling on the next line rather than at the end of the scope.
     await expectRejected(
-      "heap-decay",
+      "decay-temporary-binding",
+      `export function main(): i32 {
+         const p: Pointer<u8> = zeroed<FixedArray<u8, 4>>();
+         return cast<i32>(p[0]);
+       }\n`,
+      "GF0234",
+    );
+  });
+
+  test("to the element type only — tsc keeps the rest apart", async () => {
+    // C decays `T[N]` to `T *` and to nothing else. Here the width brands do
+    // that work before the compiler is reached, which is why there is no
+    // diagnostic of the compiler's own for a mismatched decay.
+    const { result } = await compileSource(
+      "decay-mismatch",
       `export function main(): i32 {
          const buf: FixedArray<u8, 4> = fixedArray(4, 0);
-         const p: Pointer<u8> = buf;
-         return 0;
+         const p: Pointer<i32> = buf;
+         return p[0];
        }\n`,
-      "GF0161",
     );
+    expect(result.ok).toBe(false);
+    expect(errorCodes(result).some((code) => code.startsWith("TS"))).toBe(true);
   });
 });

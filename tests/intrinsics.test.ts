@@ -178,40 +178,6 @@ describe("the intrinsics that are implemented", () => {
 });
 
 describe("the intrinsics the prelude declares and the lowerer does not have", () => {
-  // Every one of these is a promise `global.d.ts` makes. Until it is kept, the
-  // only acceptable answer is GF0001 with a file and a line — never a backend
-  // failure, and never a wrong number.
-  const cases: [string, string][] = [
-    ["erase", "  const p = alloc<i32>();\n  const e = p.erase();\n  p.free();\n  return 0;"],
-    ["reify", "  const p = alloc<i32>();\n  const r = p.reify<u8>();\n  p.free();\n  return 0;"],
-  ];
-
-  for (const [name, body] of cases) {
-    test(`\`${name}\` is GF0001, with a position`, async () => {
-      const diagnostic = await expectRejected(
-        `intr-missing-${name}`,
-        `export function main(): i32 {\n${body}\n}\n`,
-        "GF0001",
-      );
-      expect(diagnostic.location?.line).toBeGreaterThan(0);
-      expect(diagnostic.location?.file).toContain("main.ts");
-    });
-  }
-
-  test("a fixed array does not decay to a pointer yet", async () => {
-    // C's array-to-pointer conversion, and the one part of `Pointer<T>` that is
-    // still missing now that the type itself exists.
-    await expectRejected(
-      "intr-array-decay",
-      `export function main(): i32 {
-         const buf: FixedArray<u8, 4> = fixedArray(4, 0);
-         const p: Pointer<u8> = buf;
-         return 0;
-       }\n`,
-      "GF0161",
-    );
-  });
-
   test("`Reference<T>` may only be written for a contract, so far", async () => {
     const diagnostic = await expectRejected(
       "intr-reference-type",

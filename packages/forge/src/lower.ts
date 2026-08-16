@@ -2240,6 +2240,23 @@ class Lowerer {
   }
 
   requireKnownLayout(type: MachineType, at: ts.Node, what: string): boolean {
+    // The other type with no layout, and the other reason for it: an opaque
+    // handle's is somewhere else, an erased pointer's was thrown away on
+    // purpose. Both refuse the same operations, so they share this guard — and
+    // the guard is why they are refused at all. `void` *has* a layout, of zero
+    // bytes aligned to one, so nothing below here would fail on its own; it
+    // would stride by nothing and hand `dealloc` a size of nothing.
+    if (type.kind === "void") {
+      this.error(
+        at,
+        "GF0305",
+        `\`void\` is the absence of a value, so it has no size and no alignment, ` +
+          `and ${what} needs both. A \`Pointer<unknown>\` is C's \`void *\` — an ` +
+          "address whose type was thrown away — and getting at what is behind " +
+          "one means attaching a type back first with `p.reify<T>()`.",
+      );
+      return false;
+    }
     if (type.kind !== "opaque") return true;
     this.error(
       at,
@@ -3053,9 +3070,23 @@ class BodyLowerer {
         this.#outer.checker.getTypeAtLocation(declaration.type),
       );
     }
-    const width = this.width(declaration.initializer!);
+    const initialiser = declaration.initializer!;
+    const width = this.width(initialiser);
     if (width.kind === "error") return undefined;
     if (width.kind === "typed") return width.type;
+    // `null` is poly like a literal, and for a stronger reason — it has no
+    // width because it has no type at all — so the literal's message would name
+    // the wrong missing thing.
+    if (initialiser.kind === ts.SyntaxKind.NullKeyword) {
+      this.#outer.error(
+        declaration,
+        "GF0161",
+        `\`${declaration.name.getText()}\` is initialised with \`null\`, which ` +
+          "has no type of its own. Annotate what it is the null of — " +
+          "`const w: Pointer<SDL_Window> | null = null`.",
+      );
+      return undefined;
+    }
     this.#outer.error(
       declaration,
       "GF0161",
@@ -3940,6 +3971,12 @@ class BodyLowerer {
     // shape whose fields are plain `number`, which is both wrong and unhelpful.
     if (ts.isObjectLiteralExpression(expression)) return POLY;
 
+    // `null` has no type of its own either, and for a stronger reason than a
+    // numeric literal has no width: there is nothing to erase. It is the null
+    // value of whichever handle is expected, and which handles have one is
+    // {@link #null}'s rule.
+    if (expression.kind === ts.SyntaxKind.NullKeyword) return POLY;
+
     if (
       expression.kind === ts.SyntaxKind.TrueKeyword ||
       expression.kind === ts.SyntaxKind.FalseKeyword
@@ -4556,7 +4593,7 @@ class BodyLowerer {
         for (const argument of expression.arguments) {
           if (this.width(argument).kind === "error") return ERROR;
         }
-        return this.#pointerMethodWidth(access, pointer);
+        return this.#pointerMethodWidth(expression, access, pointer);
       }
     }
 
@@ -4626,9 +4663,18 @@ class BodyLowerer {
    * once, rather than in two passes with two different messages.
    */
   #pointerMethodWidth(
+    expression: ts.CallExpression,
     access: ts.PropertyAccessExpression,
     pointer: Extract<MachineType, { kind: "pointer" }>,
   ): Width {
+    // `erase` and `reify` answer before the guard, because they are the two
+    // members that do not read through the pointer — they relabel the address.
+    // Refusing them for want of a layout would refuse the only way *back* from
+    // not having one.
+    if (access.name.text === "erase" || access.name.text === "reify") {
+      const result = this.#reinterpret(expression, access, pointer);
+      return result === undefined ? ERROR : typed(result);
+    }
     // Before the per-member answers: every one of them needs the pointee's
     // layout, so an opaque handle gets the reason it is actually being
     // refused rather than advice to use `p[0]`, which is refused too.
@@ -4662,6 +4708,59 @@ class BodyLowerer {
         this.#outer.unsupported(access, `\`${access.name.text}\` on a \`${renderType(pointer)}\``);
         return ERROR;
     }
+  }
+
+  /**
+   * What `p.erase()` and `p.reify<U>()` answer with, and which of them may be
+   * written on which pointer.
+   *
+   * The two halves of C's `void *` round trip, and the only reinterpretation
+   * the language has. Erasing is always allowed — throwing a type away cannot
+   * be wrong — and reifying is allowed only *back* from an erased pointer, so
+   * that a reinterpretation between two concrete types has to be spelled
+   * `p.erase().reify<U>()` and is visible in the source that depends on it.
+   */
+  #reinterpret(
+    expression: ts.CallExpression,
+    access: ts.PropertyAccessExpression,
+    pointer: Extract<MachineType, { kind: "pointer" }>,
+  ): Extract<MachineType, { kind: "pointer" }> | undefined {
+    const method = access.name.text;
+    if (expression.arguments.length !== 0) {
+      this.#outer.error(expression, "GF0002", `\`${method}\` takes no arguments.`);
+      return undefined;
+    }
+
+    // The call's own type, instantiated: `Pointer<unknown>` for `erase` and
+    // `Pointer<U>` for `reify`. Read from the call rather than from a written
+    // type argument, so that `const p: Pointer<Rect> = raw.reify()` takes `U`
+    // from the annotation exactly the way tsc does.
+    const result = this.#outer.erase(
+      expression,
+      this.#outer.checker.getTypeAtLocation(expression),
+    );
+    if (result === undefined) return undefined;
+    if (result.kind !== "pointer") {
+      this.#outer.unsupported(
+        expression,
+        `\`${method}\` answering with a \`${renderType(result)}\` rather than a pointer`,
+      );
+      return undefined;
+    }
+
+    if (method === "erase") return result;
+    if (pointer.pointee.kind !== "void") {
+      this.#outer.error(
+        expression,
+        "GF0306",
+        `\`reify\` attaches a pointee type to an erased pointer, and this is a ` +
+          `\`${renderType(pointer)}\` — it has one already. Write the round trip ` +
+          "out — `p.erase().reify<T>()` — so that reinterpreting one concrete " +
+          "type as another is visible here rather than hidden in a method call.",
+      );
+      return undefined;
+    }
+    return result;
   }
 
   #consoleWidth(expression: ts.CallExpression): Width {
@@ -4875,6 +4974,53 @@ class BodyLowerer {
     ) {
       return { operand: value.operand, type: expected };
     }
+    // `Pointer<T>` → `Pointer<unknown>`: C's implicit `T *` → `void *`, and the
+    // same non-event at runtime — one word, unchanged, relabelled.
+    //
+    // Implicit in this direction only, which is the asymmetry C and C++ both
+    // have and for the same reason: throwing the type away cannot be wrong,
+    // where guessing it back can. `void *` → `Pointer<T>` is refused by tsc
+    // before it reaches here, and `reify` is where that direction is written.
+    //
+    // It is what makes a binding usable at all. `SDL_memcpy(dst, src, n)` takes
+    // whatever pointers the program has, and `surface.pixels = frame` assigns
+    // through a `void *` field, neither of them growing a conversion that says
+    // nothing the C header did not already say.
+    if (
+      expected.kind === "pointer" &&
+      expected.pointee.kind === "void" &&
+      value.type.kind === "pointer"
+    ) {
+      return { operand: value.operand, type: expected };
+    }
+    // `FixedArray<T, N>` → `Pointer<T>`: C's array-to-pointer decay.
+    //
+    // **An `AddrOf` of the array's place, not a retype of a value.** A fixed
+    // array *is* the bytes — that is the whole difference between it and a
+    // pointer — so what a pointer to it needs is the address of where those
+    // bytes live. Retyping the operand would hand back whatever the operand
+    // was, which for an array travelling by address is the same word by luck
+    // rather than by rule.
+    //
+    // To its own element type or to `void`, and to nothing else. That is C's
+    // rule exactly, and it is also all tsc permits: `FixedArray<T, N>` extends
+    // `CorePointer<T>`, so the width brands keep `Pointer<u8>` and
+    // `Pointer<i32>` apart before this is reached.
+    if (
+      expected.kind === "pointer" &&
+      value.type.kind === "fixedArray" &&
+      (expected.pointee.kind === "void" || sameType(expected.pointee, value.type.element))
+    ) {
+      const place = this.#placeOfSubject(at, value);
+      if (place === undefined) return undefined;
+      const decayed = this.#temporaryTyped(at, expected, { kind: "AddrOf", value: place });
+      if (decayed === undefined) return undefined;
+      // The same lifetime rule a borrow gets, for the same reason: a pointer to
+      // a temporary array is fine as an argument, because the call finishes
+      // inside the enclosing full-expression, and is a dangling binding if it
+      // outlives one. `GF0234` is where that is caught.
+      return value.temporary === undefined ? decayed : { ...decayed, borrowsTemporary: true };
+    }
     if (expected.kind === "reference" && expected.referent.kind === "class") {
       return this.#toClassReference(at, value, expected.referent.name);
     }
@@ -5070,6 +5216,12 @@ class BodyLowerer {
       return this.#value(expression.expression, expected);
     }
 
+    // Before the width answer is consulted, because `null` has no width to
+    // report on and the message for a missing one would name the wrong thing.
+    if (expression.kind === ts.SyntaxKind.NullKeyword) {
+      return this.#null(expression, expected);
+    }
+
     const width = this.width(expression);
     if (width.kind === "error") return undefined;
     const natural = width.kind === "typed" ? width.type : expected;
@@ -5137,6 +5289,47 @@ class BodyLowerer {
 
     this.#outer.unsupported(expression, describe(expression));
     return undefined;
+  }
+
+  /**
+   * `null` — the null value of whichever handle the context wants.
+   *
+   * It reaches the backend as `Const::Null`, which is a machine word of zero
+   * whatever type it carries. That is the whole reason the set below is closed:
+   * a `string` and a `T[]` are one word too, but they are *owning* handles, and
+   * a zero one would be freed at the end of its scope like any other. A
+   * contract reference is not one word at all.
+   *
+   * Nullability itself never reaches the MIR. `Pointer<T> | null` erases to the
+   * same machine type as `Pointer<T>` — the null is representable in the value
+   * — so it stays tsc's view of the program, and tsc is what makes the check
+   * before the use.
+   */
+  #null(at: ts.Expression, expected: MachineType | undefined): Typed | undefined {
+    if (expected === undefined) {
+      this.#outer.error(
+        at,
+        "GF0161",
+        "`null` has no type of its own and nothing here supplies one. Annotate " +
+          "what it is the null of — `const w: Pointer<SDL_Window> | null = null`.",
+      );
+      return undefined;
+    }
+    if (!hasNullValue(expected)) {
+      this.#outer.error(
+        at,
+        "GF0237",
+        `\`${renderType(expected)}\` has no null. ${nullAdvice(expected)}`,
+      );
+      return undefined;
+    }
+    return {
+      operand: {
+        kind: "Const",
+        value: { kind: "Null", value: this.#outer.tyOf(expected, at) },
+      },
+      type: expected,
+    };
   }
 
   #literal(
@@ -6001,14 +6194,35 @@ class BodyLowerer {
   /**
    * One of {@link POINTER_METHODS}, with the receiver already lowered.
    *
-   * The width pass has already refused the three that are not implemented, so
-   * anything arriving here is one of the three that are.
+   * All six are implemented. The width pass sees the same call first and
+   * refuses through the same helpers, so anything arriving here has already
+   * passed the rules — which is also why a refusal is reported once rather
+   * than once per pass.
    */
   #pointerMethod(
     expression: ts.CallExpression,
     access: ts.PropertyAccessExpression,
     subject: Typed,
   ): Typed | undefined {
+    // The two that only relabel the address, before the guard that the other
+    // four have to pass. See {@link #reinterpret} for the rule.
+    if (
+      subject.type.kind === "pointer" &&
+      (access.name.text === "erase" || access.name.text === "reify")
+    ) {
+      const target = this.#reinterpret(expression, access, subject.type);
+      if (target === undefined) return undefined;
+      // A `Cast` rather than the operand relabelled, unlike the implicit
+      // erasure in `#coerce`: this one was written, and the MIR should show
+      // where. It costs nothing — `PtrToPtr` is the identity in the backend.
+      return this.#temporaryTyped(expression, target, {
+        kind: "Cast",
+        op: "PtrToPtr",
+        operand: this.#forRead(subject),
+        to: this.#outer.tyOf(target, expression),
+      });
+    }
+
     // Every one of these needs the pointee's layout — a stride to step by, a
     // size and an alignment to return to the allocator, a shape to read
     // through. `address` is the member that does not, which is why it is a
@@ -8192,6 +8406,49 @@ function elementTypeOf(type: MachineType): MachineType | undefined {
       return type.pointee;
     default:
       return undefined;
+  }
+}
+
+/**
+ * Whether `null` is a value this type can hold.
+ *
+ * The three borrowed handles, and no more. Each is one machine word that
+ * nothing here owns, so a zero is a value the type already has to survive — a
+ * C function returns one, and the `=== null` check reads it back.
+ *
+ * `string` and `T[]` are one word too and are deliberately not here: they own
+ * their buffer, so a null one would reach the drop pass and be released like
+ * any other. `Reference<T>` is left out for a different reason — it is bound
+ * once and dereferenced without asking, and the only null one comes from
+ * `tryCast`, which produces it rather than accepting it written.
+ */
+function hasNullValue(type: MachineType): boolean {
+  return type.kind === "pointer" || type.kind === "cstring" || type.kind === "fnptr";
+}
+
+/** What to do instead, for the types that have no null. */
+function nullAdvice(type: MachineType): string {
+  switch (type.kind) {
+    case "string":
+    case "array":
+      return (
+        "It owns its buffer, so a null one would be released at the end of its " +
+        "scope like any other. An empty one is the value that means nothing " +
+        "here, or a `Pointer<T>` where the absence has to be distinguishable."
+      );
+    case "reference":
+    case "interface":
+      return (
+        "A reference is bound once and read through without asking. `tryCast` " +
+        "is what produces the nullable one, and its result is checked before " +
+        "it is used."
+      );
+    default:
+      return (
+        "Only the borrowed handles have one: `Pointer<T>`, `CString`, and a " +
+        "function pointer. It is a machine word of zero, and nothing else here " +
+        "has a spare bit pattern to spend on absence."
+      );
   }
 }
 

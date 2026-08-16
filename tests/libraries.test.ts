@@ -335,6 +335,76 @@ int main(void) {
     expect(stdout).toBe("5\nhello! 6\n");
   }, CMAKE_TIMEOUT);
 
+  test("a `Pointer<unknown>` crosses as a plain `void *`", async () => {
+    // The direction that matters for a binding: C hands over an address with
+    // no type on it, Goblin passes it back, and neither side has said anything
+    // about what is behind it. The C program is the one that knows, which is
+    // exactly the arrangement `void *` exists for.
+    const lib = await library(
+      "lib-void-pointer",
+      `export function stash(slot: Pointer<Pointer<unknown>>, value: Pointer<unknown>): void {
+         slot[0] = value;
+       }
+
+       export function addressOf(p: Pointer<unknown>): usize { return p.address; }\n`,
+    );
+
+    expect(lib.headerText).toContain("void stash(void** p0, void* p1);");
+    expect(lib.headerText).toContain("uintptr_t addressOf(void* p0);");
+
+    const stdout = buildConsumer({
+      ...lib,
+      main: `#include <stdio.h>
+#include "main.h"
+
+int main(void) {
+  int value = 42;
+  void *slot = NULL;
+
+  /* An out-parameter of the shape every C API that hands back a buffer uses. */
+  stash(&slot, &value);
+  printf("%d\\n", *(int *) slot);
+  printf("%d\\n", (int) (addressOf(&value) == (uintptr_t) &value));
+  return 0;
+}
+`,
+    });
+    expect(stdout).toBe("42\n1\n");
+  }, CMAKE_TIMEOUT);
+
+  test("a null pointer is C's NULL, in both directions", async () => {
+    // `null` lowers to a machine word of zero, and this is the only place that
+    // claim can be checked: a C compiler decides what NULL compares equal to.
+    // A sentinel this compiler merely agreed with itself about would pass every
+    // test in `null.test.ts` and fail here.
+    const lib = await library(
+      "lib-null",
+      `export function nothing(): Pointer<unknown> | null { return null; }
+       export function isNull(p: Pointer<unknown> | null): boolean { return p === null; }\n`,
+    );
+
+    // `| null` is tsc's view of the program and nothing else: the header says
+    // `void*` either way, because the null is representable in the value.
+    expect(lib.headerText).toContain("void* nothing(void);");
+    expect(lib.headerText).toContain("bool isNull(void* p0);");
+
+    const stdout = buildConsumer({
+      ...lib,
+      main: `#include <stdio.h>
+#include "main.h"
+
+int main(void) {
+  int value = 7;
+  printf("%d\\n", (int) (nothing() == NULL));
+  printf("%d\\n", (int) isNull(NULL));
+  printf("%d\\n", (int) isNull(&value));
+  return 0;
+}
+`,
+    });
+    expect(stdout).toBe("1\n1\n0\n");
+  }, CMAKE_TIMEOUT);
+
   test("the header guards, and is C++-safe", async () => {
     const lib = await library(
       "lib-header-shape",

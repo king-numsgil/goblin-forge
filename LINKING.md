@@ -256,6 +256,118 @@ struct FILE* passThrough(struct FILE* p0);
 the program is the same type and nothing catches a `FILE *` passed where a
 `DIR *` was meant. Prefer the `declare class`.
 
+### `void *` and `const void *` — `Pointer<unknown>`
+
+The other pointer C hands out with nothing attached. Where an opaque handle says
+"a `FILE`, whose insides are not your business", a `void *` says nothing at all
+— and both spellings of it, `void *` and `const void *`, are `Pointer<unknown>`:
+
+```ts
+declare function memcpy(dst: Pointer<unknown>, src: Pointer<unknown>, n: usize): Pointer<unknown>;
+declare function SDL_SetEventFilter(filter: SDL_EventFilter, userdata: Pointer<unknown>): void;
+
+type SDL_EventFilter = (userdata: Pointer<unknown>, event: Pointer<SDL_Event>) => boolean;
+```
+
+There is no `const` in this language, so the two C spellings are one type here.
+That is truthful rather than lossy — they are the same machine type and the same
+ABI, and const-ness at a C boundary is documentation on both sides of it.
+
+**Passing one costs nothing to write.** Any pointer converts to a
+`Pointer<unknown>` implicitly, exactly as `T *` converts to `void *` in C:
+
+```ts
+const pixels = allocArray<u32>(width * height);
+memcpy(pixels, source, width * height * sizeOf<u32>());   // no conversion written
+```
+
+**A `FixedArray` decays, exactly as C's array does.** Where C writes
+`char buf[1024]` and passes it, so does this — to a `Pointer<u8>`, to a
+`Pointer<unknown>`, and to nothing else:
+
+```ts
+const buf: FixedArray<u8, 1024> = fixedArray(1024, 0);
+const written: usize = fwrite(buf, 1, 3, f);
+```
+
+The one rule that is not C's: a pointer to a *temporary* array may be passed as
+an argument, because the call finishes before the temporary does, but it may not
+be bound to a name that would outlive it (`GF0234`).
+
+**`null` is C's NULL**, and it is a value rather than only a type. Declare a
+parameter `Pointer<T> | null` wherever the C header accepts NULL and a return
+`Pointer<T> | null` wherever it can fail — the first costs a caller nothing, and
+the second is what makes tsc insist on the check:
+
+```ts
+declare function SDL_CreateWindow(title: CString, w: i32, h: i32, flags: u64): Pointer<SDL_Window> | null;
+declare function SDL_RenderTexture(r: Pointer<SDL_Renderer>, t: Pointer<SDL_Texture>,
+                                   src: Pointer<SDL_FRect> | null,
+                                   dst: Pointer<SDL_FRect> | null): boolean;
+
+const window = SDL_CreateWindow(cstring("goblin"), 1280, 720, 0);
+if (window === null) { return 1; }        // tsc will not let you skip this
+SDL_RenderTexture(renderer, texture, null, null);
+```
+
+`| null` costs no representation: it erases to the same machine word, so the
+nullability is tsc's view of the program and the check is a comparison against
+zero. Only the borrowed handles have a null — `Pointer<T>`, `CString` and a
+function pointer. A `string` or a `T[]` owns its buffer and has none
+(`GF0237`).
+
+**Getting a type back is `reify<T>()`**, and it is on your honour — this is the
+one direction that can be wrong, so it is the one you write:
+
+```ts
+const state = userdata.reify<GameState>();
+console.log(`${state.score}`);
+```
+
+Between the two, an erased pointer can be passed, returned, stored, compared,
+checked against null, and asked for its `.address`. Everything that would read
+through it is refused with `GF0305`, for the same reason and by the same check
+as the opaque handle's `GF0302`: `p[i]`, `p.offset(n)`, `p.deref()`, `p.free()`
+and `p.freeArray()`, plus `alloc` and `allocArray` at that type.
+
+`p.free()` is the one that matters most. `gf_free` is Rust's `dealloc` and must
+be handed the layout the block was allocated with — an erased pointer has none,
+so the call would corrupt the heap rather than return a wrong number. C++ makes
+`delete (void *)p` undefined for exactly this reason. Reify it first, or free it
+through whatever allocated it.
+
+**`void **` is an ordinary pointer to an erased one** —
+`Pointer<Pointer<unknown>>` — which is the shape of every C out-parameter that
+hands back a buffer. The outer pointer's pointee is one word and has a layout,
+so indexing through it works where indexing the erased pointer does not:
+
+```ts
+declare function SDL_LockTexture(
+  texture: Pointer<SDL_Texture>,
+  rect: Pointer<SDL_Rect>,
+  pixels: Pointer<Pointer<unknown>>,
+  pitch: Pointer<i32>,
+): boolean;
+
+const slot = allocArray<Pointer<unknown>>(1);
+const pitch = alloc<i32>();
+SDL_LockTexture(texture, rect, slot, pitch);
+const rows = slot[0].reify<u32>();
+```
+
+**Reifying a pointer that never lost its type is refused** (`GF0306`). There is
+deliberately no unchecked cast between two concrete pointee types, so
+reinterpreting one as another is written out — `p.erase().reify<Other>()` — and
+is visible where it happens. `erase()` is also there for the rare spot with no
+`void *` context to convert into.
+
+**In a library you publish**, a `Pointer<unknown>` crosses as a plain `void*`:
+
+```c
+void stash(void** p0, void* p1);
+uintptr_t addressOf(void* p0);
+```
+
 ### The C standard library is already linked
 
 It needs no configuration at all. `cc` links libc, and the runtime already

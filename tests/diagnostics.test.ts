@@ -257,6 +257,53 @@ describe("codes raised by a program", () => {
     );
   });
 
+  test("GF0237 — a null of a type that has none", async () => {
+    await expectRejected(
+      "diag-0237",
+      // One machine word, like a pointer — but an owning one, so a null would
+      // reach the drop pass and be released like any other.
+      `export function main(): i32 {
+         const s: string | null = null;
+         return s === null ? 1 : 0;
+       }\n`,
+      "GF0237",
+    );
+  });
+
+  test("GF0305 — an operation that needs what an erased pointer threw away", async () => {
+    await expectRejected(
+      "diag-0305",
+      // `void` has a layout — nought bytes, aligned to one — so this does not
+      // refuse itself. It would hand the allocator a size of zero.
+      `export function main(): i32 {
+         const p = alloc<i32>();
+         const raw: Pointer<unknown> = p;
+         raw.free();
+         return 0;
+       }\n`,
+      "GF0305",
+    );
+  });
+
+  test("GF0306 — reifying a pointer that never lost its type", async () => {
+    await expectRejected(
+      "diag-0306",
+      // `reify` is declared on `CorePointer<T>`, so tsc allows it on any
+      // pointer at all. The rule that there is no unchecked cast between two
+      // concrete pointee types is the compiler's to keep.
+      `class Rect { w: i32; }
+       class Circle { r: i32; }
+
+       export function main(): i32 {
+         const p = alloc(Rect);
+         const c = p.reify<Circle>();
+         p.free();
+         return c.r;
+       }\n`,
+      "GF0306",
+    );
+  });
+
   test("GF9004 — an output kind the backend does not know", async () => {
     const { result } = await compileSource(
       "diag-9004",
@@ -302,10 +349,13 @@ describe("the registry and the suite agree", () => {
       "GF0234",
       "GF0235",
       "GF0236",
+      "GF0237",
       "GF0301",
       "GF0302",
       "GF0303",
       "GF0304",
+      "GF0305",
+      "GF0306",
       "GF9004",
       "GF9005",
     ]);

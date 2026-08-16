@@ -341,6 +341,12 @@ class**: `Pointer<C>` is `C` and the pointer's members together, so a class
 declaring `free` would have one nothing could reach through a pointer. tsc
 cannot see that, so the compiler refuses it at the declaration.
 
+`Pointer<unknown>` is C's `void *`, for the C signatures that need one. Any
+pointer converts to one implicitly, `reify<T>()` gets a type back, and
+everything that would read through it in between is refused — including
+`free()`, which would hand the allocator a size it does not have.
+[`LINKING.md`](LINKING.md) has the details.
+
 `sizeOf<T>()` and `alignOf<T>()` answer from the same layout engine
 the backend uses.
 
@@ -473,10 +479,9 @@ on two machines.
 
 ### Not there yet
 
-`allocArray`, `p.offset()`/`p.erase()`/`p.reify()`, nullable pointers,
-array-to-pointer decay, `String.substring`/`indexOf`/`codePointAt`, closures,
-generics, `switch`, `do`/`while`, `for…of`, exceptions, static fields,
-top-level statements and top-level `const`.
+`String.substring`/`indexOf`/`codePointAt`, closures, generics, `switch`,
+`do`/`while`, `for…of`, exceptions, static fields, top-level statements and
+top-level `const`.
 
 All of them are declared or valid TypeScript, and all of them produce a
 `GF0001` diagnostic naming the construct and pointing at it.

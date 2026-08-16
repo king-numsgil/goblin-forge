@@ -585,6 +585,133 @@ decides it.
 
 ---
 
+## §13 — `void *` *(settled and built, 2026-08-16)*
+
+POINTER-ERASURE.md is the working-out; this is what landed. The forcing case was
+binding SDL3, where `void *` appears in a callback's userdata, in `memcpy`, in a
+property bag, and as `void **` on every function that hands back a buffer.
+
+**`Pointer<unknown>` erases to `Pointer<void>`.** Option 1 of the three the
+document weighs, and the cheapest by a distance: `void` is already a `TyKind`,
+`TyKind::Pointer(_)` is one machine word without ever consulting its pointee, and
+the header generator already spells it `void*`. The backend needed **nothing** —
+no new variant, no fingerprint change.
+
+`unknown` is recognised as a pointee and nowhere else. A general `unknown` →
+`void` rule in `erase()` would give a bare `let x: unknown` a machine type
+occupying no bytes; as a pointee it is the one position where "no type" means
+something. The mechanical part that had gone unnoticed is that
+`getNonNullableType(unknown)` is `{}`, so before this the failure was "an object
+with no fields has no machine representation" — true of `{}`, and nothing to do
+with what was written.
+
+**The dangerous operations are refused, and the refusals are inherited.** The
+document predicted five hand-written guards. The opaque-handle work made that
+obsolete: every operation needing a pointee's layout already funnels through
+`requireKnownLayout`, so a single `void` arm covers `p[i]`, `p.offset(n)`,
+`p.deref()`, `p.free()`, `p.freeArray()`, `alloc`, `allocArray`, `sizeOf`,
+`alignOf` and `zeroed` (`GF0305`). They have to be written down because `void`
+*has* a layout — nought bytes, aligned to one — so not one of them fails on its
+own. `free()` is the one that would not merely be wrong: `gf_free` is Rust's
+`dealloc` and must be handed the layout the block was allocated with.
+
+**Erasing is implicit; reifying is written.** C's asymmetry, for C's reason —
+throwing the type away cannot be wrong, and guessing it back can. tsc already
+agrees in both directions with no prelude change, because `CorePointer<T>` is
+covariant in `T`: `Pointer<Rect>` is assignable to `Pointer<unknown>` and not the
+reverse. So the compiler side is one arm in `#coerce` beside the existing
+`Pointer<Derived>` → `Pointer<Base>` one, and the same non-event at runtime.
+Without it every SDL call touching a `void *` grows a conversion that says
+nothing the C header did not.
+
+**`reify<U>()` is refused on a pointer that never lost its type** (`GF0306`).
+This is the wart the document names: `reify` is declared on `CorePointer<T>`, so
+tsc allows `somePointerToI32.reify<Rect>()`, which is exactly the "unchecked cast
+between two concrete pointee types" the prelude says does not exist. The rule
+makes the round trip visible — `p.erase().reify<Other>()` — at the site that
+depends on it.
+
+**Rejected: folding both into `cast<Pointer<T>>`.** The design POINTER-ERASURE.md
+probed. It kills the wart structurally rather than by rule, which is better, but
+`GF0163` already states in the code table that `cast` "is not a reinterpretation
+and not an escape hatch: converting a pointer, a string, or an aggregate is a
+different operation with different rules, and each has its own spelling." C++
+separates `static_cast` from `reinterpret_cast` for the same reason. Changing
+that meant a second overload, a worse tsc message for `cast<i32>(p)`, and
+rewriting a decision already recorded — against a wart that a frontend rule
+closes.
+
+**Rejected: `Void` and `ConstVoid` as declared types.** They would read like the
+C header and let the generator emit `const void*`, but a nominal `Void` breaks
+implicit erasure (a `private` member makes `Pointer<Rect>` unassignable), and a
+structural one is `unknown` with more names. `ConstVoid` is the worse half: there
+is no const anywhere else in the type system, so it would be a qualifier that
+exists for exactly one pointee type and enforces nothing — `const` in a generated
+header is a whole-language question about every pointer, not this one. A binding
+writes `Pointer<unknown>` for both `void *` and `const void *`, which is
+truthful: they are the same machine type and the same ABI.
+
+---
+
+## §14 — `null`, and array-to-pointer decay *(settled and built, 2026-08-16)*
+
+The two things a C binding wanted immediately after `void *`, landed together
+because writing SDL3 declarations needs all three at once.
+
+### `null` is a value, and only three types have one
+
+The *type* half had worked for a while — `Pointer<T> | null` erases to the same
+machine word as `Pointer<T>`, and `p === null` was already a comparison against
+zero — so what was missing was writing the word. `Const::Null` was already in
+the MIR and already emitted by the null *test*, so the lowering is `null` as a
+context-typed expression, `POLY` in the width pass like a numeric literal.
+
+**Which types may hold one is the whole of the rule** (`GF0237`), and it is
+closed rather than "anything one machine word wide":
+
+- **`Pointer<T>`, `CString`, a function pointer** — yes. All three are borrowed:
+  nobody here owns what they point at, so a zero is a value the type already has
+  to survive, and C hands them back all day.
+- **`string`, `T[]`** — no. One word each, and *owning*, so a null one would
+  reach the drop pass at the end of its scope and be released like any other.
+  The value that means "nothing" for those is an empty one.
+- **`Reference<T>`, a contract reference** — no, for a different reason. A
+  reference is bound once and read through without asking; `tryCast` is what
+  produces a nullable one, and its result is checked before it is used. A
+  contract reference is also not one word — it is the `(itab, data)` pair — and
+  `Const::Null` is a pointer-width zero whatever type it carries.
+
+That last clause is why the set is a written rule and not a guess: the backend
+lowers `Const::Null` to `iconst(pointer_type, 0)` unconditionally, so a type
+this list wrongly admitted would get one zero word where its representation
+wanted something else.
+
+**`const x = null` is refused** (`GF0161`), with its own message rather than the
+literal's — `null` has no *type*, where `42` merely has no *width*.
+
+### `FixedArray<T, N>` decays to `Pointer<T>` and to `Pointer<unknown>`
+
+C's conversion, and the spelling every C example uses: `char buf[1024]` passed
+to `fwrite`. POINTER-ERASURE.md flagged that this is **not** free once pointer
+casts exist, and it is right — a fixed array *is* the bytes, so decay lowers to
+an `AddrOf` of the array's place, not a retype of a value. Retyping the operand
+would give the same word by luck rather than by rule.
+
+To its own element type or to `void`, and nothing else — C's rule exactly. It is
+also all tsc permits: `FixedArray<T, N>` extends `CorePointer<T>`, so the width
+brands keep `Pointer<u8>` and `Pointer<i32>` apart before the compiler is
+reached, and a mismatched decay is a `TS2322` rather than a diagnostic of this
+compiler's own. There is deliberately no `GF0xxx` for it; a code nothing can
+reach is one `tests/diagnostics.test.ts` would have to carry an excuse for.
+
+**A temporary may be decayed as an argument and not bound to a name.** The same
+rule a borrow gets, enforced by the same `borrowsTemporary` flag and reported as
+the same `GF0234`: the call finishes inside the enclosing full-expression, so a
+pointer to a temporary array is alive for exactly as long as the call, and a
+binding would outlive it.
+
+---
+
 ## Class decisions *(2026-08-12, milestone 8)*
 
 ### Every class has a vtable pointer, including one with no virtual methods

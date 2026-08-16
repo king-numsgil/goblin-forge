@@ -360,6 +360,20 @@ export function erase(checker: ts.TypeChecker, type: ts.Type): MachineType {
         "GF0001",
       );
     }
+    // `Pointer<unknown>` is C's `void *`. Recognised **here** rather than in
+    // the scalar cascade above, so that `unknown` is a machine type only in the
+    // one position where it means something: a bare `let x: unknown` is still
+    // refused, where a general `unknown` → `void` rule would quietly give it a
+    // type occupying no bytes.
+    //
+    // `void` as a pointee has a size of zero and an alignment of one, which is
+    // an honest layout for nothing at all and a wrong answer to every question
+    // a pointer asks — a stride of nothing, a `dealloc` size of nothing. The
+    // frontend refuses all of them (`GF0305`); POINTER-ERASURE.md is the long
+    // form of why that is a written refusal rather than a natural one.
+    if (pointee.getFlags() & ts.TypeFlags.Unknown) {
+      return { kind: "pointer", pointee: { kind: "void" } };
+    }
     return { kind: "pointer", pointee: erase(checker, pointee) };
   }
 
@@ -495,7 +509,14 @@ export function nullableOf(checker: ts.TypeChecker, type: ts.Type): ts.Type | nu
 export function pointeeOf(checker: ts.TypeChecker, type: ts.Type): ts.Type | null {
   const brand = brandedProperty(checker, type, "PointerBrand");
   if (!brand) return null;
-  return checker.getNonNullableType(checker.getTypeOfSymbol(brand));
+  const pointee = checker.getTypeOfSymbol(brand);
+  // `Pointer<unknown>` is C's `void *`, and `NonNullable<unknown>` is `{}` —
+  // an empty object type, which erases to "an object with no fields has no
+  // machine representation". That message is true of `{}` and says nothing
+  // about the program that was written, so the one pointee with no type is
+  // handed back untouched for `erase` to recognise.
+  if (pointee.getFlags() & ts.TypeFlags.Unknown) return pointee;
+  return checker.getNonNullableType(pointee);
 }
 
 export function referentOf(checker: ts.TypeChecker, type: ts.Type): ts.Type | null {
@@ -842,7 +863,12 @@ export function renderType(type: MachineType): string {
     case "fnptr":
       return `(${type.params.map(renderType).join(", ")}) => ${renderType(type.returns)}`;
     case "pointer":
-      return `Pointer<${renderType(type.pointee)}>`;
+      // `Pointer<unknown>` is what a program writes; `void` is what it erases
+      // to, and only the erasure reaches here. A diagnostic that said
+      // `Pointer<void>` would name a type its reader cannot spell.
+      return type.pointee.kind === "void"
+        ? "Pointer<unknown>"
+        : `Pointer<${renderType(type.pointee)}>`;
     case "reference":
       return `Reference<${renderType(type.referent)}>`;
     case "struct":

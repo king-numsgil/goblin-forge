@@ -125,7 +125,6 @@ backend failure:
 | interface-to-interface conversion, and a contract extending another | nothing lowers either | later |
 | `Reference<T>` for anything but a class or a contract | `checker/src/types.ts`, the `isReferenceType` branch | later |
 | an interface mixing methods and data | `checker/src/types.ts`, `contractOf` — a rule, not a gap | — |
-| `p.erase()` / `p.reify<U>()` | `lower.ts`, `#pointerMethodWidth` — needs a decision about what `Pointer<unknown>` erases to; see [`POINTER-ERASURE.md`](POINTER-ERASURE.md) | later |
 | static **fields** | `classes.ts`, the `isStatic` branch over property declarations — needs module-level storage the backend has never emitted; see below | later |
 | closures / arrow functions | `lower.ts` — Tier 0 (function pointers) shipped, capture did not | later |
 | generic functions, optional/rest/defaulted/destructured parameters | `lower.ts`, `#classFnParams` and `#signature` | later |
@@ -538,6 +537,14 @@ reached the backend and panicked before the checks existed. They are now
 `p.address` is deliberately still allowed: it is the one member that never
 needed a size. If you add a member to `CorePointer<T>`, ask which of those two
 guards it belongs behind — the answer is almost never "neither".
+
+That guard is what made `void *` cheap when it landed a few days later
+(DECISIONS §13). `Pointer<unknown>` erases to `Pointer<void>`, which has the
+zero-size problem this section describes and none of the refusals for free — but
+`requireKnownLayout` was already the one place they all pass through, so it took
+a single `void` arm rather than the five hand-written guards POINTER-ERASURE.md
+budgeted for. `erase` and `reify` sit *in front of* the guard, with `address`,
+because they relabel the address rather than read through it.
 
 The C header forward-declares each handle it mentions (`struct FILE;`) and
 spells the pointer `struct FILE*`, which is C's own incomplete type.

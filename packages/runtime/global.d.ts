@@ -67,9 +67,14 @@ interface RegExp {}
  * are different types and tsc says so.
  *
  * A fixed array **decays to a `Pointer<T>`** — C's array-to-pointer conversion,
- * and what makes a C function taking `uint8_t*` callable with one. The relation
- * runs one way only: a pointer never becomes a fixed array, because it does not
- * carry a length. `free()` and `freeArray()` are inherited and are undefined
+ * and what makes a C function taking `uint8_t*` callable with one. It decays to
+ * a `Pointer<unknown>` too, so `char buf[1024]` reaches a `void *` parameter the
+ * way it does in C, and to no other pointer type. The relation runs one way
+ * only: a pointer never becomes a fixed array, because it does not carry a
+ * length.
+ *
+ * A *temporary* array may be decayed into a call, which finishes before the
+ * temporary does, but not bound to a name that would outlive it. `free()` and `freeArray()` are inherited and are undefined
  * behaviour on a fixed array, exactly as `free(buf)` is in C — this is an unsafe
  * language on purpose, and the alternative is a second pointer type whose only
  * difference is which mistakes it permits.
@@ -322,6 +327,18 @@ interface Union {
 //
 // `MetisWorld` has no layout and no members, so the only thing user code can do
 // with a `Pointer<MetisWorld>` is hand it back to the library.
+//
+// `Pointer<unknown>` is C's `void *` — an address with the type deliberately
+// thrown away, for the C signatures that need one: a callback's userdata,
+// `memcpy`, a property bag. Any pointer converts to one implicitly; getting a
+// type back is `reify<T>()`, and everything that would read through the pointer
+// in between is refused (`GF0305`).
+//
+// `Pointer<T> | null` is C's nullable pointer, and `null` is C's NULL: one
+// machine word of zero. The union costs no representation — it erases to the
+// same word — so nullability is entirely tsc's view of the program, and tsc is
+// what insists on the check before the use. Only the borrowed handles have a
+// null; a `string` or a `T[]` owns its buffer and has none (`GF0237`).
 // ---------------------------------------------------------------------------
 
 declare const PointerBrand: unique symbol;
@@ -387,10 +404,23 @@ interface CorePointer<T> {
    * type-erased pointer and the only escape hatch in the ambient surface —
    * there is deliberately no `any` and no unchecked cast between two concrete
    * pointee types.
+   *
+   * Rarely needed, because erasure is **implicit** wherever a `Pointer<unknown>`
+   * is expected, exactly as `T *` converts to `void *` in C. Write it where
+   * there is no such context to convert into — a binding being handed to
+   * something generic, or a `const` with no annotation.
    */
   erase(): Pointer<unknown>;
 
-  /** Re-attach a pointee type to an erased pointer. Entirely on your honour. */
+  /**
+   * Re-attach a pointee type to an erased pointer. Entirely on your honour.
+   *
+   * The direction that is never implicit, for C's reason: throwing the type
+   * away cannot be wrong, and guessing it back can. Only callable on a
+   * `Pointer<unknown>` — reinterpreting one concrete type as another is
+   * `p.erase().reify<Other>()`, written out (`GF0306`), so that the escape
+   * hatch is visible at the site that depends on it.
+   */
   reify<U>(): Pointer<U>;
 }
 

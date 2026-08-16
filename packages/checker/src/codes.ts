@@ -211,6 +211,27 @@ export const CODES = {
       "then take a reference to that.",
   },
 
+  GF0237: {
+    title: "this type has no null",
+    explanation:
+      "`null` reaches the backend as a machine word of zero, so it is a value " +
+      "only for the types where a zero word means \"nothing here\": " +
+      "`Pointer<T>`, `CString`, and a function pointer. All three are " +
+      "*borrowed* — nobody here owns what they point at — so a null one is " +
+      "something the type already survives, and C hands them back all day.\n\n" +
+      "A `string` and a `T[]` are one word too, and are deliberately not in " +
+      "that set: they **own** a heap buffer, so a null one would reach the drop " +
+      "pass at the end of its scope and be released like any other. An empty " +
+      "string or an empty array is the value that means \"nothing\" for those.\n\n" +
+      "A `Reference<T>` is left out for a different reason. It is bound once " +
+      "and read through without asking, which is the whole content of the type; " +
+      "`tryCast` is what produces a nullable one, and its result is checked " +
+      "before it is used.\n\n" +
+      "Nullability itself is entirely tsc's. `Pointer<T> | null` erases to the " +
+      "same machine type as `Pointer<T>`, so the null costs no representation " +
+      "and the check that comes before the use is a comparison against zero.",
+  },
+
   // -- Layout and the C boundary -------------------------------------------
   GF0301: {
     title: "this type cannot cross the C boundary",
@@ -286,6 +307,44 @@ export const CODES = {
       "Assign to a single member if you need to build one yourself: " +
       "`e.type = SDL_EventType.Quit` writes the member you name and leaves the " +
       "rest of the storage alone, which is exactly what C does.",
+  },
+
+  GF0305: {
+    title: "an erased pointer has nothing behind it",
+    explanation:
+      "`Pointer<unknown>` is C's `void *`: an address whose type has been " +
+      "deliberately thrown away. It is the language's only type-erased pointer " +
+      "and the only escape hatch in the ambient surface, and it exists because " +
+      "C's own signatures need one — `memcpy`, a callback's userdata, a " +
+      "property bag.\n\n" +
+      "A pointer to a concrete type may become one implicitly, exactly as `T *` " +
+      "converts to `void *` in C. What it cannot do is anything that needs to " +
+      "know what is there: `p[i]` and `p.offset(n)` need a stride, `p.free()` " +
+      "and `p.freeArray()` need the size and alignment the allocator was given, " +
+      "and `p.deref()` needs a shape to read through.\n\n" +
+      "The one that would not merely be wrong is `free`. `gf_free` is Rust's " +
+      "`dealloc` and must be handed the layout the block was allocated with; an " +
+      "erased pointer has none, so the call would corrupt the heap rather than " +
+      "return a wrong number. C++ makes `delete (void *)p` undefined for the " +
+      "same reason.\n\n" +
+      "Attach the type back before doing any of it — `p.reify<Rect>()` — or " +
+      "free it through whatever allocated it. `.address` still works, and so " +
+      "does passing it along, which is the whole job of an erased pointer.",
+  },
+
+  GF0306: {
+    title: "a pointer cannot be reinterpreted without erasing it first",
+    explanation:
+      "`reify<U>()` attaches a pointee type to an erased pointer. tsc lets it " +
+      "be written on any pointer, because it is declared on `CorePointer<T>` " +
+      "and there is no way to say \"only when `T` is erased\" in the " +
+      "declaration — so the compiler is what says it.\n\n" +
+      "There is deliberately no unchecked cast between two concrete pointee " +
+      "types. `p.reify<Other>()` on a `Pointer<Rect>` is C++'s " +
+      "`reinterpret_cast`, and the rule is that it has to be *visible*: write " +
+      "`p.erase().reify<Other>()`, and the erasure is there in the source at " +
+      "the site that depends on it rather than hidden in a one-token method " +
+      "call that looks like a conversion.",
   },
 
   // -- The compiler is broken ----------------------------------------------

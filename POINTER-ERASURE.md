@@ -1,13 +1,27 @@
 # Pointer erasure: `erase()` / `reify<U>()`
 
-Working notes on the last two members of `CorePointer<T>` that the prelude
-declares and the lowerer does not have. **Nothing here is adopted.** One design
-was worked out far enough to probe against real tsc, the probe passed, and it
-was rejected on taste rather than on a defect. This file exists so the next
-attempt starts from what was learned rather than from the beginning.
+Working notes, kept for the reasoning rather than for the conclusion.
+**Answered on 2026-08-16 — DECISIONS §13 is what landed**, and where the two
+disagree, that one is right.
 
-Everything else on the pointer is implemented: `address`, `deref()`, `offset()`,
-`free()`, `freeArray()`, indexing, `Pointer<T> | null`, `allocArray`.
+The short version of the outcome: option 1 below, `Pointer<unknown>` erasing to
+`Pointer<void>`; erasure implicit and reification written; `reify` refused on a
+pointer that never lost its type. Two things this file gets wrong are worth
+knowing before reading it, because both were true when it was written:
+
+- **The five hand-written guards are one.** By the time this was implemented the
+  opaque-handle work had already funnelled every layout-needing operation
+  through `requireKnownLayout`, so the refusals below are inherited from a
+  single arm rather than written five times.
+- **The mechanical blocker was not the one described.** `erase()` does not fall
+  past every branch and reach the final throw. `pointeeOf` calls
+  `getNonNullableType`, and `NonNullable<unknown>` is `{}` — so the failure was
+  "an object with no fields has no machine representation", which is true of
+  `{}` and says nothing about the program.
+
+Everything else on the pointer was already implemented when this was written:
+`address`, `deref()`, `offset()`, `free()`, `freeArray()`, indexing,
+`Pointer<T> | null`, `allocArray`.
 
 ## What the two are for
 
@@ -184,6 +198,10 @@ With that, every case behaves:
   today and a documented gap. It is *not* free in the lowerer: a fixed array
   **is** the bytes, so it lowers to an `AddrOf` of the array's place, not a
   `PtrToPtr` of a value. Its own decision, and its own change.
+
+  *Made on 2026-08-16 — DECISIONS §14. Decay is implicit rather than a cast, to
+  the element type or to `void`, and the `AddrOf` prediction above is exactly
+  what it turned out to need.*
 * **`CString` converts in neither direction.** It carries its own brand and no
   `PointerBrand`, so `cast<Pointer<u8>>(someCString)` is a type error. Probably
   right — `cstring` and `stringFromCString` already own that boundary — but raw
@@ -248,17 +266,30 @@ export function probe(): void {
 
 ## Where it stands
 
-Rejected, pending more testing and research on the shape wanted. The open
-questions, whatever spelling wins:
+Settled and built, 2026-08-16, on the four questions this section used to leave
+open. DECISIONS §13 has the reasoning; this is the tally.
 
-1. What `Pointer<unknown>` erases to — `void`, `u8`, or a new opaque kind.
-2. Whether `free()` / `freeArray()` / `offset()` / `deref()` / `p[i]` on an
-   erased pointer are refused (they must be, at least for `free`) and whether
-   those refusals are written or inherited.
-3. Whether the round trip has to be written out, so that a concrete-to-concrete
-   reinterpretation is visible rather than a one-token method call.
-4. A separate cost, if tsc rather than the compiler should enforce (2): a
-   `Pointer<unknown>` is a `CorePointer<unknown>` and so *has* those members as
-   far as the editor is concerned. Making them not exist means a distinct type
-   carrying only `address` — cleaner, but then it is not spelled
-   `Pointer<unknown>` any more.
+1. **What `Pointer<unknown>` erases to** — `void`. Option 1, and the backend
+   needed nothing at all for it.
+2. **Whether the operations are refused, and whether the refusals are written**
+   — refused, `GF0305`, and inherited from the one guard the opaque handle
+   already goes through.
+3. **Whether the round trip has to be written out** — yes. `reify` on a pointer
+   that never lost its type is `GF0306`, so a concrete-to-concrete
+   reinterpretation is `p.erase().reify<Other>()` and is visible.
+4. **Whether tsc should enforce (2) instead** — no. A distinct type carrying
+   only `address` is cleaner in an editor, but it is not spelled
+   `Pointer<unknown>` any more, and the compiler's refusal arrives with a line
+   and a reason where a missing member arrives with neither.
+
+One thing this section did not ask, and it turned out to matter more than any of
+the four: **whether erasure is implicit.** It is. `CorePointer<T>` is covariant
+in `T`, so tsc already permits `Pointer<Rect>` → `Pointer<unknown>` and already
+refuses the reverse — C's asymmetry, arrived at for free. A binding that has to
+write `.erase()` at every `void *` parameter is a binding nobody wants to
+maintain.
+
+The `cast<Pointer<T>>` design above stays rejected, and now for a stated reason
+rather than taste: `GF0163`'s own explanation in the code table already says
+`cast` is not a reinterpretation and that converting a pointer is a different
+operation with its own spelling.
