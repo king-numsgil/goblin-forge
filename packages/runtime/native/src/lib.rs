@@ -605,6 +605,21 @@ pub unsafe extern "C" fn gf_string_eq(a: GfStr, b: GfStr) -> u8 {
     unsafe { u8::from(bytes_of(a) == bytes_of(b)) }
 }
 
+/// Copy `len` bytes into a managed string, terminator or no terminator.
+///
+/// The honest primitive where a length is already known: a file read, a
+/// `void *` and a `size_t` out-parameter, a slice of a larger buffer. Scanning
+/// for a NUL there is a second pass over bytes already measured, and it is
+/// *wrong* rather than merely wasteful when the data contains one — the string
+/// would stop at the first zero and report a length nobody asked for.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gf_string_from_bytes(pointer: *const u8, len: usize) -> GfStr {
+    if pointer.is_null() || len == 0 {
+        return unsafe { from_bytes(b"") };
+    }
+    unsafe { from_bytes(core::slice::from_raw_parts(pointer, len)) }
+}
+
 /// Copy a NUL-terminated C string into a managed string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gf_string_from_cstr(pointer: *const u8) -> GfStr {

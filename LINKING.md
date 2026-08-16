@@ -185,7 +185,37 @@ export function main(): i32 {
 
 Use `cstringFree` **only** on a `CString` that came from `cstring(move(…))` —
 same sixteen-byte header, so handing it anything else is not a leak, it is
-memory corruption. `stringFromCString` goes the other way and copies.
+memory corruption.
+
+### Bytes coming back: `stringFromBytes` and `stringFromCString`
+
+Both copy raw bytes into an owned `string`, and which one to reach for is
+decided by what the C call gave you:
+
+```ts
+// A pointer and a length, in the same call — the usual shape.
+const size: FixedArray<usize, 1> = fixedArray(1, 0);
+const data = SDL_LoadFile_IO(io, size, false);
+if (data !== null) {
+  console.log(stringFromBytes(data.reify<u8>(), size[0]));
+  SDL_free(data);                       // SDL allocated it; SDL releases it
+}
+
+// Only a pointer, with the terminator as the only end marker.
+console.log(stringFromCString(SDL_GetError()));
+```
+
+**Prefer the length whenever you have one.** `stringFromCString` scans for a
+NUL, which is a second pass over bytes something already counted — and for file
+contents it is the *wrong* answer rather than a slow one, because a zero byte
+anywhere in the data ends the string there. Both take a `CString`, a
+`Pointer<u8>`, or a fixed array of bytes, which decays like any other.
+
+The copy is the point: what comes back is a `string` that its scope releases,
+and the source buffer is untouched and still belongs to whoever allocated it.
+That is also the one to watch — a buffer a C library handed you is a leak until
+you call *that library's* deallocator on it, and Goblin's live-allocation report
+cannot see it, because the allocation was never Goblin's.
 
 ### Opaque handles — `FILE *`, and every library like it
 

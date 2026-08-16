@@ -187,6 +187,109 @@ describe("CString", () => {
     );
   });
 
+  test("`stringFromBytes` copies a length rather than scanning for a NUL", async () => {
+    // The shape a C boundary actually hands over: a pointer and a length, in
+    // the same call. `SDL_LoadFile_IO(io, &size, …)` is this, and so is every
+    // read into a buffer.
+    const result = await run(
+      "cstring-from-bytes",
+      `export function main(): i32 {
+         const buf = allocArray<u8>(5);
+         buf[0] = 104; buf[1] = 101; buf[2] = 108; buf[3] = 108; buf[4] = 111;
+
+         // No terminator anywhere in the buffer, and none needed.
+         const whole: string = stringFromBytes(buf, 5);
+         const part: string = stringFromBytes(buf, 4);
+         console.log(\`\${whole} \${part} \${whole.length}\`);
+
+         buf.freeArray();
+         return 0;
+       }\n`,
+    );
+    expect(result.stdout).toBe("hello hell 5\n");
+    expect(result.leaked).toBe(0);
+  });
+
+  test("and keeps the bytes a scan would have stopped at", async () => {
+    // The reason this is a correctness fix and not a convenience: a zero in the
+    // data ends `stringFromCString` early, and the length is what says
+    // otherwise. Reading a file is exactly where that happens.
+    const result = await run(
+      "cstring-embedded-nul",
+      `export function main(): i32 {
+         const buf = allocArray<u8>(3);
+         buf[0] = 97; buf[1] = 0; buf[2] = 98;
+
+         const scanned: string = stringFromCString(buf);
+         const counted: string = stringFromBytes(buf, 3);
+         console.log(\`\${scanned.length} \${counted.length}\`);
+
+         buf.freeArray();
+         return 0;
+       }\n`,
+    );
+    expect(result.stdout).toBe("1 3\n");
+    expect(result.leaked).toBe(0);
+  });
+
+  test("a fixed array decays into it, as it would at any pointer parameter", async () => {
+    // `char buf[64]` filled by a C call, then read out by the count that call
+    // returned. An intrinsic's argument never meets a declared parameter type,
+    // so the decay is asked for rather than inherited — and this is the test
+    // that says so.
+    const result = await run(
+      "cstring-from-bytes-fixed",
+      `export function main(): i32 {
+         const buf: FixedArray<u8, 64> = fixedArray(64, 0);
+         buf[0] = 104; buf[1] = 105;
+         const s: string = stringFromBytes(buf, 2);
+         const scanned: string = stringFromCString(buf);
+         console.log(\`\${s} \${scanned}\`);
+         return 0;
+       }\n`,
+    );
+    expect(result.stdout).toBe("hi hi\n");
+    expect(result.leaked).toBe(0);
+  });
+
+  test("a zero length is the empty string, and a null pointer too", async () => {
+    const result = await run(
+      "cstring-from-bytes-empty",
+      `export function main(): i32 {
+         const buf = allocArray<u8>(2);
+         buf[0] = 97; buf[1] = 98;
+         const none: string = stringFromBytes(buf, 0);
+         console.log(\`[\${none}] \${none.length}\`);
+         buf.freeArray();
+         return 0;
+       }\n`,
+    );
+    expect(result.stdout).toBe("[] 0\n");
+    expect(result.leaked).toBe(0);
+  });
+
+  test("the bytes stay whoever's they were", async () => {
+    // A copy, like `stringFromCString`: the source buffer is untouched and is
+    // still released by whoever allocated it — which for a C library means that
+    // library's own deallocator.
+    const result = await run(
+      "cstring-from-bytes-copies",
+      `export function main(): i32 {
+         const buf = allocArray<u8>(2);
+         buf[0] = 104; buf[1] = 105;
+
+         const copied: string = stringFromBytes(buf, 2);
+         buf[0] = 106;                       // change the source afterwards
+
+         console.log(\`\${copied} \${cast<i32>(buf[0])}\`);
+         buf.freeArray();
+         return 0;
+       }\n`,
+    );
+    expect(result.stdout).toBe("hi 106\n");
+    expect(result.leaked).toBe(0);
+  });
+
   test("a `CString` crosses to C as a plain `const char *`", async () => {
     // Which is the whole point of the type. Declared with no body, so it is an
     // `extern "C"` import — and `strlen` from the platform's own C library is

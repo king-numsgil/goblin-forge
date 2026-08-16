@@ -693,6 +693,31 @@ declare function cast<T extends number>(value: number): T;
  */
 declare function stringFromCString(pointer: Pointer<u8> | CString): string;
 
+/**
+ * Copy `length` bytes into a managed string, terminator or not.
+ *
+ * The one to reach for at a C boundary, because the length usually arrives in
+ * the same call as the pointer:
+ *
+ * ```ts
+ * const size: FixedArray<usize, 1> = fixedArray(1, 0);
+ * const data = SDL_LoadFile_IO(io, size, false);
+ * if (data !== null) {
+ *   console.log(stringFromBytes(data.reify<u8>(), size[0]));
+ *   SDL_free(data);
+ * }
+ * ```
+ *
+ * {@link stringFromCString} would scan those bytes for a NUL — a second pass
+ * over bytes already measured, and the *wrong* answer rather than merely a slow
+ * one if the data contains a zero, because the string would stop there. Use the
+ * scanning version only when a length is genuinely not available.
+ *
+ * The bytes are copied, so they stay whoever's they were: a buffer a C library
+ * allocated is still released by that library's own deallocator.
+ */
+declare function stringFromBytes(bytes: Pointer<u8> | CString, length: usize): string;
+
 // ---------------------------------------------------------------------------
 // CString
 //

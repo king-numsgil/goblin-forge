@@ -969,6 +969,12 @@ describe("void pointers", () => {
          count: usize,
          stream: Pointer<FILE>,
        ): usize;
+       declare function fread(
+         ptr: Pointer<unknown>,
+         size: usize,
+         count: usize,
+         stream: Pointer<FILE>,
+       ): usize;
        declare function fclose(stream: Pointer<FILE>): i32;
 `;
 
@@ -1032,6 +1038,38 @@ describe("void pointers", () => {
     );
     expect(result.stdout).toBe("3\n");
     expect(readFileSync(path, "utf8")).toBe("Gob");
+  });
+
+  test("a file read is bytes and a length, and that is a `string`", async () => {
+    // The whole loop a binding actually performs: hand C a buffer as a
+    // `void *`, get a count back, and turn exactly that many bytes into a
+    // `string`. No terminator is written and none is needed — which is the
+    // difference between `stringFromBytes` and a scan.
+    const path = scratchPath("void-file-roundtrip.txt");
+    const result = await run(
+      "void-file-roundtrip",
+      `${FWRITE}
+       export function main(): i32 {
+         const out: FixedArray<u8, 6> = fixedArray(6, 0);
+         out[0] = 71; out[1] = 111; out[2] = 98; out[3] = 108; out[4] = 105; out[5] = 110;
+
+         const w = fopen(cstring("${path}"), cstring("wb"));
+         if (w === null) { console.log("open failed"); return 1; }
+         fwrite(out, 1, 6, w);
+         fclose(w);
+
+         const r = fopen(cstring("${path}"), cstring("rb"));
+         if (r === null) { console.log("reopen failed"); return 2; }
+         const buf: FixedArray<u8, 64> = fixedArray(64, 0);
+         const read: usize = fread(buf, 1, 64, r);
+         fclose(r);
+
+         console.log(\`\${read} "\${stringFromBytes(buf, read)}"\`);
+         return 0;
+       }\n`,
+    );
+    expect(result.stdout).toBe('6 "Goblin"\n');
+    expect(result.leaked).toBe(0);
   });
 
   test("every operation that would need the pointee is GF0305", async () => {

@@ -122,6 +122,8 @@ const NATIVE_ALIGN_OF = "alignOf";
 const NATIVE_ZEROED = "zeroed";
 /** `stringFromCString(p)` — copy a `const char *` into a managed `string`. */
 const STRING_FROM_CSTRING = "stringFromCString";
+/** `stringFromBytes(p, n)` — the same copy, with the length already known. */
+const STRING_FROM_BYTES = "stringFromBytes";
 
 /** `p.address` — the pointer's bits, as a `usize`. */
 const POINTER_ADDRESS = "address";
@@ -207,6 +209,14 @@ const RUNTIME = {
    * be adopted as a `string`; the length would have nowhere to live.
    */
   fromCString: "gf_string_from_cstr",
+  /**
+   * `gf_string_from_bytes(p, n)` — allocate, copy `n` bytes, NUL-terminate.
+   *
+   * The same copy without the scan, for the case where the length is already
+   * known — which at a C boundary is most of them, because the length arrived
+   * in the same call as the pointer.
+   */
+  fromBytes: "gf_string_from_bytes",
   /**
    * `gf_args(argc, argv)` — the platform's arguments, as an owned `string[]`.
    *
@@ -4522,11 +4532,16 @@ class BodyLowerer {
       return typed(VOID);
     }
 
-    // `stringFromCString(p)` is a `string`, and an owned one — it is the copy
-    // that turns bytes nobody tracks into bytes a scope releases.
-    if (expression.expression.text === STRING_FROM_CSTRING) {
-      const argument = expression.arguments[0];
-      if (argument !== undefined && this.width(argument).kind === "error") return ERROR;
+    // `stringFromCString(p)` and `stringFromBytes(p, n)` are a `string`, and an
+    // owned one — the copy that turns bytes nobody tracks into bytes a scope
+    // releases.
+    if (
+      expression.expression.text === STRING_FROM_CSTRING ||
+      expression.expression.text === STRING_FROM_BYTES
+    ) {
+      for (const argument of expression.arguments) {
+        if (this.width(argument).kind === "error") return ERROR;
+      }
       return typed(STRING);
     }
 
@@ -7198,6 +7213,7 @@ class BodyLowerer {
     if (name === ALLOC) return this.#alloc(expression, natural);
     if (name === ALLOC_ARRAY) return this.#allocArray(expression, natural);
     if (name === STRING_FROM_CSTRING) return this.#stringFromCString(expression);
+    if (name === STRING_FROM_BYTES) return this.#stringFromBytes(expression);
     if (name === NATIVE_SIZE_OF || name === NATIVE_ALIGN_OF) {
       return this.#layoutQuery(expression, name === NATIVE_SIZE_OF);
     }
@@ -7678,20 +7694,70 @@ class BodyLowerer {
       );
       return undefined;
     }
+    const value = this.#bytesArgument(argument, STRING_FROM_CSTRING);
+    if (value === undefined) return undefined;
+    return this.#callRuntime(expression, RUNTIME.fromCString, [value], STRING);
+  }
+
+  /**
+   * The pointer argument of a "read these bytes" intrinsic.
+   *
+   * A `CString`, a `Pointer<u8>`, or a fixed array — which decays here exactly
+   * as it would at any other pointer parameter. The decay has to be asked for
+   * rather than inherited, because an intrinsic's argument never meets the
+   * declared parameter type that {@link #coerce} would have converted against:
+   * these are lowered at their natural type and inspected.
+   */
+  #bytesArgument(argument: ts.Expression, what: string): Typed | undefined {
     const value = this.#value(argument, CSTRING_TYPE);
     if (value === undefined) return undefined;
+    if (value.type.kind === "fixedArray") {
+      return this.#coerce(argument, value, {
+        kind: "pointer",
+        pointee: value.type.element,
+      });
+    }
     // A `Pointer<u8>` as well as a `CString`, because that is what the
     // declaration says and because `argv`'s entries arrive as one.
     if (value.type.kind !== "cstring" && value.type.kind !== "pointer") {
       this.#outer.error(
         argument,
         "GF0002",
-        `\`stringFromCString\` reads a \`CString\` or a \`Pointer<u8>\`, and this ` +
-          `is a \`${renderType(value.type)}\`.`,
+        `\`${what}\` reads a \`CString\`, a \`Pointer<u8>\` or a fixed array of ` +
+          `bytes, and this is a \`${renderType(value.type)}\`.`,
       );
       return undefined;
     }
-    return this.#callRuntime(expression, RUNTIME.fromCString, [value], STRING);
+    return value;
+  }
+
+  /**
+   * `stringFromBytes(p, n)` — copy `n` bytes into a managed `string`.
+   *
+   * {@link #stringFromCString} without the scan, and the one to reach for at a
+   * C boundary, because the length usually arrived in the same call as the
+   * pointer — `SDL_LoadFile_IO(io, size, …)` hands over both. Scanning there is
+   * a second pass over bytes already measured, and it is *wrong* rather than
+   * merely wasteful for data that contains a zero: the string would stop at it.
+   *
+   * The copy is the same copy, so the result is an owned temporary and the
+   * bytes stay whoever's they were.
+   */
+  #stringFromBytes(expression: ts.CallExpression): Typed | undefined {
+    const [pointer, length] = expression.arguments;
+    if (expression.arguments.length !== 2 || pointer === undefined || length === undefined) {
+      this.#outer.error(
+        expression,
+        "GF0002",
+        "`stringFromBytes` takes a `Pointer<u8>` and a length.",
+      );
+      return undefined;
+    }
+    const value = this.#bytesArgument(pointer, STRING_FROM_BYTES);
+    if (value === undefined) return undefined;
+    const count = this.#expressionTyped(length, USIZE);
+    if (count === undefined) return undefined;
+    return this.#callRuntime(expression, RUNTIME.fromBytes, [value, count], STRING);
   }
 
   /** The contract `tryCast<T>(…)` was asked for, or `undefined`. */
