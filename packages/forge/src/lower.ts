@@ -5512,11 +5512,14 @@ class BodyLowerer {
    * It exists because a union has no other way to come into being: an object
    * literal would have to supply every member at once (`GF0304`), and a binding
    * without an initialiser is not a thing yet. Zero is a valid starting state
-   * for every member of a union, which is what makes this the right shape for
-   * handing one to C:
+   * for every member of a union:
    *
    *     let event = zeroed<SDL_Event>();
-   *     while (SDL_PollEvent(addressOf(event))) { … }
+   *     event.type = SDL_EventType.Quit;
+   *
+   * By value only. A C function that *fills* a union takes a pointer, and
+   * nothing takes the address of a local, so that case is `alloc<SDL_Event>()`
+   * — which zeroes the same way and hands back something passable.
    *
    * Useful well beyond unions — a zeroed struct is a common enough thing to
    * want — which is why it is spelled generally rather than as a union ritual.

@@ -273,11 +273,16 @@ export const CODES = {
       "exactly one. Writing `{ type: 1, key: … }` asks for two members to be " +
       "live in bytes that can only hold one, and there is no sensible reading " +
       "of which wins.\n\n" +
-      "A union is zero-initialised — `let e: SDL_Event;` gives all-zero bytes, " +
-      "which is a valid starting state for every member — and then filled, " +
-      "usually by the C function you pass it to:\n\n" +
-      "    let event: SDL_Event;\n" +
-      "    while (SDL_PollEvent(addressOf(event))) { … }\n\n" +
+      "A union is zero-initialised and then filled. `zeroed<SDL_Event>()` gives " +
+      "all-zero bytes, which is a valid starting state for every member:\n\n" +
+      "    let event = zeroed<SDL_Event>();\n" +
+      "    event.type = SDL_EventType.Quit;\n\n" +
+      "A C function that fills one needs a *pointer* to it, and there is no way " +
+      "to take the address of a local. `alloc` is how that one goes, and the " +
+      "pointer reaches the members directly:\n\n" +
+      "    const event = alloc<SDL_Event>();\n" +
+      "    while (SDL_PollEvent(event)) { … }\n" +
+      "    event.free();\n\n" +
       "Assign to a single member if you need to build one yourself: " +
       "`e.type = SDL_EventType.Quit` writes the member you name and leaves the " +
       "rest of the storage alone, which is exactly what C does.",

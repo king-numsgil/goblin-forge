@@ -133,6 +133,7 @@ backend failure:
 | incremental builds | `CompileOptions.incremental` is reserved and unread | later |
 | `throw` / unwinding | `Terminator::Resume` errors | later |
 | a binding with no initialiser — `let e: SDL_Event;` | `lower.ts` — tsc wants `let e!: T` for its own definite-assignment rule, and the lowerer refuses either spelling. `zeroed<T>()` is the way to write it meanwhile | later |
+| **taking the address of a local** — C's `&x` | nothing produces one: `alloc` and `allocArray` are the only sources of a `Pointer<T>`, and both are heap. So a C function that fills a struct or union out-parameter needs `alloc<T>()` and a `.free()`, where C would have used a stack slot. Wants a decision about escape analysis before it can be safe | later |
 | a namespace holding anything but `type Underlying` | `lower.ts`, `#checkEnumNamespace` — a rule, not a gap: there is no module-level storage for one to hold | — |
 | **string enums** | `checker/src/types.ts`, `enumUnderlying` — implementable and cheap (the members are string constants), and currently the only way to write named string constants, since module-level `const` is unsupported | later |
 | `>>>`, the comma operator, `&&=` / `\|\|=` / `??=`, `??` | `lower.ts` — `>>>` also wants a decision, since an explicit unsigned width already spells a logical shift as `>>` | later |

@@ -125,6 +125,27 @@ describe("making one", () => {
     expect(result.stdout).toBe("0\n");
   });
 
+  test("a union a C function fills is `alloc`, not `zeroed`", async () => {
+    // The shape a poll loop actually has. Nothing takes the address of a
+    // local, so a union that C writes into has to be one `alloc` handed back a
+    // pointer to — and the pointer reaches the members without a dereference,
+    // which is what makes it read like the C.
+    const result = await run(
+      "union-alloc",
+      `interface Ev extends Union { type: u32; whole: u64; }
+       export function main(): i32 {
+         const e = alloc<Ev>();
+         e.whole = 0;
+         e.type = 9;
+         console.log(\`\${e.type} \${e.whole}\`);
+         e.free();
+         return 0;
+       }
+`,
+    );
+    expect(result.stdout).toBe("9 9\n");
+  });
+
   test("`zeroed` of a class is refused — it would skip the constructor", async () => {
     await expectRejected(
       "union-zeroed-class",

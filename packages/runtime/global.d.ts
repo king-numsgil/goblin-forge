@@ -596,9 +596,14 @@ declare function alignOf<T>(): usize;
  * A `T` whose bytes are all zero — what `alloc<T>()` gives, on the stack.
  *
  *     let event = zeroed<SDL_Event>();
- *     while (SDL_PollEvent(addressOf(event))) { … }
+ *     event.type = SDL_EventType.Quit;
  *
- * This is how a {@link Union} is made. An object literal cannot build one —
+ * This is how a {@link Union} is made **by value**. A C function that *fills*
+ * one needs a pointer to it, and there is no way to take the address of a
+ * local — so that case is `alloc<SDL_Event>()` instead, whose pointer reaches
+ * the members directly and is released with `.free()`.
+ *
+ * An object literal cannot build one —
  * it would have to supply every member, and a union has room for one — so
  * zeroing and then assigning the member you mean is the whole construction
  * story, exactly as it is in C.
