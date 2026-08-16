@@ -278,6 +278,50 @@ wider values through stdout.
 
 ---
 
+## What the backend optimises, and what it does not
+
+Cranelift 0.134. `optLevel` defaults to `"speed"` (`compile.ts`), and `"size"`
+maps to Cranelift's `speed_and_size` rather than to a pure size mode.
+
+From `Context::optimize`, at `"speed"`:
+
+| Runs | What |
+|---|---|
+| always, every level | unreachable-code elimination, constant-phi removal, alias resolution; then instruction selection, regalloc2, branch ordering and emission in `isa.compile_function` |
+| `opt_level != none` | `egraph_pass` — the mid-end: GVN, constant folding, algebraic rewrites, LICM, and redundant-load elimination through `AliasAnalysis` |
+
+`enable_alias_analysis` is left at its default of `true`; Cranelift documents it
+as effective only at `speed` / `speed_and_size`, so the default level is what
+switches it on.
+
+**The IR verifier is off unless `strictInternalErrors` is set.** Cranelift
+defaults `enable_verifier` to `true` and runs it *twice* per function — once in
+`Context::compile`, once inside `Context::optimize`. It checks that the CLIF
+this compiler produced is well formed, which says nothing about the program
+being compiled, so it is a pure compile-time cost in a shipped build. It is now
+tied to the flag that already means "a compiler bug should be loud here"
+(REWRITE-PLAN §8), which the test harness sets — so every test still compiles
+with it on. If the two ever need to be separated, `verify_ir` on
+`CodegenOptions` is the seam.
+
+**Nothing is inlined — worth researching.** Cranelift 0.134 does have an
+inliner, but `Context::inline(impl Inline)` is caller-driven: the embedder
+supplies the policy and calls it. `object.rs` only calls `define_function`, so
+no call is ever inlined. For a value-semantics language whose ordinary shape is
+small accessors, one-line methods and `this`-borrowing wrappers, that is
+probably the largest single performance item outstanding. Open questions before
+attempting it: where the policy lives (a size heuristic in `object.rs`, or
+something the frontend marks in the MIR), whether it can run at all when each
+module is compiled to its own object file, and what it does to compile time —
+which is the budget this project has otherwise been careful with.
+
+A smaller note: host builds go through `cranelift_native::builder()` and pick
+up the host's CPU features. An explicit `--target` triple goes through
+`isa::lookup()`, which is **baseline only** — so a cross-compiled binary is
+more conservative than a native build of the same source.
+
+---
+
 ## Classes, as built
 
 Read this before touching `classes.ts` or the class paths in `translate.rs`.

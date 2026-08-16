@@ -155,6 +155,7 @@ impl Backend {
             ))
         })?;
 
+        let strict_internal_errors = options.strict_internal_errors.unwrap_or(false);
         if let Some(strict) = options.strict_internal_errors {
             goblin_codegen::error::set_panic_on_internal_errors(strict);
         }
@@ -165,6 +166,11 @@ impl Backend {
                 opt_level,
                 debug_info: options.debug_info,
                 checked: options.checked,
+                // The same signal, because it answers the same question: this
+                // is a build where a compiler bug should be loud. The harness
+                // sets it, so every test compiles with the verifier on and a
+                // shipped compiler does not pay for it.
+                verify_ir: strict_internal_errors,
             },
         })
     }

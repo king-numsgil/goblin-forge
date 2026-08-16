@@ -25,6 +25,16 @@ pub struct CodegenOptions {
     pub debug_info: bool,
     /// Runtime liveness checks.
     pub checked: bool,
+    /// Run Cranelift's IR verifier.
+    ///
+    /// Cranelift defaults this **on**, and it is a compile-time cost with no
+    /// effect on the code produced: it checks that the CLIF handed to it is
+    /// well formed, which is a statement about this compiler rather than about
+    /// the program being compiled. So it belongs on exactly when a broken
+    /// compiler is what you are looking for — the same builds that panic on an
+    /// internal error rather than returning one (REWRITE-PLAN §8) — and off in
+    /// a shipped compiler, which is why it is not simply left at its default.
+    pub verify_ir: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -214,6 +224,16 @@ fn make_isa(options: &CodegenOptions) -> Result<std::sync::Arc<dyn isa::TargetIs
     // Position-independent code by default: it is what every modern platform
     // wants, and a `shared-lib` target will require it outright.
     let _ = flags.set("is_pic", "true");
+    // Cranelift's own default is `true`, and it runs the verifier twice per
+    // function — once in `Context::compile`, once inside `Context::optimize`.
+    // Leaving it at the default made every shipped build pay for a check of
+    // the compiler's own output.
+    flags
+        .set(
+            "enable_verifier",
+            if options.verify_ir { "true" } else { "false" },
+        )
+        .map_err(|error| InternalError::new(format!("setting enable_verifier: {error}")))?;
 
     let shared = settings::Flags::new(flags);
 
