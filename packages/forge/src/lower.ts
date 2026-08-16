@@ -256,6 +256,27 @@ const OPERATOR_TOKENS: Partial<Record<ts.SyntaxKind, Operator>> = {
   [ts.SyntaxKind.ExclamationEqualsEqualsToken]: "!==",
 };
 
+/**
+ * `a += b` and the rest, as the operator they apply.
+ *
+ * Only the operators that produce a *value* of the operand type appear here: a
+ * comparison has no compound form to spell, and `&&=` / `||=` / `??=` are
+ * conditional assignments rather than operators — they write only sometimes,
+ * which is control flow and not this table's shape.
+ */
+const COMPOUND_TOKENS: Partial<Record<ts.SyntaxKind, Operator>> = {
+  [ts.SyntaxKind.PlusEqualsToken]: "+",
+  [ts.SyntaxKind.MinusEqualsToken]: "-",
+  [ts.SyntaxKind.AsteriskEqualsToken]: "*",
+  [ts.SyntaxKind.SlashEqualsToken]: "/",
+  [ts.SyntaxKind.PercentEqualsToken]: "%",
+  [ts.SyntaxKind.AmpersandEqualsToken]: "&",
+  [ts.SyntaxKind.BarEqualsToken]: "|",
+  [ts.SyntaxKind.CaretEqualsToken]: "^",
+  [ts.SyntaxKind.LessThanLessThanEqualsToken]: "<<",
+  [ts.SyntaxKind.GreaterThanGreaterThanEqualsToken]: ">>",
+};
+
 /** How an operator is spelled in the MIR. */
 const MIR_OPS: Record<Operator, BinOp> = {
   "+": "Add",
@@ -3351,14 +3372,206 @@ class BodyLowerer {
       this.#value(expression, undefined);
       return;
     }
+    if (ts.isBinaryExpression(expression)) {
+      const kind = expression.operatorToken.kind;
+      if (kind === ts.SyntaxKind.EqualsToken) {
+        this.#assignment(expression);
+        return;
+      }
+      const compound = COMPOUND_TOKENS[kind];
+      if (compound !== undefined) {
+        this.#compoundAssignment(expression, compound);
+        return;
+      }
+    }
+    // `i++` and `++i` differ only in the value they produce, and a statement
+    // discards it — so in this position they are the same update, and the
+    // distinction never has to be lowered. It reappears in value position,
+    // which is where `#unary` still refuses them.
     if (
-      ts.isBinaryExpression(expression) &&
-      expression.operatorToken.kind === ts.SyntaxKind.EqualsToken
+      ts.isPrefixUnaryExpression(expression) &&
+      (expression.operator === ts.SyntaxKind.PlusPlusToken ||
+        expression.operator === ts.SyntaxKind.MinusMinusToken)
     ) {
-      this.#assignment(expression);
+      this.#incrementDecrement(
+        expression,
+        expression.operand,
+        expression.operator === ts.SyntaxKind.PlusPlusToken,
+      );
+      return;
+    }
+    if (ts.isPostfixUnaryExpression(expression)) {
+      this.#incrementDecrement(
+        expression,
+        expression.operand,
+        expression.operator === ts.SyntaxKind.PlusPlusToken,
+      );
       return;
     }
     this.#outer.unsupported(expression, "this expression as a statement");
+  }
+
+  /**
+   * `a += b`, and every operator that has a compound form.
+   *
+   * Not a desugaring to `a = a + b`: the target is resolved to a place **once**
+   * and then read and written through, so `xs[next()] += 1` advances `next`
+   * once. Writing it as a desugaring is the version that looks obviously
+   * correct and evaluates the subscript twice.
+   */
+  #compoundAssignment(expression: ts.BinaryExpression, operator: Operator): void {
+    const target = this.#targetPlace(expression.left);
+    if (target === undefined) return;
+    const info = OPERATORS[operator];
+    this.#updateInPlace(
+      expression.operatorToken,
+      target,
+      operator,
+      `${operator}=`,
+      (type) =>
+        // A shift count converts to the value's type rather than promoting it,
+        // exactly as in `#binary`: `x <<= someI64` still shifts an `x`-wide
+        // value (REWRITE-PLAN §7).
+        info.shift
+          ? this.#shiftCount(expression.right, type)
+          : this.#expression(expression.right, type),
+    );
+  }
+
+  /** `a++`, `a--`, `++a`, `--a` — an update by one. */
+  #incrementDecrement(at: ts.Node, operand: ts.Expression, increment: boolean): void {
+    const target = this.#targetPlace(operand);
+    if (target === undefined) return;
+    const spelling = increment ? "++" : "--";
+    this.#updateInPlace(at, target, increment ? "+" : "-", spelling, (type) =>
+      this.#oneOf(at, type),
+    );
+  }
+
+  /**
+   * The place an assignment target denotes, resolved exactly once.
+   *
+   * A read-modify-write needs an address it can both read and store through,
+   * and needs it computed a single time. {@link #elementPlace} has already
+   * materialised a computed subscript into a local, so reusing the `Place` it
+   * hands back re-reads that local rather than evaluating the index again.
+   */
+  #targetPlace(target: ts.Expression): { place: Place; type: MachineType } | undefined {
+    if (ts.isParenthesizedExpression(target)) return this.#targetPlace(target.expression);
+
+    if (ts.isIdentifier(target)) {
+      const binding = this.#scopes.lookup(target.text);
+      if (binding === undefined) {
+        this.#outer.unsupported(target, "updating a non-local name");
+        return undefined;
+      }
+      // The update reads the binding before it writes it, so a moved-from
+      // local is as unreadable here as it is anywhere else.
+      if (this.#readMoved(target, binding.local, target.text)) return undefined;
+      return { place: placeOf(binding.local), type: binding.type };
+    }
+
+    if (ts.isElementAccessExpression(target)) {
+      const element = this.#elementPlace(target);
+      if (element === undefined) return undefined;
+      return { place: element.place, type: element.element };
+    }
+
+    if (ts.isPropertyAccessExpression(target)) {
+      // An accessor is a call to read and a call to write, not an address.
+      // Updating one in place is a get, an operator and a set — a different
+      // lowering from this one, and not written yet. Saying that is more use
+      // than reporting that it is not a place.
+      if (
+        this.#staticAccessorAt(target, true) !== undefined ||
+        this.#staticAccessorAt(target, false) !== undefined
+      ) {
+        this.#outer.unsupported(target, "updating a static accessor in place");
+        return undefined;
+      }
+      const subject = this.#value(target.expression, undefined);
+      if (subject === undefined) return undefined;
+      const asClass = this.#asClass(subject);
+      if (
+        asClass !== undefined &&
+        (asClass.info.setters.has(target.name.text) ||
+          asClass.info.getters.has(target.name.text))
+      ) {
+        this.#outer.unsupported(target, "updating an accessor in place");
+        return undefined;
+      }
+      return this.#fieldPlaceOf(target, subject, asClass);
+    }
+
+    this.#outer.unsupported(target, "updating this expression");
+    return undefined;
+  }
+
+  /**
+   * `place op= value` — the read-modify-write that `+=` and `++` both reduce
+   * to.
+   *
+   * The operand type is the **target's**, never one promoted from the two
+   * sides: `someU8 += 300` is a `u8` addition, because the place it lands in
+   * is eight bits wide and writing the update in this form widens nothing.
+   */
+  #updateInPlace(
+    at: ts.Node,
+    target: { place: Place; type: MachineType },
+    operator: Operator,
+    spelling: string,
+    rhs: (type: Extract<MachineType, { kind: "scalar" }>) => Operand | undefined,
+  ): void {
+    const type = target.type;
+    // Every operator with a compound form is arithmetic or bitwise, and both
+    // are defined on the numeric widths alone. A `string`, a reference or a
+    // struct reaching Cranelift as an `Add` is precisely the backend failure
+    // REWRITE-PLAN §8 says must not be reachable from source.
+    if (type.kind !== "scalar") {
+      this.#outer.error(
+        at,
+        "GF0002",
+        `\`${spelling}\` works on the numeric widths; this is \`${renderType(type)}\`.`,
+      );
+      return;
+    }
+    if (OPERATORS[operator].integerOnly && isFloatType(type)) {
+      this.#outer.error(
+        at,
+        "GF0162",
+        `\`${operator}\` is defined on integers; this operand is \`${type.name}\`.`,
+      );
+      return;
+    }
+
+    const value = rhs(type);
+    if (value === undefined) return;
+
+    this.#push({
+      kind: "Assign",
+      place: target.place,
+      rvalue: {
+        kind: "Binary",
+        op: MIR_OPS[operator],
+        // A scalar is trivial, so reading the place is a register read that
+        // leaves the value in place for the store that follows it.
+        lhs: { kind: "Copy", value: target.place },
+        rhs: value,
+      },
+    });
+  }
+
+  /** The `1` that `++` and `--` apply, at the width of what they update. */
+  #oneOf(at: ts.Node, type: Extract<MachineType, { kind: "scalar" }>): Operand {
+    const ty = this.#outer.tyOf(type, at);
+    if (isFloatType(type)) {
+      const bits =
+        type.name === "f32"
+          ? BigInt(new Uint32Array(new Float32Array([1]).buffer)[0]!)
+          : new BigUint64Array(new Float64Array([1]).buffer)[0]!;
+      return { kind: "Const", value: { kind: "Float", bits, ty } };
+    }
+    return { kind: "Const", value: { kind: "Int", bits: 1n, ty } };
   }
 
   #assignment(expression: ts.BinaryExpression): void {
@@ -3440,8 +3653,46 @@ class BodyLowerer {
     const subject = this.#value(target.expression, undefined);
     if (subject === undefined) return;
 
-    // `p.x = 1` through a `Pointer<S>`: one dereference, then the field. A
-    // class goes down the `#asClass` path below, which already sees through a
+    const asClass = this.#asClass(subject);
+    // `x.name = v` where `name` is a setter: a call, not a store. Checked
+    // before the field lookup because a name is one or the other — declaring
+    // both is refused where the class is analysed.
+    const setter = asClass?.info.setters.get(target.name.text);
+    if (setter !== undefined) {
+      this.#accessorCall(target, setter, [source]);
+      return;
+    }
+
+    const resolved = this.#fieldPlaceOf(target, subject, asClass);
+    if (resolved === undefined) return;
+    const value = this.#expressionTyped(source, resolved.type);
+    if (value === undefined) return;
+    // `Assign` even inside a constructor, and it is safe there because
+    // `Default` zeroed the object first: releasing a zeroed owning field is a
+    // no-op all the way down (`gf_string_free(null)` returns).
+    this.#push({
+      kind: "Assign",
+      place: resolved.place,
+      rvalue: { kind: "Use", value: this.#forStorage(value) },
+    });
+  }
+
+  /**
+   * The place `p.x` denotes, given its already-evaluated subject.
+   *
+   * Shared by the two things that write a field: an assignment, which stores
+   * once, and a compound assignment, which reads and stores through the same
+   * address. The subject arrives evaluated so that neither of them evaluates
+   * it twice — and so that both agree on which projection reaches the field,
+   * which is the kind of thing that goes wrong once it is written down twice.
+   */
+  #fieldPlaceOf(
+    target: ts.PropertyAccessExpression,
+    subject: Typed,
+    asClass: { info: ClassInfo; place: Place } | undefined,
+  ): { place: Place; type: MachineType } | undefined {
+    // `p.x` through a `Pointer<S>`: one dereference, then the field. A class
+    // goes down the `#asClass` path below, which already sees through a
     // pointer; a struct has no such path and needs this.
     if (subject.type.kind === "pointer" && subject.type.pointee.kind === "struct") {
       const struct = subject.type.pointee;
@@ -3449,14 +3700,11 @@ class BodyLowerer {
       const field = struct.fields[index];
       if (field === undefined) {
         this.#outer.unsupported(target, `the field \`${target.name.text}\``);
-        return;
+        return undefined;
       }
       const place = this.#placeOfSubject(target, subject);
-      if (place === undefined) return;
-      const value = this.#expressionTyped(source, field.type);
-      if (value === undefined) return;
-      this.#push({
-        kind: "Assign",
+      if (place === undefined) return undefined;
+      return {
         place: {
           local: place.local,
           projection: [
@@ -3465,22 +3713,11 @@ class BodyLowerer {
             { kind: "Field", value: FieldId(index) },
           ],
         },
-        rvalue: { kind: "Use", value: this.#forStorage(value) },
-      });
-      return;
+        type: field.type,
+      };
     }
 
-    const asClass = this.#asClass(subject);
     if (asClass !== undefined) {
-      // `x.name = v` where `name` is a setter: a call, not a store. Checked
-      // before the field lookup because a name is one or the other — declaring
-      // both is refused where the class is analysed.
-      const setter = asClass.info.setters.get(target.name.text);
-      if (setter !== undefined) {
-        this.#accessorCall(target, setter, [source]);
-        return;
-      }
-
       const field = this.#fieldOf(asClass.info, target.name.text);
       if (field === undefined) {
         // A getter with no setter reads but does not write, and saying which is
@@ -3493,50 +3730,42 @@ class BodyLowerer {
               "setter, so it can be read and not written. Add `set " +
               `${target.name.text}(value)\` if it should be.`,
           );
-          return;
+          return undefined;
         }
         this.#outer.unsupported(target, `\`${asClass.info.name}.${target.name.text}\``);
-        return;
+        return undefined;
       }
-      const value = this.#expressionTyped(source, field.type);
-      if (value === undefined) return;
-      // `Assign` even inside a constructor, and it is safe there because
-      // `Default` zeroed the object first: releasing a zeroed owning field is
-      // a no-op all the way down (`gf_string_free(null)` returns).
-      this.#push({
-        kind: "Assign",
+      return {
         place: {
           local: asClass.place.local,
-          projection: [...asClass.place.projection, { kind: "Field", value: FieldId(field.index) }],
+          projection: [
+            ...asClass.place.projection,
+            { kind: "Field", value: FieldId(field.index) },
+          ],
         },
-        rvalue: { kind: "Use", value: this.#forStorage(value) },
-      });
-      return;
+        type: field.type,
+      };
     }
 
     if (subject.type.kind !== "struct") {
       this.#outer.unsupported(target, "assigning to this property");
-      return;
+      return undefined;
     }
     const index = this.#fieldIndex(subject.type, target.name.text);
     const field = subject.type.fields[index];
     if (field === undefined) {
       this.#outer.unsupported(target, `the field \`${target.name.text}\``);
-      return;
+      return undefined;
     }
     const place = this.#placeOfSubject(target, subject);
-    if (place === undefined) return;
-
-    const value = this.#expressionTyped(source, field.type);
-    if (value === undefined) return;
-    this.#push({
-      kind: "Assign",
+    if (place === undefined) return undefined;
+    return {
       place: {
         local: place.local,
         projection: [...place.projection, { kind: "Field", value: FieldId(index) }],
       },
-      rvalue: { kind: "Use", value: this.#forStorage(value) },
-    });
+      type: field.type,
+    };
   }
 
   // -- the width pass ------------------------------------------------------
@@ -6252,6 +6481,22 @@ class BodyLowerer {
         op: "BitNot",
         operand: inner,
       });
+    }
+
+    // `a++` and `++a` update as *statements*, which is where `#expressionValue`
+    // lowers them. Only the value they produce is missing, and that is the half
+    // where the two spellings stop being the same thing — so name it, rather
+    // than reporting the operator as unknown.
+    if (
+      expression.operator === ts.SyntaxKind.PlusPlusToken ||
+      expression.operator === ts.SyntaxKind.MinusMinusToken
+    ) {
+      const spelling = expression.operator === ts.SyntaxKind.PlusPlusToken ? "++" : "--";
+      this.#outer.unsupported(
+        expression,
+        `\`${spelling}\` as a value — it updates on its own as a statement`,
+      );
+      return undefined;
     }
 
     this.#outer.unsupported(expression, "this unary operator");

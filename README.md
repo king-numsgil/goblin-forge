@@ -13,8 +13,8 @@ function factorial(n: i32): i32 {
   let result: i32 = 1;
   let i: i32 = 2;
   while (i <= n) {
-    result = result * i;
-    i = i + 1;
+    result *= i;
+    i++;
   }
   return result;
 }

@@ -115,6 +115,8 @@ backend failure:
 | two classes with the same name in two modules | `classes.ts`, `collectClasses` — a stated restriction, see DECISIONS §11.8 | later |
 | incremental builds | `CompileOptions.incremental` is reserved and unread | later |
 | `throw` / unwinding | `Terminator::Resume` errors | later |
+| `>>>`, the comma operator, `&&=` / `\|\|=` / `??=`, `??` | `lower.ts` — `>>>` also wants a decision, since an explicit unsigned width already spells a logical shift as `>>` | later |
+| the **value** of `a++` / `++a` / `(a += 1)` | `lower.ts`, `#unary` — they update as statements; only the value is missing, which is the half where prefix and postfix differ | later |
 
 `Rvalue::Ref` and `Rvalue::AddrOf` **are** implemented now — the lowerer emits a
 `Ref` for every `this`, every method receiver and every `p.deref()`, and an

@@ -299,19 +299,162 @@ describe("boolean operators", () => {
   });
 });
 
+describe("updating in place", () => {
+  test("`++` and `--` on a local", async () => {
+    expect(await prints("upd-inc", "  let a: i32 = 1;\n  a++;", "a")).toBe("2\n");
+    expect(await prints("upd-dec", "  let a: i32 = 1;\n  a--;", "a")).toBe("0\n");
+    expect(await prints("upd-pre-inc", "  let a: i32 = 1;\n  ++a;", "a")).toBe("2\n");
+    expect(await prints("upd-pre-dec", "  let a: i32 = 1;\n  --a;", "a")).toBe("0\n");
+  });
+
+  test("every compound assignment applies its operator", async () => {
+    const cases: [string, string, string][] = [
+      ["add", "a += 2", "9"],
+      ["sub", "a -= 2", "5"],
+      ["mul", "a *= 2", "14"],
+      ["div", "a /= 2", "3"],
+      ["rem", "a %= 2", "1"],
+      ["and", "a &= 3", "3"],
+      ["or", "a |= 8", "15"],
+      ["xor", "a ^= 1", "6"],
+      ["shl", "a <<= 2", "28"],
+      ["shr", "a >>= 1", "3"],
+    ];
+    for (const [name, statement, expected] of cases) {
+      expect(await prints(`upd-${name}`, `  let a: i32 = 7;\n  ${statement};`, "a")).toBe(
+        `${expected}\n`,
+      );
+    }
+  });
+
+  test("the update happens at the target's width, not at a promoted one", async () => {
+    // A `u8` addition, because the place it lands in is eight bits wide and
+    // the compound spelling widens nothing: 200 + 100 is 300, and 300 mod 256
+    // is 44.
+    expect(await prints("upd-width", "  let a: u8 = 200;\n  a += 100;", "a")).toBe("44\n");
+  });
+
+  test("the right-hand side is range-checked against the target, not the value", async () => {
+    // `a += 300` is refused for the same reason `const a: u8 = 300` is: the
+    // literal is read at the width it is being applied to. Folding first and
+    // wrapping later would make the check unwritable.
+    await expectRejected(
+      "upd-width-reject",
+      "export function main(): i32 {\n  let a: u8 = 7;\n  a += 300;\n  return 0;\n}\n",
+      "GF0164",
+    );
+  });
+
+  test("a right-shift update is arithmetic on a signed target", async () => {
+    expect(await prints("upd-sar", "  let a: i8 = -8;\n  a >>= 1;", "a")).toBe("-4\n");
+    expect(await prints("upd-shr", "  let a: u8 = 200;\n  a >>= 1;", "a")).toBe("100\n");
+  });
+
+  test("`++` on a float adds one", async () => {
+    expect(await prints("upd-float", "  let a: f64 = 1.5;\n  a++;", "a")).toBe("2.5\n");
+  });
+
+  test("`++` updates a field, an element and a `this` field", async () => {
+    expect(
+      await prints(
+        "upd-element",
+        "  const xs: i32[] = [1, 2, 3];\n  xs[1]++;\n  xs[2] += 10;",
+        "`${xs[1]} ${xs[2]}`",
+      ),
+    ).toBe("3 13\n");
+
+    const result = await run(
+      "upd-field",
+      `class Counter {
+         n: i32 = 0;
+         bump(): void { this.n++; }
+       }
+       interface Point { x: i32; y: i32 }
+       export function main(): i32 {
+         const c = new Counter();
+         c.bump();
+         c.bump();
+         c.n += 10;
+         const p: Point = { x: 1, y: 2 };
+         p.x++;
+         p.y *= 5;
+         console.log(\`\${c.n} \${p.x} \${p.y}\`);
+         return 0;
+       }
+`,
+    );
+    expect(result.stdout).toBe("12 2 10\n");
+  });
+
+  test("the target of an update is evaluated exactly once", async () => {
+    // The whole reason this is a read-modify-write on one resolved place
+    // rather than a desugaring to `xs[next()] = xs[next()] + 1`. If the
+    // subscript were evaluated twice, `calls` would be 2 and the wrong
+    // element would be written.
+    const result = await run(
+      "upd-once",
+      `class Subscript {
+         calls: i32 = 0;
+         next(): usize { this.calls++; return 1; }
+       }
+       export function main(): i32 {
+         const s = new Subscript();
+         const xs: i32[] = [10, 20, 30];
+         xs[s.next()] += 5;
+         console.log(\`\${xs[0]} \${xs[1]} \${xs[2]} \${s.calls}\`);
+         return 0;
+       }
+`,
+    );
+    expect(result.stdout).toBe("10 25 30 1\n");
+  });
+
+  test("`i++` is a for-loop incrementor", async () => {
+    expect(
+      await prints(
+        "upd-for",
+        "  let total: i32 = 0;\n  for (let i: i32 = 0; i < 5; i++) { total += i; }",
+        "total",
+      ),
+    ).toBe("10\n");
+  });
+
+  test("`%=` on a float is GF0162, exactly as `%` is", async () => {
+    // The check has to be on the compound form too: without it this is the
+    // `Rem is not defined on f64` panic that GF0162 exists to prevent.
+    const diagnostic = await expectRejected(
+      "upd-float-rem",
+      "export function main(): i32 {\n  let a: f64 = 5.0;\n  a %= 2.0;\n  return 0;\n}\n",
+      "GF0162",
+    );
+    expect(diagnostic.location?.line).toBeGreaterThan(0);
+  });
+
+  test("`+=` on a string is refused rather than reaching the backend", async () => {
+    // `Add` on a string is a real MIR node — concatenation lowers to one — so
+    // this would not panic, it would silently do the wrong thing with
+    // ownership. Refusing it keeps the one spelling that allocates explicit.
+    await expectRejected(
+      "upd-string",
+      'export function main(): i32 {\n  let s: string = "a";\n  s += "b";\n  return 0;\n}\n',
+      "GF0002",
+    );
+  });
+});
+
 describe("operators the language does not have yet", () => {
   // Each of these is valid TypeScript, so tsc says nothing, and the whole
   // question is whether the *frontend* says something with a file and a line.
   const cases: [string, string][] = [
     ["`>>>`", "  const a: i32 = -8;\n  const b: i32 = a >>> 1;\n  return b;"],
     ["the comma operator", "  let a: i32 = 1;\n  const b: i32 = (a = 2, a);\n  return b;"],
-    ["`+=`", "  let a: i32 = 1;\n  a += 2;\n  return a;"],
-    ["`-=`", "  let a: i32 = 1;\n  a -= 2;\n  return a;"],
-    ["`++`", "  let a: i32 = 1;\n  a++;\n  return a;"],
-    ["`--`", "  let a: i32 = 1;\n  a--;\n  return a;"],
-    ["a prefix `++`", "  let a: i32 = 1;\n  ++a;\n  return a;"],
     ["`&&=`", "  let a: boolean = true;\n  a &&= false;\n  return 0;"],
     ["`??`", "  const a: i32 = 1;\n  const b: i32 = a ?? 2;\n  return b;"],
+    // `a++` *updates* as a statement; what is missing is its **value**, which
+    // is the half where prefix and postfix stop being the same thing.
+    ["`++` as a value", "  let a: i32 = 1;\n  const b: i32 = a++;\n  return b;"],
+    ["a prefix `++` as a value", "  let a: i32 = 1;\n  const b: i32 = ++a;\n  return b;"],
+    ["`+=` as a value", "  let a: i32 = 1;\n  const b: i32 = (a += 2);\n  return b;"],
   ];
 
   for (const [what, body] of cases) {
