@@ -537,7 +537,10 @@ impl<'a, 'm, M: ClifModule> FunctionTranslator<'a, 'm, M> {
                     // An array literal shares the node and not the code: the
                     // destination is a one-word handle rather than storage the
                     // caller already has, so the buffer has to be made first.
-                    if matches!(self.module.ty(*ty).map(|def| &def.kind), Some(TyKind::Array(_))) {
+                    if matches!(
+                        self.module.ty(*ty).map(|def| &def.kind),
+                        Some(TyKind::Array(_))
+                    ) {
                         return self.build_array(place, *ty, fields);
                     }
                     return self.build_aggregate(place, *ty, fields);
@@ -1475,9 +1478,18 @@ impl<'a, 'm, M: ClifModule> FunctionTranslator<'a, 'm, M> {
         let pointer = self.target.pointer_type();
         Ok(ArrayInfo {
             element,
-            stride_call: self.builder.ins().iconst(types::I64, i64::from(layout.stride())),
-            align_call: self.builder.ins().iconst(types::I64, i64::from(layout.align)),
-            stride_addr: self.builder.ins().iconst(pointer, i64::from(layout.stride())),
+            stride_call: self
+                .builder
+                .ins()
+                .iconst(types::I64, i64::from(layout.stride())),
+            align_call: self
+                .builder
+                .ins()
+                .iconst(types::I64, i64::from(layout.align)),
+            stride_addr: self
+                .builder
+                .ins()
+                .iconst(pointer, i64::from(layout.stride())),
         })
     }
 
@@ -1507,7 +1519,10 @@ impl<'a, 'm, M: ClifModule> FunctionTranslator<'a, 'm, M> {
         let info = self.array_element(ty)?;
         let (len, len64) = self.array_len(value)?;
         let fresh = self
-            .call_runtime(RuntimeFn::ArrayNew, &[len64, info.stride_call, info.align_call])?
+            .call_runtime(
+                RuntimeFn::ArrayNew,
+                &[len64, info.stride_call, info.align_call],
+            )?
             .ok_or_else(|| InternalError::new("`gf_array_new` returned nothing"))?;
 
         if !self.category(info.element)?.needs_drop() {
@@ -1613,12 +1628,12 @@ impl<'a, 'm, M: ClifModule> FunctionTranslator<'a, 'm, M> {
     /// live as a single value.
     fn build_array(&mut self, place: &Place, ty: TyId, elements: &[Operand]) -> Result<()> {
         let info = self.array_element(ty)?;
-        let count = self
-            .builder
-            .ins()
-            .iconst(types::I64, elements.len() as i64);
+        let count = self.builder.ins().iconst(types::I64, elements.len() as i64);
         let array = self
-            .call_runtime(RuntimeFn::ArrayNew, &[count, info.stride_call, info.align_call])?
+            .call_runtime(
+                RuntimeFn::ArrayNew,
+                &[count, info.stride_call, info.align_call],
+            )?
             .ok_or_else(|| InternalError::new("`gf_array_new` returned nothing"))?;
 
         let stride = self.layouts.layout(info.element)?.stride();
@@ -1629,7 +1644,10 @@ impl<'a, 'm, M: ClifModule> FunctionTranslator<'a, 'm, M> {
             let at = stride * (index as u32);
             let element_ty = self.operand_type(operand)?;
             if matches!(self.layouts.repr(element_ty)?, Repr::Aggregate) {
-                let offset = self.builder.ins().iconst(self.target.pointer_type(), i64::from(at));
+                let offset = self
+                    .builder
+                    .ins()
+                    .iconst(self.target.pointer_type(), i64::from(at));
                 let dest = self.builder.ins().iadd(array, offset);
                 if matches!(operand, Operand::Move(_)) {
                     let layout = self.layouts.layout(element_ty)?;
@@ -1786,9 +1804,7 @@ impl<'a, 'm, M: ClifModule> FunctionTranslator<'a, 'm, M> {
                         RuntimeFn::ArrayPushSlot,
                         &[handle, info.stride_call, info.align_call],
                     )?
-                    .ok_or_else(|| {
-                        InternalError::new("`gf_array_push_slot` returned nothing")
-                    })?,
+                    .ok_or_else(|| InternalError::new("`gf_array_push_slot` returned nothing"))?,
                 )
             }
             // The class half of `tryCast`, and unlike the interface half this
@@ -1990,16 +2006,20 @@ impl<'a, 'm, M: ClifModule> FunctionTranslator<'a, 'm, M> {
             // the same kind of link-time fact a string literal's address is.
             Const::Func { func, .. } => {
                 let id = match func {
-                    FuncRef::Local(id) => {
-                        *self.context.func_refs.defined.get(id.index()).ok_or_else(|| {
+                    FuncRef::Local(id) => *self
+                        .context
+                        .func_refs
+                        .defined
+                        .get(id.index())
+                        .ok_or_else(|| {
                             InternalError::new(format!("function {} is missing", id.0))
-                        })?
-                    }
-                    FuncRef::Extern(id) => {
-                        *self.context.func_refs.imported.get(id.index()).ok_or_else(|| {
-                            InternalError::new(format!("extern {} is missing", id.0))
-                        })?
-                    }
+                        })?,
+                    FuncRef::Extern(id) => *self
+                        .context
+                        .func_refs
+                        .imported
+                        .get(id.index())
+                        .ok_or_else(|| InternalError::new(format!("extern {} is missing", id.0)))?,
                 };
                 let func_ref = self.clif_module.declare_func_in_func(id, self.builder.func);
                 let pointer = self.target.pointer_type();
@@ -2263,9 +2283,9 @@ impl<'a, 'm, M: ClifModule> FunctionTranslator<'a, 'm, M> {
             // `FnPtr` is here for the same reason: a code address is a word,
             // and comparing two of them asks whether a callback is the one you
             // installed.
-            Some(
-                TyKind::Pointer(_) | TyKind::Reference(_) | TyKind::CStr | TyKind::FnPtr(_),
-            ) => Ok(Numeric::Unsigned),
+            Some(TyKind::Pointer(_) | TyKind::Reference(_) | TyKind::CStr | TyKind::FnPtr(_)) => {
+                Ok(Numeric::Unsigned)
+            }
             _ => internal_error!("a non-numeric type reached an arithmetic operator"),
         }
     }
@@ -2453,11 +2473,11 @@ impl<'a, 'm, M: ClifModule> FunctionTranslator<'a, 'm, M> {
                 // because there is no callee to ask: `sig` is what the call site
                 // and the definition both classified against, which is the whole
                 // reason the node records it.
-                Callee::Indirect { operand, .. } => CallTarget::Indirect(
-                    self.operand(operand)?.ok_or_else(|| {
+                Callee::Indirect { operand, .. } => {
+                    CallTarget::Indirect(self.operand(operand)?.ok_or_else(|| {
                         InternalError::new("an indirect callee produced no value")
-                    })?,
-                ),
+                    })?)
+                }
                 // Two loads and an indirect call. The receiver is `args[0]` — read
                 // once, used both as the `this` argument and as the source of the
                 // vtable pointer, so the two cannot disagree.

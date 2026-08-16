@@ -122,9 +122,7 @@ impl RuntimeFn {
             RuntimeFn::ArrayNew => (vec![types::I64, types::I64, types::I64], Some(pointer)),
             RuntimeFn::ArrayEmpty => (Vec::new(), Some(pointer)),
             RuntimeFn::ArrayLen => (vec![pointer], Some(pointer)),
-            RuntimeFn::ArrayPushSlot => {
-                (vec![pointer, types::I64, types::I64], Some(pointer))
-            }
+            RuntimeFn::ArrayPushSlot => (vec![pointer, types::I64, types::I64], Some(pointer)),
             RuntimeFn::ArrayPop => (vec![pointer], None),
             RuntimeFn::ArrayFree => (vec![pointer, types::I64, types::I64], None),
         }
