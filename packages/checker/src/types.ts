@@ -246,6 +246,29 @@ export function erase(checker: ts.TypeChecker, type: ts.Type): MachineType {
   if (flags & (ts.TypeFlags.Void | ts.TypeFlags.Undefined)) return { kind: "void" };
   if (flags & ts.TypeFlags.BooleanLike) return { kind: "bool" };
 
+  // -- The wrappers, before the things they wrap ---------------------------
+  //
+  // `Pointer<T>` is `T & CorePointer<T>` and `FixedArray<T, N>` extends
+  // `CorePointer<T>`, so a wrapper's type **carries its pointee's brands as
+  // well as its own**. Ask "is this a `CString`?" first and `Pointer<CString>`
+  // says yes — it has a `CStringBrand`, because `CString` is one of its
+  // intersection members — and a `const char **` erases to a `const char *`.
+  //
+  // That was silent: both are one machine word, so nothing failed to compile
+  // and nothing crashed. `p[i]` strode by the wrong element and the generated
+  // header declared one indirection too few.
+  //
+  // So the order here is a rule, not an accident: **most-wrapping first.** A
+  // fixed array before a pointer, because it has both brands and is the more
+  // specific of the two; a reference before a pointer, for the same reason;
+  // and both before every brand check below, because the brands they carry
+  // belong to what is inside them.
+  const fixed = fixedArrayOf(checker, type);
+  if (fixed !== null) return fixed;
+
+  const wrapper = eraseWrapper(checker, type);
+  if (wrapper !== null) return wrapper;
+
   const scalar = scalarName(checker, type);
   if (scalar) return { kind: "scalar", name: scalar };
 
@@ -279,9 +302,6 @@ export function erase(checker: ts.TypeChecker, type: ts.Type): MachineType {
     );
   }
 
-  const fixed = fixedArrayOf(checker, type);
-  if (fixed !== null) return fixed;
-
   // Before the object case, and before `isArrayType`: a class is nominal, so
   // it must not fall through to structural erasure and become an aggregate
   // that happens to have the same fields.
@@ -293,89 +313,6 @@ export function erase(checker: ts.TypeChecker, type: ts.Type): MachineType {
 
   const className = classNameOf(type);
   if (className !== null) return { kind: "class", name: className };
-
-  // `Reference<T>` and `Pointer<T>` are intersections — `T & ReferenceCore<T>`
-  // — so without these they fall through to structural erasure and are reported
-  // as a nameless aggregate called `Box & ReferenceCore<Box>`, which is a
-  // confusing way to be told no. The lowerer *builds* references (every `this`
-  // is one); what is missing is reading one back out of source.
-  if (isReferenceType(checker, type)) {
-    // `Reference<I>` where `I` is a contract is the one reference that *is*
-    // implemented, because it is the only way to hold a contract at all. It
-    // erases to the `(itab, data)` pair rather than to a reference-to-something.
-    const referent = referentOf(checker, type);
-    if (referent !== null) {
-      // Before `contractOf`, which would look at `Array<T>`'s declaration and
-      // see an interface holding both methods and a data member — the shape
-      // that is rejected as ambiguous. `Array` is neither a shape nor a
-      // contract; it is a built-in with its own representation, and the same
-      // early check `erase` makes for a bare `T[]` has to happen here too.
-      if (checker.isArrayType(referent)) {
-        return { kind: "reference", referent: erase(checker, referent) };
-      }
-
-      const contract = contractOf(checker, referent);
-      if (contract !== null) return contract;
-      // `Reference<C>` for a class: one machine word holding the object's
-      // address. This is how polymorphism travels — a `Reference<Base>` keeps
-      // the dynamic type, where copying to a `Base` value would slice it.
-      // A `Reference<T>` is bound once and dereferenced without asking, which
-      // needs a layout to read through. An opaque handle has none, and the
-      // type that carries an address you may only pass along is `Pointer<T>`.
-      const opaqueReferent = ambientClassNameOf(referent);
-      if (opaqueReferent !== null) {
-        throw new ErasureError(
-          `\`${opaqueReferent}\` is declared elsewhere, so this build does not ` +
-            `know its layout and a \`Reference<${opaqueReferent}>\` has nothing ` +
-            `to read through. Use \`Pointer<${opaqueReferent}>\`, which is an ` +
-            "address and nothing more.",
-          "GF0302",
-        );
-      }
-      const className = classNameOf(referent);
-      if (className !== null) {
-        return { kind: "reference", referent: { kind: "class", name: className } };
-      }
-    }
-    throw new ErasureError(
-      "a `Reference<T>` cannot be written as a type yet, except for an " +
-        "interface with methods. The compiler makes references — `this` inside " +
-        "a method is one — but a parameter or a binding cannot be declared as " +
-        "one. Pass the value itself for now; it is copied.",
-      "GF0001",
-    );
-  }
-  // `Pointer<T>`: a bare machine address. `T` exists only at compile time,
-  // where it supplies the layout to read through and the stride for arithmetic.
-  //
-  // Spelled as an intersection — `T & CorePointer<T>` — so that `p.field` and
-  // `p.method()` resolve without writing a dereference, which is the same
-  // auto-dereference C++ spells `->`. The pointee is therefore one member of
-  // the intersection rather than the type itself.
-  if (isPointerType(checker, type)) {
-    const pointee = pointeeOf(checker, type);
-    if (pointee === null) {
-      throw new ErasureError(
-        "this `Pointer<T>` has no pointee type to read through.",
-        "GF0001",
-      );
-    }
-    // `Pointer<unknown>` is C's `void *`. Recognised **here** rather than in
-    // the scalar cascade above, so that `unknown` is a machine type only in the
-    // one position where it means something: a bare `let x: unknown` is still
-    // refused, where a general `unknown` → `void` rule would quietly give it a
-    // type occupying no bytes.
-    //
-    // `void` as a pointee has a size of zero and an alignment of one, which is
-    // an honest layout for nothing at all and a wrong answer to every question
-    // a pointer asks — a stride of nothing, a `dealloc` size of nothing. The
-    // frontend refuses all of them (`GF0305`); POINTER-ERASURE.md is the long
-    // form of why that is a written refusal rather than a natural one.
-    if (pointee.getFlags() & ts.TypeFlags.Unknown) {
-      return { kind: "pointer", pointee: { kind: "void" } };
-    }
-    return { kind: "pointer", pointee: erase(checker, pointee) };
-  }
 
   // `T[]` and `Array<T>` are one type in TypeScript and one type here: the
   // language's `std::vector`. An owning, growable handle whose elements live
@@ -445,6 +382,100 @@ export function erase(checker: ts.TypeChecker, type: ts.Type): MachineType {
     `\`${checker.typeToString(type)}\` has no machine representation yet.`,
     "GF0001",
   );
+}
+
+/**
+ * `Reference<T>` and `Pointer<T>`, or `null` when the type is neither.
+ *
+ * Split out of {@link erase} so that the ordering rule is visible: both are
+ * intersections — `T & ReferenceCore<T>`, `T & CorePointer<T>` — so a wrapper
+ * carries the brands of what it wraps, and asking about the *contents* first
+ * gets a confident wrong answer rather than no answer. A reference is tried
+ * before a pointer for the same reason, being the outer one when both appear.
+ *
+ * Without this the pair also falls through to structural erasure and is
+ * reported as a nameless aggregate called `Box & ReferenceCore<Box>`, which is
+ * a confusing way to be told no. The lowerer *builds* references (every `this`
+ * is one); what is missing is reading one back out of source.
+ */
+function eraseWrapper(checker: ts.TypeChecker, type: ts.Type): MachineType | null {
+  if (isReferenceType(checker, type)) {
+    // `Reference<I>` where `I` is a contract is the one reference that *is*
+    // implemented, because it is the only way to hold a contract at all. It
+    // erases to the `(itab, data)` pair rather than to a reference-to-something.
+    const referent = referentOf(checker, type);
+    if (referent !== null) {
+      // Before `contractOf`, which would look at `Array<T>`'s declaration and
+      // see an interface holding both methods and a data member — the shape
+      // that is rejected as ambiguous. `Array` is neither a shape nor a
+      // contract; it is a built-in with its own representation, and the same
+      // early check `erase` makes for a bare `T[]` has to happen here too.
+      if (checker.isArrayType(referent)) {
+        return { kind: "reference", referent: erase(checker, referent) };
+      }
+
+      const contract = contractOf(checker, referent);
+      if (contract !== null) return contract;
+      // `Reference<C>` for a class: one machine word holding the object's
+      // address. This is how polymorphism travels — a `Reference<Base>` keeps
+      // the dynamic type, where copying to a `Base` value would slice it.
+      // A `Reference<T>` is bound once and dereferenced without asking, which
+      // needs a layout to read through. An opaque handle has none, and the
+      // type that carries an address you may only pass along is `Pointer<T>`.
+      const opaqueReferent = ambientClassNameOf(referent);
+      if (opaqueReferent !== null) {
+        throw new ErasureError(
+          `\`${opaqueReferent}\` is declared elsewhere, so this build does not ` +
+            `know its layout and a \`Reference<${opaqueReferent}>\` has nothing ` +
+            `to read through. Use \`Pointer<${opaqueReferent}>\`, which is an ` +
+            "address and nothing more.",
+          "GF0302",
+        );
+      }
+      const className = classNameOf(referent);
+      if (className !== null) {
+        return { kind: "reference", referent: { kind: "class", name: className } };
+      }
+    }
+    throw new ErasureError(
+      "a `Reference<T>` cannot be written as a type yet, except for an " +
+        "interface with methods. The compiler makes references — `this` inside " +
+        "a method is one — but a parameter or a binding cannot be declared as " +
+        "one. Pass the value itself for now; it is copied.",
+      "GF0001",
+    );
+  }
+
+  // `Pointer<T>`: a bare machine address. `T` exists only at compile time,
+  // where it supplies the layout to read through and the stride for arithmetic.
+  //
+  // Spelled as an intersection so that `p.field` and `p.method()` resolve
+  // without writing a dereference, which is the same auto-dereference C++
+  // spells `->`. The pointee is therefore one member of the intersection rather
+  // than the type itself — and for a `Pointer<Pointer<T>>` it is the *merged*
+  // brand, `T & CorePointer<T>`, which is why erasing it has to come back
+  // through here rather than reading `T` off the front.
+  if (!isPointerType(checker, type)) return null;
+
+  const pointee = pointeeOf(checker, type);
+  if (pointee === null) {
+    throw new ErasureError("this `Pointer<T>` has no pointee type to read through.", "GF0001");
+  }
+  // `Pointer<unknown>` is C's `void *`. Recognised **here** rather than in the
+  // scalar cascade, so that `unknown` is a machine type only in the one
+  // position where it means something: a bare `let x: unknown` is still
+  // refused, where a general `unknown` → `void` rule would quietly give it a
+  // type occupying no bytes.
+  //
+  // `void` as a pointee has a size of zero and an alignment of one, which is an
+  // honest layout for nothing at all and a wrong answer to every question a
+  // pointer asks — a stride of nothing, a `dealloc` size of nothing. The
+  // frontend refuses all of them (`GF0305`); POINTER-ERASURE.md is the long
+  // form of why that is a written refusal rather than a natural one.
+  if (pointee.getFlags() & ts.TypeFlags.Unknown) {
+    return { kind: "pointer", pointee: { kind: "void" } };
+  }
+  return { kind: "pointer", pointee: erase(checker, pointee) };
 }
 
 /**

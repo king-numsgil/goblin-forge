@@ -125,6 +125,7 @@ backend failure:
 | interface-to-interface conversion, and a contract extending another | nothing lowers either | later |
 | `Reference<T>` for anything but a class or a contract | `checker/src/types.ts`, the `isReferenceType` branch | later |
 | an interface mixing methods and data | `checker/src/types.ts`, `contractOf` — a rule, not a gap | — |
+| writing *through* a `Pointer<Pointer<T>>` for a primitive `T` — `cells[i] = p` | tsc, not the compiler. `Pointer<Pointer<u8>>` is `CorePointer<u8> & CorePointer<CorePointer<u8>>`, and the two index signatures merge to `u8 & CorePointer<u8>`, which nothing produces. Reading is fine, and `Pointer<CString>` is the spelling for a `char **` that has to be written | later |
 | static **fields** | `classes.ts`, the `isStatic` branch over property declarations — needs module-level storage the backend has never emitted; see below | later |
 | closures / arrow functions | `lower.ts` — Tier 0 (function pointers) shipped, capture did not | later |
 | generic functions, optional/rest/defaulted/destructured parameters | `lower.ts`, `#classFnParams` and `#signature` | later |

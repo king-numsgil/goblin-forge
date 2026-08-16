@@ -372,6 +372,65 @@ int main(void) {
     expect(stdout).toBe("42\n1\n");
   }, CMAKE_TIMEOUT);
 
+  test("`char **` — a NULL-terminated array of C strings", async () => {
+    // `SDL_GetEnvironmentVariables` and every `argv`-shaped API. Two things are
+    // being checked and only a C compiler can arbitrate either: that the header
+    // says `const char**` rather than one indirection fewer, and that walking
+    // the array strides by a *pointer* rather than by a byte.
+    //
+    // Both were wrong before the erasure order was fixed. `Pointer<CString>` is
+    // `CString & CorePointer<CString>`, so it carries a `CStringBrand` of its
+    // own, and the brand check ran first: a `const char **` erased to a
+    // `const char *`. Nothing failed — the stride was simply 1.
+    const lib = await library(
+      "lib-char-star-star",
+      `export function countVars(vars: Pointer<CString>): i32 {
+         let count: i32 = 0;
+         let i: usize = 0;
+         let entry: CString = vars[0];
+         while (entry !== null) {
+           count = count + 1;
+           i = i + 1;
+           entry = vars[i];
+         }
+         return count;
+       }
+
+       export function totalLength(vars: Pointer<CString>): usize {
+         let total: usize = 0;
+         let i: usize = 0;
+         let entry: CString = vars[0];
+         while (entry !== null) {
+           total = total + entry.length;
+           i = i + 1;
+           entry = vars[i];
+         }
+         return total;
+       }\n`,
+    );
+
+    expect(lib.headerText).toContain("int32_t countVars(const char** p0);");
+    expect(lib.headerText).toContain("uintptr_t totalLength(const char** p0);");
+
+    const stdout = buildConsumer({
+      ...lib,
+      main: `#include <stdio.h>
+#include "main.h"
+
+int main(void) {
+  /* C builds the array, so nothing here is this compiler agreeing with itself. */
+  const char *vars[] = { "a=1", "bb=22", "ccc=333", NULL };
+  printf("%d\\n", countVars(vars));
+  printf("%d\\n", (int) totalLength(vars));
+  return 0;
+}
+`,
+    });
+    // Three entries, and 3 + 5 + 7 bytes of them. A stride of one byte would
+    // walk into the middle of a pointer and never find the terminator.
+    expect(stdout).toBe("3\n15\n");
+  }, CMAKE_TIMEOUT);
+
   test("a null pointer is C's NULL, in both directions", async () => {
     // `null` lowers to a machine word of zero, and this is the only place that
     // claim can be checked: a C compiler decides what NULL compares equal to.
@@ -404,6 +463,28 @@ int main(void) {
     });
     expect(stdout).toBe("1\n1\n0\n");
   }, CMAKE_TIMEOUT);
+
+  test("a pointer to a pointer keeps both indirections", async () => {
+    // The regression the `char **` test above is the runtime half of. Every
+    // pointee here is a type that erases through a *brand* — a width brand, a
+    // `CStringBrand` — and `Pointer<T>` is an intersection carrying its
+    // pointee's brands as well as its own. Ask about the contents first and the
+    // outer pointer disappears, silently, because both are one word.
+    const lib = await library(
+      "lib-pointer-depth",
+      `export function a(p: Pointer<Pointer<u8>>): boolean { return true; }
+       export function b(p: Pointer<Pointer<i32>>): boolean { return true; }
+       export function c(p: Pointer<CString>): boolean { return true; }
+       export function d(p: Pointer<Pointer<unknown>>): boolean { return true; }
+       export function e(p: Pointer<u8>): boolean { return true; }\n`,
+    );
+
+    expect(lib.headerText).toContain("bool a(uint8_t** p0);");
+    expect(lib.headerText).toContain("bool b(int32_t** p0);");
+    expect(lib.headerText).toContain("bool c(const char** p0);");
+    expect(lib.headerText).toContain("bool d(void** p0);");
+    expect(lib.headerText).toContain("bool e(uint8_t* p0);");
+  });
 
   test("the header guards, and is C++-safe", async () => {
     const lib = await library(

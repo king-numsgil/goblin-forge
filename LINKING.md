@@ -366,6 +366,30 @@ so the call would corrupt the heap rather than return a wrong number. C++ makes
 `delete (void *)p` undefined for exactly this reason. Reify it first, or free it
 through whatever allocated it.
 
+**`char **` is `Pointer<CString>`**, and the NULL terminator is an ordinary
+null check on the element:
+
+```ts
+declare function SDL_GetEnvironmentVariables(env: Pointer<SDL_Environment>): Pointer<CString> | null;
+
+const vars = SDL_GetEnvironmentVariables(env);
+if (vars !== null) {
+  let i: usize = 0;
+  let entry: CString = vars[0];
+  while (entry !== null) {
+    console.log(stringFromCString(entry));
+    i = i + 1;
+    entry = vars[i];
+  }
+  SDL_free(vars);          // "a single allocation", as the SDL docs say
+}
+```
+
+Prefer `Pointer<CString>` to `Pointer<Pointer<u8>>` for this. Both read
+correctly, but the second cannot be *written* through: `Pointer<Pointer<u8>>`
+is an intersection whose two index signatures merge into a type nothing
+produces, so `cells[i] = p` is a tsc error.
+
 **`void **` is an ordinary pointer to an erased one** —
 `Pointer<Pointer<unknown>>` — which is the shape of every C out-parameter that
 hands back a buffer. The outer pointer's pointee is one word and has a layout,
