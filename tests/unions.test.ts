@@ -88,6 +88,57 @@ describe("reading and writing", () => {
   });
 });
 
+describe("making one", () => {
+  test("`zeroed` takes the type from the annotation, the argument, or both", async () => {
+    // All three spellings work. The contextual one reads best, and is the
+    // reason the type argument is optional rather than required.
+    const result = await run(
+      "union-zeroed-spellings",
+      `interface W extends Union { whole: u32; low: u8; }
+       export function main(): i32 {
+         const a: W = zeroed();
+         let b = zeroed<W>();
+         let c: W = zeroed<W>();
+         b.low = 2;
+         c.low = 3;
+         console.log(\`\${a.low} \${b.low} \${c.low}\`);
+         return 0;
+       }
+`,
+    );
+    expect(result.stdout).toBe("0 2 3\n");
+  });
+
+  test("every byte is zero, not just the first member", async () => {
+    // What makes this the right way to hand a union to C: the whole storage is
+    // cleared, so no member reads back whatever was on the stack.
+    const result = await run(
+      "union-zeroed-whole",
+      `interface Big extends Union { small: u8; wide: u64; }
+       export function main(): i32 {
+         const b = zeroed<Big>();
+         console.log(\`\${b.wide}\`);
+         return 0;
+       }
+`,
+    );
+    expect(result.stdout).toBe("0\n");
+  });
+
+  test("`zeroed` of a class is refused — it would skip the constructor", async () => {
+    await expectRejected(
+      "union-zeroed-class",
+      `class Counter { n: i32 = 7; }
+       export function main(): i32 {
+         const c = zeroed<Counter>();
+         return c.n;
+       }
+`,
+      "GF0002",
+    );
+  });
+});
+
 describe("the shape this was built for", () => {
   test("an `SDL_Event` lays out the way SDL's own header asserts", async () => {
     // Modelled on SDL3's `SDL_events.h`: a union of the event structs, tagged

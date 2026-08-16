@@ -104,11 +104,12 @@ the largest and aligned by the strictest. Members must be plain data
 is how one comes into being. `tests/unions.test.ts` builds SDL3's `SDL_Event`
 and matches the 128-byte size its header asserts.
 
-**Enums**, with the underlying type written as a merged namespace —
-`declare namespace E { type Underlying = u32 }`, defaulting to `i32`, in either
-order. Members are constants folded by tsc and range-checked against the width
-at the declaration. See DECISIONS §12 for why it is spelled that way and not as
-a decorator (TypeScript refuses one on an enum) or a comment.
+**Enums** — integer ones; a string enum is a `GF0001` gap. The underlying type
+is written as a merged namespace, `declare namespace E { type Underlying = u32 }`,
+defaulting to `i32`, in either order. Members are constants folded by tsc and
+range-checked against the width at the declaration. See DECISIONS §12 for why it
+is spelled that way and not as a decorator (TypeScript refuses one on an enum)
+or a comment.
 
 **`zeroed<T>()`**: a `T` whose bytes are all zero, from the same `Default` a
 class gets before its constructor runs. Refuses a class, because that would
@@ -133,6 +134,7 @@ backend failure:
 | `throw` / unwinding | `Terminator::Resume` errors | later |
 | a binding with no initialiser — `let e: SDL_Event;` | `lower.ts` — tsc wants `let e!: T` for its own definite-assignment rule, and the lowerer refuses either spelling. `zeroed<T>()` is the way to write it meanwhile | later |
 | a namespace holding anything but `type Underlying` | `lower.ts`, `#checkEnumNamespace` — a rule, not a gap: there is no module-level storage for one to hold | — |
+| **string enums** | `checker/src/types.ts`, `enumUnderlying` — implementable and cheap (the members are string constants), and currently the only way to write named string constants, since module-level `const` is unsupported | later |
 | `>>>`, the comma operator, `&&=` / `\|\|=` / `??=`, `??` | `lower.ts` — `>>>` also wants a decision, since an explicit unsigned width already spells a logical shift as `>>` | later |
 | the **value** of `a++` / `++a` / `(a += 1)` | `lower.ts`, `#unary` — they update as statements; only the value is missing, which is the half where prefix and postfix differ | later |
 

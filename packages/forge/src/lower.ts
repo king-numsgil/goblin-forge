@@ -2107,17 +2107,10 @@ class Lowerer {
     if (range === null) return;
 
     for (const member of statement.members) {
+      // A string member is reported once, by erasure, against the enum as a
+      // whole — a string enum is one decision rather than one per member.
       const value = this.#checker.getConstantValue(member);
-      if (typeof value === "string") {
-        this.error(
-          member,
-          "GF0166",
-          `\`${statement.name.text}.${member.name.getText()}\` is a string. An enum ` +
-            "here is a set of integer constants; a string enum has no machine " +
-            "representation and no width to give it.",
-        );
-        continue;
-      }
+      if (typeof value === "string") return;
       if (value === undefined) {
         // A computed member tsc could not fold. Every constant form folds, so
         // this is a member whose initialiser is not a constant at all.

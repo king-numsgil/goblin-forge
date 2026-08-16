@@ -573,6 +573,16 @@ recording: `checker.getConstantValue()` answers for an `EnumMember` declaration
 and returns `undefined` for the `E.A` that names it. Asking the wrong one does
 not fail, it just yields no constant, and the expression lowers to nothing.
 
+**String enums are `GF0001` — a gap, not a rule.** TypeScript has them and
+there is nothing wrong with one; what is missing is the lowering. They are
+implementable, and cheaply: the members would be string constants, which the
+language already has. They are also the *only* way to write named string
+constants while module-level `const` is unsupported, which is a real reason to
+want them. They need no width at all, so a string enum and an integer one are
+two lowerings rather than one with a flag — which is why the check is on the
+whole enum rather than per member, and why one string member in a mixed enum
+decides it.
+
 ---
 
 ## Class decisions *(2026-08-12, milestone 8)*

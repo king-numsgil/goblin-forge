@@ -143,12 +143,27 @@ describe("the rules", () => {
     );
   });
 
-  test("a string enum is refused", async () => {
-    await expectRejected(
+  test("a string enum is GF0001 — a gap, not a rule", async () => {
+    // TypeScript has string enums and there is nothing wrong with one. What is
+    // missing is the lowering: the members would be string constants and there
+    // would be no width to declare, so it is a different lowering rather than
+    // this one with a flag. `GF0001` is the code that says "not yet" rather
+    // than "not allowed".
+    const diagnostic = await expectRejected(
       "enum-string",
-      `enum E { A = "x" }
-       export function main(): i32 { return 0; }\n`,
-      "GF0166",
+      `enum E { A = "x", B = "y" }
+       export function main(): i32 { return cast<i32>(1); }\n`,
+      "GF0001",
+    );
+    expect(diagnostic.location?.line).toBeGreaterThan(0);
+  });
+
+  test("a mixed enum is caught by its one string member", async () => {
+    await expectRejected(
+      "enum-mixed",
+      `enum E { A = 1, B = "two" }
+       export function main(): i32 { return cast<i32>(1); }\n`,
+      "GF0001",
     );
   });
 

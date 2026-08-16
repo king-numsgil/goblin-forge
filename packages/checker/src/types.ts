@@ -709,18 +709,36 @@ export function enumUnderlyingSymbol(
   checker: ts.TypeChecker,
   type: ts.Type,
 ): ts.Symbol | undefined {
+  const enumDeclaration = enumDeclarationOf(type);
+  if (enumDeclaration === undefined) return undefined;
+  const merged = checker.getSymbolAtLocation(enumDeclaration.name);
+  return merged?.exports?.get(ENUM_UNDERLYING as ts.__String);
+}
+
+/** The enum a type belongs to, whether it is the enum itself or one member. */
+function enumDeclarationOf(type: ts.Type): ts.EnumDeclaration | undefined {
   const declaration = type.getSymbol()?.declarations?.[0];
   if (declaration === undefined) return undefined;
   // A member (`E.A`) is an enum *literal*, and its symbol is the member's. The
   // enum carrying the declaration is its parent.
-  const enumDeclaration = ts.isEnumMember(declaration)
-    ? declaration.parent
-    : ts.isEnumDeclaration(declaration)
-      ? declaration
-      : undefined;
-  if (enumDeclaration === undefined) return undefined;
-  const merged = checker.getSymbolAtLocation(enumDeclaration.name);
-  return merged?.exports?.get(ENUM_UNDERLYING as ts.__String);
+  if (ts.isEnumMember(declaration)) return declaration.parent;
+  return ts.isEnumDeclaration(declaration) ? declaration : undefined;
+}
+
+/**
+ * Whether any member of this enum is initialised with a string.
+ *
+ * TypeScript has string enums, and they are a perfectly reasonable thing to
+ * write — they are just not lowered here yet, which is a different statement
+ * from "the language refuses them". Asked of the members rather than of the
+ * type, because a mixed enum is string-like in one member and numeric in the
+ * next, and one string member is enough to make the whole thing not a set of
+ * integers.
+ */
+function isStringEnum(checker: ts.TypeChecker, declaration: ts.EnumDeclaration): boolean {
+  return declaration.members.some(
+    (member) => typeof checker.getConstantValue(member) === "string",
+  );
 }
 
 /**
@@ -735,6 +753,23 @@ export function enumUnderlying(
   type: ts.Type,
 ): ScalarName | null {
   if ((type.getFlags() & ts.TypeFlags.EnumLike) === 0) return null;
+
+  // A gap, not a rule. A string enum is implementable — its members would be
+  // string constants, which the language already has — and it is the one way to
+  // write named string constants while module-level `const` is unsupported.
+  // What is missing is the lowering, so it is `GF0001` and says so.
+  const declaration = enumDeclarationOf(type);
+  if (declaration !== undefined && isStringEnum(checker, declaration)) {
+    throw new ErasureError(
+      `\`${declaration.name.text}\` is a string enum, and only integer enums are ` +
+        "lowered so far. An integer enum takes its width from " +
+        `\`declare namespace ${declaration.name.text} { type ${ENUM_UNDERLYING} = … }\`, ` +
+        "and a string one would need no width at all — the members are string " +
+        "constants — so the two are different lowerings rather than one with a " +
+        "flag.",
+      "GF0001",
+    );
+  }
 
   const declared = enumUnderlyingSymbol(checker, type);
   if (declared === undefined) return DEFAULT_ENUM_WIDTH;
