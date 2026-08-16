@@ -136,6 +136,25 @@ export const CODES = {
       "wrong constant gets into a program without anybody noticing.",
   },
 
+  GF0166: {
+    title: "an enum's underlying type is not an integer width",
+    explanation:
+      "TypeScript has no syntax for a C enum's underlying type, so it is " +
+      "declared by merging a namespace into the enum:\n\n" +
+      "    enum SDL_EventType { Quit = 0x100 }\n" +
+      "    declare namespace SDL_EventType { type Underlying = u32 }\n\n" +
+      "`Underlying` has to name one of the integer widths — `i8` through " +
+      "`u64`, `isize`, `usize`. An enum is a set of integer constants, so a " +
+      "floating-point width has no meaning for one: members are written as " +
+      "exact values and compared for equality, which is the operation binary " +
+      "floating point is worst at.\n\n" +
+      "Omitting the declaration is not an error. Without one the enum is " +
+      "`i32`, which is what a C enum is unless the ABI says otherwise.\n\n" +
+      "The width is also what every member is range-checked against, so " +
+      "declaring `u8` and writing `0x100` is refused here rather than " +
+      "silently truncated at the point of use.",
+  },
+
   // -- Ownership and the value model --------------------------------------
   GF0227: {
     title: "a pointer used where a value is expected",
@@ -227,6 +246,41 @@ export const CODES = {
       "`alloc`, `allocArray`, `sizeOf` and `alignOf` need the layout by name. " +
       "The library that defines the type is the one that can do those; call the " +
       "function it gives you for it — `fclose`, not `free`.",
+  },
+
+  GF0303: {
+    title: "a union's members must be plain data",
+    explanation:
+      "`interface E extends Union` lays every member at offset 0, sharing one " +
+      "piece of storage. That is what a C union is, and it is why a member " +
+      "cannot own anything.\n\n" +
+      "Destroying a value means running the destructor of what it holds. A " +
+      "union holds all of its members in the same bytes, and nothing in those " +
+      "bytes says which one was last written — so there is no way to know " +
+      "whether to release a `string`, free a `T[]`, or do nothing at all. C++ " +
+      "answers this by making such a union's destructor deleted and handing the " +
+      "problem back to you; here the member is refused instead, at the " +
+      "declaration, where there is something to point at.\n\n" +
+      "Hold the owning value beside the union rather than inside it, or hold a " +
+      "`Pointer<T>` to it — a pointer is plain data, and who frees it is then a " +
+      "question the code asks out loud.",
+  },
+
+  GF0304: {
+    title: "a union cannot be built from an object literal",
+    explanation:
+      "An object literal supplies every property, and a union has room for " +
+      "exactly one. Writing `{ type: 1, key: … }` asks for two members to be " +
+      "live in bytes that can only hold one, and there is no sensible reading " +
+      "of which wins.\n\n" +
+      "A union is zero-initialised — `let e: SDL_Event;` gives all-zero bytes, " +
+      "which is a valid starting state for every member — and then filled, " +
+      "usually by the C function you pass it to:\n\n" +
+      "    let event: SDL_Event;\n" +
+      "    while (SDL_PollEvent(addressOf(event))) { … }\n\n" +
+      "Assign to a single member if you need to build one yourself: " +
+      "`e.type = SDL_EventType.Quit` writes the member you name and leaves the " +
+      "rest of the storage alone, which is exactly what C does.",
   },
 
   // -- The compiler is broken ----------------------------------------------

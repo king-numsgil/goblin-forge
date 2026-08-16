@@ -10,10 +10,10 @@
 // module, which is the failure mode this whole arrangement exists to remove.
 
 /** Fingerprint of the wire format these bindings were generated from. */
-export const SCHEMA_FINGERPRINT = 0xf416c6ee2b03269bn;
+export const SCHEMA_FINGERPRINT = 0x91475a73d647ba72n;
 
 /** The same value as hex, for comparing against the addon's report. */
-export const SCHEMA_FINGERPRINT_HEX = "f416c6ee2b03269b";
+export const SCHEMA_FINGERPRINT_HEX = "91475a73d647ba72";
 
 // ---------------------------------------------------------------------------
 // postcard writer
@@ -229,6 +229,7 @@ export interface StructDef {
   name: SymId;
   fields: FieldDef[];
   cCompatible: boolean;
+  union: boolean;
   span: Span;
 }
 
@@ -659,6 +660,7 @@ export function writeStructDef(w: Writer, v: StructDef): void {
   writeSymId(w, v.name);
   w.varint(v.fields.length); for (const item of v.fields) { writeFieldDef(w, item); }
   w.bool(v.cCompatible);
+  w.bool(v.union);
   writeSpan(w, v.span);
 }
 

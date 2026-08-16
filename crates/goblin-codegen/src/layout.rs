@@ -188,21 +188,47 @@ impl<'m> Layouts<'m> {
                 let Some(def) = self.module.strukt(*id) else {
                     internal_error!("struct {} is not in the module's struct table", id.0);
                 };
-                // Declaration order, naturally aligned, never reordered.
-                let mut offset = 0u32;
-                let mut align = 1u32;
-                let mut fields = Vec::with_capacity(def.fields.len());
-                for field in &def.fields {
-                    let field_layout = self.layout(field.ty)?;
-                    offset = align_to(offset, field_layout.align);
-                    fields.push(offset);
-                    offset += field_layout.size;
-                    align = align.max(field_layout.align);
-                }
-                Layout {
-                    size: align_to(offset, align),
-                    align,
-                    fields,
+                if def.union {
+                    // Every member starts at the beginning and the whole thing
+                    // is as big as the largest — C's union, which is why
+                    // `sizeof(SDL_Event)` is one event and not thirty-five.
+                    //
+                    // The alignment is the strictest member's, not the largest
+                    // member's own: a union of `{u8; u64}` is 8-aligned because
+                    // the `u64` has to be, and a byte array of the same size
+                    // would not be. Getting that wrong is silent on x86 and a
+                    // fault elsewhere.
+                    let mut size = 0u32;
+                    let mut align = 1u32;
+                    let mut fields = Vec::with_capacity(def.fields.len());
+                    for field in &def.fields {
+                        let field_layout = self.layout(field.ty)?;
+                        fields.push(0);
+                        size = size.max(field_layout.size);
+                        align = align.max(field_layout.align);
+                    }
+                    Layout {
+                        size: align_to(size, align),
+                        align,
+                        fields,
+                    }
+                } else {
+                    // Declaration order, naturally aligned, never reordered.
+                    let mut offset = 0u32;
+                    let mut align = 1u32;
+                    let mut fields = Vec::with_capacity(def.fields.len());
+                    for field in &def.fields {
+                        let field_layout = self.layout(field.ty)?;
+                        offset = align_to(offset, field_layout.align);
+                        fields.push(offset);
+                        offset += field_layout.size;
+                        align = align.max(field_layout.align);
+                    }
+                    Layout {
+                        size: align_to(offset, align),
+                        align,
+                        fields,
+                    }
                 }
             }
             // A vtable pointer at offset 0, then the fields — base classes'

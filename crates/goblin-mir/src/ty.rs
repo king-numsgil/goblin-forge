@@ -247,6 +247,18 @@ pub struct StructDef {
     /// plain data all the way down: a byte copy has to be the *whole* copy, or
     /// the two sides disagree about who frees what (REWRITE-PLAN §6).
     pub c_compatible: bool,
+    /// A C `union`: every field starts at offset 0.
+    ///
+    /// Not a separate [`TyKind`], because a union *is* a struct everywhere but
+    /// the offset computation — the same fields, the same projections, the same
+    /// ABI classification, the same copy. Only [`crate::Layout`] reads this, and
+    /// splitting the variant would have meant nine `Struct | Union` arms saying
+    /// the same thing and one saying something different.
+    ///
+    /// The frontend guarantees the members are plain data. A union whose members
+    /// own anything has no definable destructor: nothing in the bytes says which
+    /// member is live, so nothing can say which one to release.
+    pub union: bool,
     pub span: Span,
 }
 

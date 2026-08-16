@@ -98,6 +98,22 @@ erased — tsc enforces them, and they have no run-time meaning.
 **Opaque handles**: `declare class FILE { private _opaque: never }`, C's
 incomplete type, usable only as `Pointer<FILE>`. See below.
 
+**Unions**: `interface E extends Union` — every member at offset 0, sized by
+the largest and aligned by the strictest. Members must be plain data
+(`GF0303`), and an object literal cannot build one (`GF0304`), so `zeroed<T>()`
+is how one comes into being. `tests/unions.test.ts` builds SDL3's `SDL_Event`
+and matches the 128-byte size its header asserts.
+
+**Enums**, with the underlying type written as a merged namespace —
+`declare namespace E { type Underlying = u32 }`, defaulting to `i32`, in either
+order. Members are constants folded by tsc and range-checked against the width
+at the declaration. See DECISIONS §12 for why it is spelled that way and not as
+a decorator (TypeScript refuses one on an enum) or a comment.
+
+**`zeroed<T>()`**: a `T` whose bytes are all zero, from the same `Default` a
+class gets before its constructor runs. Refuses a class, because that would
+skip the constructor.
+
 ## What it does not have yet
 
 Grep for these markers — each is a `GF0001` with a file and a line, never a
@@ -115,6 +131,8 @@ backend failure:
 | two classes with the same name in two modules | `classes.ts`, `collectClasses` — a stated restriction, see DECISIONS §11.8 | later |
 | incremental builds | `CompileOptions.incremental` is reserved and unread | later |
 | `throw` / unwinding | `Terminator::Resume` errors | later |
+| a binding with no initialiser — `let e: SDL_Event;` | `lower.ts` — tsc wants `let e!: T` for its own definite-assignment rule, and the lowerer refuses either spelling. `zeroed<T>()` is the way to write it meanwhile | later |
+| a namespace holding anything but `type Underlying` | `lower.ts`, `#checkEnumNamespace` — a rule, not a gap: there is no module-level storage for one to hold | — |
 | `>>>`, the comma operator, `&&=` / `\|\|=` / `??=`, `??` | `lower.ts` — `>>>` also wants a decision, since an explicit unsigned width already spells a logical shift as `>>` | later |
 | the **value** of `a++` / `++a` / `(a += 1)` | `lower.ts`, `#unary` — they update as statements; only the value is missing, which is the half where prefix and postfix differ | later |
 

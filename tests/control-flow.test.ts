@@ -229,7 +229,11 @@ describe("declarations the language does not have yet", () => {
     ["a top-level `const`", "const N: i32 = 5;\n"],
     ["a top-level `let`", "let N: i32 = 5;\n"],
     ["a top-level statement", 'console.log("x");\n'],
-    ["an `enum`", "enum E { A, B }\n"],
+    // An `enum` *is* implemented — see `tests/enums.test.ts`. A namespace is
+    // not, and stays here: the one shape the language accepts is
+    // `declare namespace E { type Underlying = … }`, which gives an enum its
+    // width, and that is a declaration about a type rather than a namespace
+    // anybody can put things in.
     ["a `namespace`", "namespace N { export function f(): i32 { return 1; } }\n"],
     ["a generic function", "function id<T>(x: T): T { return x; }\n"],
     ["an arrow function", "const f = (a: i32): i32 => a;\n"],

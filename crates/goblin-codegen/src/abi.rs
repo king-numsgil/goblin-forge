@@ -508,6 +508,7 @@ mod tests {
                     })
                     .collect(),
                 c_compatible: true,
+                union: false,
                 span: Span::SYNTHETIC,
             });
             self.module.types.push(TyDef {

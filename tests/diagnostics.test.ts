@@ -212,6 +212,51 @@ describe("codes raised by a program", () => {
     );
   });
 
+  test("GF0166 — an enum whose underlying type is not an integer width", async () => {
+    await expectRejected(
+      "diag-0166",
+      // The one legal place to write a C enum's underlying type, naming
+      // something that cannot be one.
+      `enum Level { Low = 1 }
+       declare namespace Level { type Underlying = f64 }
+
+       export function main(): i32 {
+         return cast<i32>(Level.Low);
+       }\n`,
+      "GF0166",
+    );
+  });
+
+  test("GF0303 — a union member that owns something", async () => {
+    await expectRejected(
+      "diag-0303",
+      // The members share their storage, so nothing in the bytes says which one
+      // is live — and so nothing could say which one to release.
+      `interface Bad extends Union { tag: u32; name: string; }
+
+       export function main(): i32 {
+         const b = zeroed<Bad>();
+         return cast<i32>(b.tag);
+       }\n`,
+      "GF0303",
+    );
+  });
+
+  test("GF0304 — an object literal for a union", async () => {
+    await expectRejected(
+      "diag-0304",
+      // tsc asks for every member because it sees an ordinary interface. A
+      // union has room for one.
+      `interface Word extends Union { whole: u32; low: u8; }
+
+       export function main(): i32 {
+         const w: Word = { whole: 1, low: 2 };
+         return cast<i32>(w.low);
+       }\n`,
+      "GF0304",
+    );
+  });
+
   test("GF9004 — an output kind the backend does not know", async () => {
     const { result } = await compileSource(
       "diag-9004",
@@ -253,11 +298,14 @@ describe("the registry and the suite agree", () => {
       "GF0162",
       "GF0164",
       "GF0165",
+      "GF0166",
       "GF0234",
       "GF0235",
       "GF0236",
       "GF0301",
       "GF0302",
+      "GF0303",
+      "GF0304",
       "GF9004",
       "GF9005",
     ]);

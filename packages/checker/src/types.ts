@@ -89,6 +89,15 @@ export type MachineType =
       readonly kind: "struct";
       readonly name: string;
       readonly fields: readonly StructField[];
+      /**
+       * A C `union` — written `interface E extends Union`.
+       *
+       * A flag rather than a `kind` of its own, because a union is a struct
+       * everywhere but the offsets: the same fields, the same projections, the
+       * same nominal identity. Only the layout engine and the two rules that
+       * differ (plain-data members, no object literal) read it.
+       */
+      readonly union?: boolean;
     }
   | {
       /**
@@ -239,6 +248,14 @@ export function erase(checker: ts.TypeChecker, type: ts.Type): MachineType {
 
   const scalar = scalarName(checker, type);
   if (scalar) return { kind: "scalar", name: scalar };
+
+  // Before both `StringLike` and `NumberLike`, because an enum satisfies one or
+  // the other and neither answer would be right: a numeric enum would become a
+  // widthless `number`, and a *string* enum would quietly become a `string`,
+  // which is the one that matters — it would compile, and lay out a heap handle
+  // where a set of integer constants was meant.
+  const enumWidth = enumUnderlying(checker, type);
+  if (enumWidth !== null) return { kind: "scalar", name: enumWidth };
 
   // Before the `StringLike` check, because a `CString` is an interface and not
   // string-like — but before the object case too, so it never falls through to
@@ -607,7 +624,14 @@ function fixedArrayOf(checker: ts.TypeChecker, type: ts.Type): MachineType | nul
  * as they are in C.
  */
 function eraseObject(checker: ts.TypeChecker, type: ts.Type): MachineType {
-  const properties = checker.getPropertiesOfType(type);
+  const isUnion = brandedProperty(checker, type, "UnionBrand") !== null;
+  // A brand is a symbol-keyed marker, never a field: it says what the type *is*
+  // and occupies nothing. `extends Union` is the first case where one reaches
+  // here at all — every other branded type is recognised before this point —
+  // and it would otherwise be laid out as an optional field of type `never`.
+  const properties = checker
+    .getPropertiesOfType(type)
+    .filter((property) => !isBrand(property));
   if (properties.length === 0) {
     throw new ErasureError(
       "an object with no fields has no machine representation. A struct needs " +
@@ -654,7 +678,98 @@ function eraseObject(checker: ts.TypeChecker, type: ts.Type): MachineType {
       type: erase(checker, checker.getTypeOfSymbol(property)),
     });
   }
-  return { kind: "struct", name, fields };
+  return isUnion ? { kind: "struct", name, fields, union: true } : { kind: "struct", name, fields };
+}
+
+/** What an enum's width is called when nothing says otherwise. */
+export const DEFAULT_ENUM_WIDTH: ScalarName = "i32";
+
+/** The name a merged namespace uses to declare an enum's underlying type. */
+export const ENUM_UNDERLYING = "Underlying";
+
+/**
+ * The declaration an enum's underlying type is written on, if there is one.
+ *
+ * TypeScript has no syntax for a C enum's underlying type, so it is declared by
+ * merging a namespace into the enum:
+ *
+ *     enum SDL_EventType { Quit = 0x100 }
+ *     declare namespace SDL_EventType { type Underlying = u32 }
+ *
+ * A *type* rather than a `const`, which is what keeps it out of the way: the
+ * two are one symbol to tsc, so `SDL_EventType.Underlying` resolves in type
+ * position and is checked like any other type reference — a typo is an ordinary
+ * tsc error — while in value position it does not exist at all, so the enum's
+ * members are the only thing an editor offers.
+ *
+ * Symbol merging does not care which half is written first, so the namespace
+ * may precede the enum.
+ */
+export function enumUnderlyingSymbol(
+  checker: ts.TypeChecker,
+  type: ts.Type,
+): ts.Symbol | undefined {
+  const declaration = type.getSymbol()?.declarations?.[0];
+  if (declaration === undefined) return undefined;
+  // A member (`E.A`) is an enum *literal*, and its symbol is the member's. The
+  // enum carrying the declaration is its parent.
+  const enumDeclaration = ts.isEnumMember(declaration)
+    ? declaration.parent
+    : ts.isEnumDeclaration(declaration)
+      ? declaration
+      : undefined;
+  if (enumDeclaration === undefined) return undefined;
+  const merged = checker.getSymbolAtLocation(enumDeclaration.name);
+  return merged?.exports?.get(ENUM_UNDERLYING as ts.__String);
+}
+
+/**
+ * The width behind an enum, or `null` if this type is not one.
+ *
+ * Defaults to {@link DEFAULT_ENUM_WIDTH}, because that is what a C enum is
+ * unless the ABI says otherwise — so omitting the declaration is not an error,
+ * it is the common case.
+ */
+export function enumUnderlying(
+  checker: ts.TypeChecker,
+  type: ts.Type,
+): ScalarName | null {
+  if ((type.getFlags() & ts.TypeFlags.EnumLike) === 0) return null;
+
+  const declared = enumUnderlyingSymbol(checker, type);
+  if (declared === undefined) return DEFAULT_ENUM_WIDTH;
+
+  const name = scalarName(checker, checker.getDeclaredTypeOfSymbol(declared));
+  if (name === null) {
+    throw new ErasureError(
+      `\`${ENUM_UNDERLYING}\` must be one of the integer widths — \`u8\`, \`i32\`, ` +
+        "`u32` and so on. An enum is a set of integer constants, and this names " +
+        "something that is not an integer.",
+      "GF0166",
+    );
+  }
+  if (isFloat(name)) {
+    throw new ErasureError(
+      `\`${ENUM_UNDERLYING}\` is \`${name}\`, and an enum holds integers. ` +
+        "A floating-point enum has no meaning: its members are written as exact " +
+        "constants and compared for equality.",
+      "GF0166",
+    );
+  }
+  return name;
+}
+
+/**
+ * Whether a property is a brand rather than a field.
+ *
+ * A brand is symbol-keyed, which is what stops a source file from spelling it
+ * and claiming a shape it does not have — and is also what makes it recognisable
+ * here without a list of names to keep in step.
+ */
+function isBrand(property: ts.Symbol): boolean {
+  const declaration = property.declarations?.[0] as ts.NamedDeclaration | undefined;
+  const name = declaration?.name;
+  return name !== undefined && ts.isComputedPropertyName(name);
 }
 
 /**

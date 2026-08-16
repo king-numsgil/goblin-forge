@@ -217,6 +217,8 @@ export class ModuleBuilder {
     name: string;
     fields: { name: string; ty: TyId; span?: Span }[];
     cCompatible?: boolean;
+    /** A C `union`: every field at offset 0, sized by the largest member. */
+    union?: boolean;
     span?: Span;
   }): StructId {
     const id = StructId(this.#structs.length);
@@ -229,6 +231,7 @@ export class ModuleBuilder {
       name: this.sym(options.name),
       fields,
       cCompatible: options.cCompatible ?? false,
+      union: options.union ?? false,
       span: options.span ?? SYNTHETIC,
     });
     return id;

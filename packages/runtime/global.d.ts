@@ -258,6 +258,46 @@ type isize = number & __GfWidth<"isize">;
 type usize = number & __GfWidth<"usize">;
 
 // ---------------------------------------------------------------------------
+// Unions.
+//
+// A C `union`: every member starts at offset 0, and the whole thing is as big
+// as the largest and as aligned as the strictest. Written by extending the
+// marker, which is the declaration-site half of the same brand idea the widths
+// and pointers use:
+//
+//     interface SDL_Event extends Union {
+//       type: u32;
+//       key: SDL_KeyboardEvent;
+//       motion: SDL_MouseMotionEvent;
+//     }
+//
+// Two rules follow from what a union *is*, and both are the compiler's:
+//
+// * **Members must be plain data.** Nothing in the bytes says which member is
+//   live, so nothing can say which one to destroy. A union of owning types has
+//   no definable destructor and is refused rather than guessed at.
+// * **No object literal builds one.** tsc would demand every member, which is
+//   the opposite of what a union means. One is zero-initialised, or filled by
+//   the C function you handed it to — which is the whole use case.
+//
+// Reading a member other than the one last written is undefined, exactly as in
+// C, and is not diagnosed: this is an unsafe language on purpose. The reliable
+// read is the common initial sequence — the leading fields every member shares
+// — which is what a tag like `SDL_Event.type` is.
+// ---------------------------------------------------------------------------
+
+declare const UnionBrand: unique symbol;
+
+interface Union {
+  /**
+   * Optional, so that extending it costs nothing structurally and adds no
+   * field. Symbol-keyed, so no source file can spell it and claim to be a
+   * union without saying so.
+   */
+  readonly [UnionBrand]?: never;
+}
+
+// ---------------------------------------------------------------------------
 // Pointers.
 //
 // `Pointer<T>` is a bare machine address at runtime — one register, no header,
@@ -551,6 +591,25 @@ declare function sizeOf<T>(): usize;
 
 /** Alignment of `T` in bytes. */
 declare function alignOf<T>(): usize;
+
+/**
+ * A `T` whose bytes are all zero — what `alloc<T>()` gives, on the stack.
+ *
+ *     let event = zeroed<SDL_Event>();
+ *     while (SDL_PollEvent(addressOf(event))) { … }
+ *
+ * This is how a {@link Union} is made. An object literal cannot build one —
+ * it would have to supply every member, and a union has room for one — so
+ * zeroing and then assigning the member you mean is the whole construction
+ * story, exactly as it is in C.
+ *
+ * Not restricted to unions: a zeroed struct is an ordinary thing to want, and
+ * zero is what every field of one would be initialised to anyway.
+ *
+ * A class is refused. `Default` would zero it and install its vtable without
+ * running its constructor, and `new C(…)` is the spelling that runs it.
+ */
+declare function zeroed<T>(): T;
 
 // ---------------------------------------------------------------------------
 // Width conversion.

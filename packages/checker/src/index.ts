@@ -61,6 +61,10 @@ export {
 export {
   classNameOf,
   contractOf,
+  DEFAULT_ENUM_WIDTH,
+  ENUM_UNDERLYING,
+  enumUnderlying,
+  enumUnderlyingSymbol,
   erase,
   ErasureError,
   type InterfaceMethod,

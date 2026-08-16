@@ -38,6 +38,8 @@ import {
   checkLiteral,
   commonType,
   type Diagnostic,
+  DEFAULT_ENUM_WIDTH,
+  ENUM_UNDERLYING,
   ErasureError,
   erase,
   fits,
@@ -117,6 +119,7 @@ const ALLOC_ARRAY = "allocArray";
 /** `sizeOf<T>()` and `alignOf<T>()` — the layout, as constants. */
 const NATIVE_SIZE_OF = "sizeOf";
 const NATIVE_ALIGN_OF = "alignOf";
+const NATIVE_ZEROED = "zeroed";
 /** `stringFromCString(p)` — copy a `const char *` into a managed `string`. */
 const STRING_FROM_CSTRING = "stringFromCString";
 
@@ -1283,6 +1286,21 @@ class Lowerer {
     ) {
       return undefined;
     }
+    // An enum contributes no code either: every member is a constant, folded
+    // where it is used. What it does contribute is a *width*, and members that
+    // do not fit it, so it is checked here rather than only where it is read
+    // — a member nothing mentions is still wrong.
+    if (ts.isEnumDeclaration(statement)) {
+      this.#checkEnum(statement);
+      return undefined;
+    }
+    // `declare namespace E { type Underlying = u32 }` — the other half of an
+    // enum's declaration, and ambient, so there is nothing to lower. A
+    // namespace holding anything else is not something this language has.
+    if (ts.isModuleDeclaration(statement)) {
+      if (!this.#checkEnumNamespace(statement)) return undefined;
+      return undefined;
+    }
     // Handled by `#declareClasses`, which ran before this and needed to: a
     // function here may take a class as a parameter.
     if (ts.isClassDeclaration(statement)) return undefined;
@@ -1901,6 +1919,25 @@ class Lowerer {
       }
     }
 
+    // A union's members share their storage, so nothing in the bytes says which
+    // one is live and nothing can say which one to destroy. Refusing an owning
+    // member is what keeps that question from ever being asked (DECISIONS §12).
+    if (type.union === true) {
+      for (const field of type.fields) {
+        if (needsDrop(field.type)) {
+          this.error(
+            at,
+            "GF0303",
+            `\`${type.name}.${field.name}\` is a \`${renderType(field.type)}\`, which ` +
+              "owns what it points at. A union's members share their storage, so " +
+              "nothing in the bytes records which one is live — and so nothing could " +
+              "say which one to release. A union holds plain data.",
+          );
+          return this.#mir.ty({ kind: "Void" });
+        }
+      }
+    }
+
     // Reserved before the fields are erased, so a struct that (later) contains
     // a pointer to itself does not recurse forever.
     const id = this.#mir.struct({
@@ -1909,6 +1946,7 @@ class Lowerer {
         name: field.name,
         ty: this.tyOf(field.type, at),
       })),
+      union: type.union === true,
     });
     const ty = this.#mir.ty({ kind: "Struct", value: id });
     this.#structs.set(type.name, ty);
@@ -2037,6 +2075,112 @@ class Lowerer {
         base = base.base;
       }
       if (inherits) this.implement(derivedName, contract, at);
+    }
+    return true;
+  }
+
+  /**
+   * `E.A` — the enum member this names, if it names one.
+   *
+   * Asked of tsc's symbol rather than of the spelling, so an imported enum and
+   * an aliased one resolve the same way a local one does.
+   */
+  enumMemberAt(expression: ts.PropertyAccessExpression): ts.EnumMember | undefined {
+    const declaration = this.#checker.getSymbolAtLocation(expression.name)?.declarations?.[0];
+    return declaration !== undefined && ts.isEnumMember(declaration) ? declaration : undefined;
+  }
+
+  /**
+   * Check an enum: its underlying width, and that every member fits it.
+   *
+   * Nothing is lowered — the members are constants and are folded where they
+   * are read. The check happens at the declaration anyway, because a member
+   * that does not fit is wrong whether or not anything mentions it, and this is
+   * the only place with the whole enum to point at.
+   */
+  #checkEnum(statement: ts.EnumDeclaration): void {
+    const type = this.#checker.getTypeAtLocation(statement.name);
+    const width = this.erase(statement.name, type);
+    if (width === undefined || width.kind !== "scalar") return;
+
+    const range = rangeOf(width.name);
+    if (range === null) return;
+
+    for (const member of statement.members) {
+      const value = this.#checker.getConstantValue(member);
+      if (typeof value === "string") {
+        this.error(
+          member,
+          "GF0166",
+          `\`${statement.name.text}.${member.name.getText()}\` is a string. An enum ` +
+            "here is a set of integer constants; a string enum has no machine " +
+            "representation and no width to give it.",
+        );
+        continue;
+      }
+      if (value === undefined) {
+        // A computed member tsc could not fold. Every constant form folds, so
+        // this is a member whose initialiser is not a constant at all.
+        this.unsupported(member, "an enum member whose value is not a constant");
+        continue;
+      }
+      if (!Number.isInteger(value)) {
+        this.error(
+          member,
+          "GF0166",
+          `\`${statement.name.text}.${member.name.getText()}\` is ${value}, which is ` +
+            "not an integer. An enum holds integer constants.",
+        );
+        continue;
+      }
+      const exact = BigInt(value);
+      if (exact < range.min || exact > range.max) {
+        this.error(
+          member,
+          "GF0164",
+          `\`${statement.name.text}.${member.name.getText()}\` is ${exact}, which does ` +
+            `not fit in \`${width.name}\`, whose range is ${range.min} to ${range.max}. ` +
+            `The width comes from \`declare namespace ${statement.name.text} ` +
+            `{ type ${ENUM_UNDERLYING} = … }\`, or is \`${DEFAULT_ENUM_WIDTH}\` when ` +
+            "nothing declares one.",
+        );
+      }
+    }
+  }
+
+  /**
+   * `declare namespace E { type Underlying = u32 }`, and nothing else.
+   *
+   * A namespace is not a thing this language has — there is no module-level
+   * storage for one to hold, and no runtime object for it to be. It is accepted
+   * in exactly the one shape that carries an enum's width, because TypeScript
+   * offers no other legal place to write it.
+   */
+  #checkEnumNamespace(statement: ts.ModuleDeclaration): boolean {
+    const merged = this.#checker.getSymbolAtLocation(statement.name);
+    const mergesWithEnum = merged?.declarations?.some((declaration) =>
+      ts.isEnumDeclaration(declaration),
+    );
+    if (mergesWithEnum !== true) {
+      this.unsupported(
+        statement,
+        `a namespace — the only one this language has is ` +
+          `\`declare namespace E { type ${ENUM_UNDERLYING} = … }\`, which gives an ` +
+          `enum its width`,
+      );
+      return false;
+    }
+
+    const body = statement.body;
+    if (body === undefined || !ts.isModuleBlock(body)) return true;
+    for (const inner of body.statements) {
+      if (ts.isTypeAliasDeclaration(inner) && inner.name.text === ENUM_UNDERLYING) continue;
+      this.unsupported(
+        inner,
+        `\`${statement.name.getText()}\` is an enum's width declaration, so ` +
+          `\`type ${ENUM_UNDERLYING} = …\` is the only thing it may contain`,
+      );
+      return false;
     }
     return true;
   }
@@ -3908,6 +4052,13 @@ class BodyLowerer {
 
   /** `s.length` on a string, or a field of a struct or a class. */
   #propertyWidth(expression: ts.PropertyAccessExpression): Width {
+    // An enum member's width is the enum's, which erasure already knows how to
+    // find. First, because `E` is a type and the paths below all start by
+    // asking what `expression.expression` is worth as a value.
+    if (this.#outer.enumMemberAt(expression) !== undefined) {
+      return this.#erasedWidth(expression);
+    }
+
     // `p.address`, before everything, and for the reason the pointer *methods*
     // come before the class path: `Pointer<C>` is `C & CorePointer<C>`, so a
     // field of that name on the pointee would be found first. There is never
@@ -4287,7 +4438,8 @@ class BodyLowerer {
     if (
       expression.expression.text === ALLOC ||
       expression.expression.text === NATIVE_SIZE_OF ||
-      expression.expression.text === NATIVE_ALIGN_OF
+      expression.expression.text === NATIVE_ALIGN_OF ||
+      expression.expression.text === NATIVE_ZEROED
     ) {
       for (const argument of expression.arguments.slice(1)) {
         if (this.width(argument).kind === "error") return ERROR;
@@ -5246,6 +5398,21 @@ class BodyLowerer {
       return undefined;
     }
 
+    // An `Aggregate` writes every field, and a union has room for one. tsc
+    // asks for all of them because it sees an ordinary interface, which is
+    // exactly the shape this rule exists to refuse.
+    if (natural.union === true) {
+      this.#outer.error(
+        expression,
+        "GF0304",
+        `\`${natural.name}\` is a union, so an object literal cannot build one — ` +
+          `its ${natural.fields.length} members share one piece of storage and a ` +
+          "literal supplies them all. Declare it and assign the member you mean: " +
+          `\`let value: ${natural.name};\` then \`value.${natural.fields[0]?.name ?? "member"} = …\`.`,
+      );
+      return undefined;
+    }
+
     // Field *order* is the layout, so the operands are collected in the
     // struct's declaration order rather than in the order the literal happens
     // to write them.
@@ -5341,6 +5508,54 @@ class BodyLowerer {
     if (!this.#outer.requireKnownLayout(type, argument, `\`${query}\``)) return undefined;
     const ty = this.#outer.tyOf(type, argument);
     return this.#temporaryTyped(expression, USIZE, size ? { kind: "SizeOf", value: ty } : { kind: "AlignOf", value: ty });
+  }
+
+  /**
+   * `zeroed<T>()` — a `T` whose bytes are all zero.
+   *
+   * What `alloc<T>()` gives on the heap, given on the stack instead, and built
+   * from the same `Default` a class gets before its constructor runs.
+   *
+   * It exists because a union has no other way to come into being: an object
+   * literal would have to supply every member at once (`GF0304`), and a binding
+   * without an initialiser is not a thing yet. Zero is a valid starting state
+   * for every member of a union, which is what makes this the right shape for
+   * handing one to C:
+   *
+   *     let event = zeroed<SDL_Event>();
+   *     while (SDL_PollEvent(addressOf(event))) { … }
+   *
+   * Useful well beyond unions — a zeroed struct is a common enough thing to
+   * want — which is why it is spelled generally rather than as a union ritual.
+   */
+  #zeroed(expression: ts.CallExpression, natural: MachineType): Typed | undefined {
+    const argument = expression.typeArguments?.[0];
+    const at = argument ?? expression;
+    // The written type argument wins, and the contextual type stands in when it
+    // is absent, so `const e: SDL_Event = zeroed()` reads as well as the
+    // explicit spelling.
+    const type =
+      argument === undefined
+        ? natural
+        : this.#outer.erase(argument, this.#outer.checker.getTypeAtLocation(argument));
+    if (type === undefined) return undefined;
+    if (!this.#outer.requireKnownLayout(type, at, `\`${NATIVE_ZEROED}\``)) return undefined;
+
+    // A class is the one thing this must not make. `Default` would zero it and
+    // install its vtable — a constructed-looking object whose constructor never
+    // ran — and the language already has the spelling that does run it.
+    if (type.kind === "class") {
+      this.#outer.error(
+        at,
+        "GF0002",
+        `\`${NATIVE_ZEROED}<${renderType(type)}>()\` would produce a \`${renderType(type)}\` ` +
+          "whose constructor never ran. Write `new " +
+          `${renderType(type)}(…)\`, which is the spelling that runs it.`,
+      );
+      return undefined;
+    }
+
+    return this.#temporaryTyped(expression, type, { kind: "Default" });
   }
 
   /**
@@ -6227,8 +6442,52 @@ class BodyLowerer {
     };
   }
 
+  /**
+   * `E.A` — an enum member, which is a constant and not a read.
+   *
+   * tsc has already folded the value, computed forms included, so `1 << 3` and
+   * `Previous + 1` arrive here as numbers. What the enum contributes is the
+   * *width*: the one its namespace declares, or `i32`. That is what makes an
+   * enum member explicit rather than contextual — it lands at a written width,
+   * and narrowing from it is `GF0160` like any other narrowing.
+   */
+  #enumMember(expression: ts.PropertyAccessExpression): Typed | undefined {
+    const width = this.width(expression);
+    if (width.kind !== "typed" || width.type.kind !== "scalar") return undefined;
+
+    // Asked of the member's *declaration* rather than of the access. tsc
+    // answers `getConstantValue` for an `EnumMember` and returns `undefined`
+    // for the `E.A` that names it, which is a silent difference: the constant
+    // simply never arrives and the expression lowers to nothing.
+    const declaration = this.#outer.enumMemberAt(expression);
+    if (declaration === undefined) return undefined;
+    const value = this.#outer.checker.getConstantValue(declaration);
+    // A member that is not an integer constant was already reported where the
+    // enum was declared, with the member to point at. Saying it again here
+    // would be the same mistake twice.
+    if (typeof value !== "number" || !Number.isInteger(value)) return undefined;
+
+    // `explicitRadix`, so a member written `0xFFFFFFFF` in an `i32` enum keeps
+    // the bit pattern a hex literal would — the declaration check is what
+    // decided whether it was allowed.
+    const check = checkLiteral(width.type.name, BigInt(value), true);
+    if (!check.ok || check.bits === undefined) return undefined;
+    return {
+      operand: {
+        kind: "Const",
+        value: { kind: "Int", bits: check.bits, ty: this.#outer.tyOf(width.type, expression) },
+      },
+      type: width.type,
+    };
+  }
+
   /** `s.length` on a string, or a field of a struct. */
   #propertyValue(expression: ts.PropertyAccessExpression, natural: MachineType): Typed | undefined {
+    // An enum member is a constant, and `E` is a type rather than a value — so
+    // this comes before anything tries to ask `E` for one.
+    if (this.#outer.enumMemberAt(expression) !== undefined) {
+      return this.#enumMember(expression);
+    }
     // `C.f` — a static method's address, before anything asks `C` for a value.
     if (this.#staticAt(expression) !== undefined) {
       return this.#functionValue(expression, natural);
@@ -6732,6 +6991,7 @@ class BodyLowerer {
     if (name === NATIVE_SIZE_OF || name === NATIVE_ALIGN_OF) {
       return this.#layoutQuery(expression, name === NATIVE_SIZE_OF);
     }
+    if (name === NATIVE_ZEROED) return this.#zeroed(expression, natural);
 
     // Resolved through tsc's symbol, not by name: an imported function is the
     // same symbol as its declaration however it is spelled at the call site,

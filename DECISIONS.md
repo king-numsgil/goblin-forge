@@ -484,6 +484,97 @@ this only when it is not emitting, which is permanently true.
 
 ---
 
+## §12 — Unions and enums *(settled and built, 2026-08-16)*
+
+Both exist because a C header needs them, and both had the same problem: the
+thing C says is not something TypeScript has syntax for. Neither answer adds
+syntax — a Goblin program is a TypeScript program tsc accepts unmodified, and
+that constraint is what picked both spellings.
+
+### A union is `interface E extends Union`
+
+`Union` is an empty, symbol-branded marker in the prelude, recognised the same
+way `Pointer` and the widths are. The layout is C's: every member at offset 0,
+size the largest member's rounded up, alignment the strictest member's.
+
+**Not a `TyKind` of its own — a flag on `StructDef`.** A union *is* a struct
+everywhere but the offset computation: the same fields, the same projections,
+the same nominal identity, the same ABI classification, the same copy. A
+separate variant would have meant nine `Struct | Union` arms doing identical
+work and one doing something different, and the nine are where a missed case
+would hide.
+
+Two rules, and both fall out of what a union is rather than being policy:
+
+- **Members must be plain data** (`GF0303`). Nothing in the bytes says which
+  member is live, so nothing can say which one to destroy. C++ answers this by
+  deleting the destructor and handing the problem back; here the member is
+  refused at the declaration, where there is something to point at. The
+  predicate is the existing `needsDrop`, so the rule and the drop pass cannot
+  drift apart.
+- **No object literal builds one** (`GF0304`). tsc asks for every property
+  because it sees an ordinary interface, and a union has room for one.
+
+Reading a member other than the one last written is undefined, exactly as in C,
+and is **not** diagnosed. This is an unsafe language on purpose, and the
+reliable read — the common initial sequence every member shares — is the whole
+technique a tagged union is built on.
+
+That left unions unconstructible, because a binding without an initialiser is
+still `GF0001`. Hence **`zeroed<T>()`**: what `alloc<T>()` gives on the heap,
+given on the stack, built from the `Default` a class already gets before its
+constructor runs. Zero is a valid starting state for every member of a union.
+It refuses a class, because `Default` would install a vtable without running a
+constructor and `new C(…)` is the spelling that runs it.
+
+### An enum's width is a merged namespace holding a *type*
+
+```ts
+enum SDL_EventType { Quit = 0x100 }
+declare namespace SDL_EventType { type Underlying = u32 }
+```
+
+TypeScript allows decorators only on classes and class elements — `TS1206` on
+an enum, checked rather than assumed — so the decorator spelling this started
+as is not available. Of the forms that *are* legal, this one is the only one
+that keeps every property worth having:
+
+| | namespace + type | namespace + `const` | JSDoc comment | intersection alias |
+|---|---|---|---|---|
+| tsc checks the width | yes | yes | **no** | yes |
+| clean value-position completion | yes | **no** | yes | yes |
+| one name at the use site | yes | yes | yes | **no** |
+
+A *type* rather than a `const` is the load-bearing part: `E.Underlying`
+resolves in type position and a typo is an ordinary `TS2304`, while in value
+position it does not exist at all, so an editor offers only the members.
+
+**Rejected: a comment.** It works — the frontend can read a `@underlying u32`
+tag off the AST — but comments are trivia. A formatter reflow, a doc rewrite or
+a careless paste would silently change the width of every value in the enum and
+nothing would fail. That is the failure class REWRITE-PLAN is built against;
+the underlying type belongs where deleting it is a compile error.
+
+**Rejected: inheriting the width from context.** An enum member could have been
+a poly literal, taking its width from wherever it lands, exactly as `42` does.
+That needs no declaration at all — but it also leaves nothing to check against,
+so a `u32` constant narrowing into a `u8` field would only be caught when the
+value happened to be out of range. Explicit is what makes `GF0160` reachable.
+
+**The default is `i32`**, which is what a C enum is unless the ABI says
+otherwise, so omitting the declaration is the common case rather than an error.
+Order does not matter — symbol merging does not care, and the namespace may be
+written first.
+
+Members are folded by tsc, computed forms (`1 << 4`, `Previous + 1`) included,
+and range-checked against the width **at the declaration** — so a member that
+does not fit is wrong whether or not anything reads it. One trap worth
+recording: `checker.getConstantValue()` answers for an `EnumMember` declaration
+and returns `undefined` for the `E.A` that names it. Asking the wrong one does
+not fail, it just yields no constant, and the expression lowers to nothing.
+
+---
+
 ## Class decisions *(2026-08-12, milestone 8)*
 
 ### Every class has a vtable pointer, including one with no virtual methods
