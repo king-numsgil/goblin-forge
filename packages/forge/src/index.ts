@@ -20,12 +20,12 @@
  */
 
 export {
-  compile,
-  Compiler,
-  type CompileOptions,
-  type CompileResult,
-  type OptLevel,
-  type OutputKind,
+    compile,
+    Compiler,
+    type CompileOptions,
+    type CompileResult,
+    type OptLevel,
+    type OutputKind,
 } from "./compile.ts";
 
 export { lower, type LowerResult } from "./lower.ts";
@@ -33,24 +33,24 @@ export { lower, type LowerResult } from "./lower.ts";
 // Diagnostics are the checker's model, and re-exported here so that a build
 // script needs one import rather than two.
 export {
-  allCodes,
-  type Code,
-  type CodeEntry,
-  CODES,
-  type Diagnostic,
-  explain,
-  format,
-  formatAll,
-  type FormatOptions,
-  hasErrors,
-  type Location,
-  type Note,
-  type Severity,
+    allCodes,
+    type Code,
+    type CodeEntry,
+    CODES,
+    type Diagnostic,
+    explain,
+    format,
+    formatAll,
+    type FormatOptions,
+    hasErrors,
+    type Location,
+    type Note,
+    type Severity,
 } from "@goblin-forge/checker";
 
 export {
-  globalDeclarations,
-  type RuntimeFiles,
-  tsconfigBase,
-  useRuntimeFiles,
+    globalDeclarations,
+    type RuntimeFiles,
+    tsconfigBase,
+    useRuntimeFiles,
 } from "@goblin-forge/runtime/paths";

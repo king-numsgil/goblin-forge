@@ -4,18 +4,23 @@
 // derived part is not, because there is nowhere in a `Base` to put it. The
 // trace therefore shows one allocation for the slice and not two.
 class Base {
-  one: string;
-  constructor(one: string) { this.one = one; }
+    one: string;
+
+    constructor(one: string) { this.one = one; }
 }
 
 class Derived extends Base {
-  two: string;
-  constructor(one: string, two: string) { super(one); this.two = two; }
+    two: string;
+
+    constructor(one: string, two: string) {
+        super(one);
+        this.two = two;
+    }
 }
 
 export function main(): i32 {
-  const d = new Derived("o" + "ne", "t" + "wo");
-  const sliced: Base = d;
-  console.log(sliced.one);
-  return 0;
+    const d = new Derived("o" + "ne", "t" + "wo");
+    const sliced: Base = d;
+    console.log(sliced.one);
+    return 0;
 }

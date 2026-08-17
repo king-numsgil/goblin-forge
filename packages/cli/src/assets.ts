@@ -23,9 +23,9 @@ import { EMBEDDED } from "./embedded.generated.ts";
 
 /** Where the compiler's own files ended up. */
 export interface Materialised {
-  readonly globalDeclarations: string;
-  readonly tsconfigBase: string;
-  readonly runtimeCrate: string;
+    readonly globalDeclarations: string;
+    readonly tsconfigBase: string;
+    readonly runtimeCrate: string;
 }
 
 /**
@@ -37,31 +37,33 @@ export interface Materialised {
  * global that does exist.
  */
 export function materialise(root: string): Materialised {
-  const crate = join(root, "runtime-crate");
-  mkdirSync(join(crate, "src"), { recursive: true });
+    const crate = join(root, "runtime-crate");
+    mkdirSync(join(crate, "src"), {recursive: true});
 
-  const write = (path: string, contents: string): string => {
-    // Only when it differs: cargo rebuilds on mtime, so rewriting the crate
-    // sources unconditionally would rebuild the runtime on every invocation.
-    if (!same(path, contents)) writeFileSync(path, contents, "utf8");
-    return path;
-  };
+    const write = (path: string, contents: string): string => {
+        // Only when it differs: cargo rebuilds on mtime, so rewriting the crate
+        // sources unconditionally would rebuild the runtime on every invocation.
+        if (!same(path, contents)) {
+            writeFileSync(path, contents, "utf8");
+        }
+        return path;
+    };
 
-  return {
-    globalDeclarations: write(join(root, "global.d.ts"), EMBEDDED.globalDeclarations),
-    tsconfigBase: write(join(root, "tsconfig.base.json"), EMBEDDED.tsconfigBase),
-    runtimeCrate: (() => {
-      write(join(crate, "Cargo.toml"), EMBEDDED.runtimeCargo);
-      write(join(crate, "src", "lib.rs"), EMBEDDED.runtimeSource);
-      return crate;
-    })(),
-  };
+    return {
+        globalDeclarations: write(join(root, "global.d.ts"), EMBEDDED.globalDeclarations),
+        tsconfigBase: write(join(root, "tsconfig.base.json"), EMBEDDED.tsconfigBase),
+        runtimeCrate: (() => {
+            write(join(crate, "Cargo.toml"), EMBEDDED.runtimeCargo);
+            write(join(crate, "src", "lib.rs"), EMBEDDED.runtimeSource);
+            return crate;
+        })(),
+    };
 }
 
 function same(path: string, contents: string): boolean {
-  try {
-    return readFileSync(path, "utf8") === contents;
-  } catch {
-    return false;
-  }
+    try {
+        return readFileSync(path, "utf8") === contents;
+    } catch {
+        return false;
+    }
 }

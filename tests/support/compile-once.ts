@@ -20,19 +20,19 @@ import { compileSource } from "../harness.ts";
 const MARKER = "##goblin-compile-once:";
 
 const request = JSON.parse(readFileSync(Bun.argv[2]!, "utf8")) as {
-  name: string;
-  source: string;
-  files?: Record<string, string>;
+    name: string;
+    source: string;
+    files?: Record<string, string>;
 };
 
-const { result } = await compileSource(request.name, request.source, {
-  ...(request.files !== undefined ? { files: request.files } : {}),
+const {result} = await compileSource(request.name, request.source, {
+    ...(request.files !== undefined ? {files: request.files} : {}),
 });
 
 console.log(
-  MARKER +
+    MARKER +
     JSON.stringify({
-      ok: result.ok,
-      codes: result.diagnostics.filter((d) => d.severity === "error").map((d) => d.code),
+        ok: result.ok,
+        codes: result.diagnostics.filter((d) => d.severity === "error").map((d) => d.code),
     }),
 );

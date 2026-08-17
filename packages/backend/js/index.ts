@@ -22,22 +22,22 @@ import { SCHEMA_FINGERPRINT_HEX } from "./mir.generated.ts";
 
 export { Backend, outputExtension, schemaFingerprint };
 export type {
-  BackendDiagnostic,
-  BackendOptions,
-  LayoutReport,
-  LinkReport,
-  LinkRequest,
-  ModuleArtifact,
-  ModuleSummary,
+    BackendDiagnostic,
+    BackendOptions,
+    LayoutReport,
+    LinkReport,
+    LinkRequest,
+    ModuleArtifact,
+    ModuleSummary,
 } from "../binding.d.ts";
 export * from "./mir.generated.ts";
 export { FunctionBuilder, ModuleBuilder, SYNTHETIC } from "./builder.ts";
 export {
-  type PrintOptions,
-  printFunction,
-  printModule,
-  printStatement,
-  printTerminator,
+    type PrintOptions,
+    printFunction,
+    printModule,
+    printStatement,
+    printTerminator,
 } from "./print.ts";
 
 /**
@@ -51,13 +51,13 @@ export {
  * message.
  */
 export function checkBindingsMatchAddon(): void {
-  const addon = schemaFingerprint();
-  if (addon !== SCHEMA_FINGERPRINT_HEX) {
-    throw new Error(
-      `goblin-forge: the native backend was built from a different MIR ` +
-        `definition than the generated bindings (addon ${addon}, bindings ` +
-        `${SCHEMA_FINGERPRINT_HEX}). Run \`bun run build:backend\` to rebuild ` +
-        `both from crates/goblin-mir.`,
-    );
-  }
+    const addon = schemaFingerprint();
+    if (addon !== SCHEMA_FINGERPRINT_HEX) {
+        throw new Error(
+            `goblin-forge: the native backend was built from a different MIR ` +
+            `definition than the generated bindings (addon ${addon}, bindings ` +
+            `${SCHEMA_FINGERPRINT_HEX}). Run \`bun run build:backend\` to rebuild ` +
+            `both from crates/goblin-mir.`,
+        );
+    }
 }

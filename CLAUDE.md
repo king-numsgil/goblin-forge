@@ -158,3 +158,22 @@ names the ones nothing can reach, with the reason.
 - Avoid raw NUL bytes in source. One in `lower.ts` made git treat the file as
   binary and ripgrep skip it, which silently broke every grep over the largest
   file in the project. Write `\0` in a string literal instead.
+- TypeScript is 4-space indented (not 2), per the 2026-08-17 WebStorm reformat.
+  One-line interface/type members (`interface Foo {}`, `readonly x: T;` with no
+  comment) get a blank line between them; a run of related one-liners, like the
+  `SCALARS` array or a single-line union arm such as
+  `| { readonly kind: "void" }`, stays tight. A union arm that is a multi-line
+  object literal indents its body and closing `}` to line up under the `{`
+  that opens it, e.g. (`packages/checker/src/types.ts`, `MachineType`):
+  ```ts
+      | { readonly kind: "array"; readonly element: MachineType }
+      | {
+            /** `FixedArray<T, N>`: `N` elements, inline, no allocation. */
+            readonly kind: "fixedArray";
+            readonly element: MachineType;
+            readonly length: number;
+        }
+  ```
+  WebStorm's reformat got this last case wrong across the codebase (dropped
+  the body and closing brace to the `|`'s own indent) — that was fixed by hand
+  in `types.ts` and `lower.ts`; match the corrected form, not the bulk diff.

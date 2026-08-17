@@ -20,10 +20,10 @@ import { join } from "node:path";
 import { runtimeCrate } from "./paths.ts";
 
 export interface RuntimeBuild {
-  /** Absolute path to the static library. */
-  readonly library: string;
-  /** System libraries the linker needs, in the platform's spelling. */
-  readonly systemLibs: readonly string[];
+    /** Absolute path to the static library. */
+    readonly library: string;
+    /** System libraries the linker needs, in the platform's spelling. */
+    readonly systemLibs: readonly string[];
 }
 
 const cache = new Map<string, RuntimeBuild>();
@@ -44,56 +44,62 @@ export const RUNTIME_CRATE = (): string => runtimeCrate();
  * paying cargo's own startup on every one of a few hundred test compiles.
  */
 export function buildRuntime(target?: string): RuntimeBuild {
-  const key = target ?? "<host>";
-  const cached = cache.get(key);
-  if (cached !== undefined) return cached;
+    const key = target ?? "<host>";
+    const cached = cache.get(key);
+    if (cached !== undefined) {
+        return cached;
+    }
 
-  const args = ["rustc", "--release", "--quiet"];
-  if (target !== undefined) args.push("--target", target);
-  // `--print native-static-libs` reports what a staticlib needs on stderr, as
-  // part of an ordinary build, so this is not a second compilation.
-  args.push("--", "--print", "native-static-libs");
+    const args = ["rustc", "--release", "--quiet"];
+    if (target !== undefined) {
+        args.push("--target", target);
+    }
+    // `--print native-static-libs` reports what a staticlib needs on stderr, as
+    // part of an ordinary build, so this is not a second compilation.
+    args.push("--", "--print", "native-static-libs");
 
-  const result = spawnSync("cargo", args, {
-    cwd: RUNTIME_CRATE(),
-    encoding: "utf8",
-    shell: process.platform === "win32",
-  });
+    const result = spawnSync("cargo", args, {
+        cwd: RUNTIME_CRATE(),
+        encoding: "utf8",
+        shell: process.platform === "win32",
+    });
 
-  if (result.error) {
-    throw new Error(
-      `could not run cargo to build the Goblin runtime: ${result.error.message}`,
-    );
-  }
-  if (result.status !== 0) {
-    throw new Error(
-      `building the Goblin runtime failed:\n${result.stderr ?? ""}${result.stdout ?? ""}`,
-    );
-  }
+    if (result.error) {
+        throw new Error(
+            `could not run cargo to build the Goblin runtime: ${result.error.message}`,
+        );
+    }
+    if (result.status !== 0) {
+        throw new Error(
+            `building the Goblin runtime failed:\n${result.stderr ?? ""}${result.stdout ?? ""}`,
+        );
+    }
 
-  const library = locateLibrary(target);
-  if (library === undefined) {
-    throw new Error(
-      `the Goblin runtime built, but its static library was not where it was ` +
-        `expected under ${join(RUNTIME_CRATE(), "target")}`,
-    );
-  }
+    const library = locateLibrary(target);
+    if (library === undefined) {
+        throw new Error(
+            `the Goblin runtime built, but its static library was not where it was ` +
+            `expected under ${join(RUNTIME_CRATE(), "target")}`,
+        );
+    }
 
-  const build: RuntimeBuild = {
-    library,
-    systemLibs: parseNativeStaticLibs(result.stderr ?? ""),
-  };
-  cache.set(key, build);
-  return build;
+    const build: RuntimeBuild = {
+        library,
+        systemLibs: parseNativeStaticLibs(result.stderr ?? ""),
+    };
+    cache.set(key, build);
+    return build;
 }
 
 function locateLibrary(target?: string): string | undefined {
-  const base = join(RUNTIME_CRATE(), "target", ...(target ? [target] : []), "release");
-  for (const name of ["goblin_runtime.lib", "libgoblin_runtime.a"]) {
-    const candidate = join(base, name);
-    if (existsSync(candidate)) return candidate;
-  }
-  return undefined;
+    const base = join(RUNTIME_CRATE(), "target", ...(target ? [target] : []), "release");
+    for (const name of ["goblin_runtime.lib", "libgoblin_runtime.a"]) {
+        const candidate = join(base, name);
+        if (existsSync(candidate)) {
+            return candidate;
+        }
+    }
+    return undefined;
 }
 
 /**
@@ -104,16 +110,20 @@ function locateLibrary(target?: string): string | undefined {
  * so the marker is matched rather than the whole line.
  */
 export function parseNativeStaticLibs(stderr: string): string[] {
-  const marker = "native-static-libs:";
-  const at = stderr.lastIndexOf(marker);
-  if (at === -1) return [];
-  const line = stderr.slice(at + marker.length).split(/\r?\n/, 1)[0] ?? "";
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const entry of line.trim().split(/\s+/)) {
-    if (entry.length === 0 || seen.has(entry)) continue;
-    seen.add(entry);
-    out.push(entry);
-  }
-  return out;
+    const marker = "native-static-libs:";
+    const at = stderr.lastIndexOf(marker);
+    if (at === -1) {
+        return [];
+    }
+    const line = stderr.slice(at + marker.length).split(/\r?\n/, 1)[0] ?? "";
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const entry of line.trim().split(/\s+/)) {
+        if (entry.length === 0 || seen.has(entry)) {
+            continue;
+        }
+        seen.add(entry);
+        out.push(entry);
+    }
+    return out;
 }

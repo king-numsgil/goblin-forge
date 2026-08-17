@@ -23,12 +23,12 @@ const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 
 /** Where the compiler should look for the files that ship with it. */
 export interface RuntimeFiles {
-  /** The ambient prelude — `global.d.ts`. */
-  readonly globalDeclarations: string;
-  /** The tsconfig every project extends. */
-  readonly tsconfigBase: string;
-  /** A directory holding the runtime crate: `Cargo.toml` and `src/`. */
-  readonly runtimeCrate: string;
+    /** The ambient prelude — `global.d.ts`. */
+    readonly globalDeclarations: string;
+    /** The tsconfig every project extends. */
+    readonly tsconfigBase: string;
+    /** A directory holding the runtime crate: `Cargo.toml` and `src/`. */
+    readonly runtimeCrate: string;
 }
 
 let override: RuntimeFiles | undefined;
@@ -41,7 +41,7 @@ let override: RuntimeFiles | undefined;
  * three and calls this with wherever they ended up.
  */
 export function useRuntimeFiles(files: RuntimeFiles): void {
-  override = files;
+    override = files;
 }
 
 /**
@@ -51,12 +51,12 @@ export function useRuntimeFiles(files: RuntimeFiles): void {
  * because the compiler runs tsc with `noLib` and no `typeRoots`.
  */
 export function globalDeclarations(): string {
-  return override?.globalDeclarations ?? join(packageRoot, "global.d.ts");
+    return override?.globalDeclarations ?? join(packageRoot, "global.d.ts");
 }
 
 /** The tsconfig every Goblin project extends. */
 export function tsconfigBase(): string {
-  return override?.tsconfigBase ?? join(packageRoot, "tsconfig.base.json");
+    return override?.tsconfigBase ?? join(packageRoot, "tsconfig.base.json");
 }
 
 /**
@@ -66,5 +66,5 @@ export function tsconfigBase(): string {
  * this path. An embedded copy is extracted before it is named here.
  */
 export function runtimeCrate(): string {
-  return override?.runtimeCrate ?? join(packageRoot, "native");
+    return override?.runtimeCrate ?? join(packageRoot, "native");
 }

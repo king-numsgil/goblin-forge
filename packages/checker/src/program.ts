@@ -8,26 +8,25 @@
  * one-shot pipeline is expensive and `watch` is coming.
  */
 
-import ts from "typescript";
-
 import { globalDeclarations } from "@goblin-forge/runtime/paths";
+import ts from "typescript";
 
 import type { Diagnostic } from "./diagnostics.ts";
 import { fromTsDiagnostic, loadConfig, type LoadedConfig } from "./tsconfig.ts";
 
 export interface CheckerOptions {
-  /** Absolute or relative path to the project's tsconfig. */
-  readonly tsconfig: string;
-  /** Extra root files, beyond what the tsconfig names. Usually the entry. */
-  readonly rootNames?: readonly string[];
+    /** Absolute or relative path to the project's tsconfig. */
+    readonly tsconfig: string;
+    /** Extra root files, beyond what the tsconfig names. Usually the entry. */
+    readonly rootNames?: readonly string[];
 }
 
 export interface CheckResult {
-  readonly program: ts.Program;
-  readonly checker: ts.TypeChecker;
-  readonly config: LoadedConfig;
-  /** Everything tsc and the config validation had to say. */
-  readonly diagnostics: readonly Diagnostic[];
+    readonly program: ts.Program;
+    readonly checker: ts.TypeChecker;
+    readonly config: LoadedConfig;
+    /** Everything tsc and the config validation had to say. */
+    readonly diagnostics: readonly Diagnostic[];
 }
 
 /**
@@ -40,62 +39,62 @@ export interface CheckResult {
  * later, but the shape it needs is here already.
  */
 export class Checker {
-  #program: ts.Program | undefined;
-  #config: LoadedConfig | undefined;
-  readonly #options: CheckerOptions;
-  readonly #host: ts.CompilerHost;
+    #program: ts.Program | undefined;
+    #config: LoadedConfig | undefined;
+    readonly #options: CheckerOptions;
+    readonly #host: ts.CompilerHost;
 
-  constructor(options: CheckerOptions) {
-    this.#options = options;
-    this.#config = loadConfig(options.tsconfig);
-    this.#host = ts.createCompilerHost(this.#config.options, true);
-  }
-
-  /**
-   * Build (or rebuild) the program and collect every diagnostic.
-   *
-   * Syntactic errors are reported without also reporting the semantic errors
-   * that follow from them, because a missing brace produces a hundred type
-   * errors that all say the same thing.
-   */
-  check(): CheckResult {
-    const config = this.#config ?? loadConfig(this.#options.tsconfig);
-    this.#config = config;
-
-    const rootNames = rootsFor(config, this.#options.rootNames ?? []);
-    const program = ts.createProgram({
-      rootNames,
-      options: config.options,
-      host: this.#host,
-      // Spread rather than pass `undefined`: with `exactOptionalPropertyTypes`
-      // an absent optional property and one explicitly set to `undefined` are
-      // different things, and tsc's own signature wants the former.
-      ...(this.#program !== undefined ? { oldProgram: this.#program } : {}),
-    });
-    this.#program = program;
-
-    const diagnostics: Diagnostic[] = [...config.diagnostics];
-    diagnostics.push(...program.getOptionsDiagnostics().map(fromTsDiagnostic));
-    diagnostics.push(...program.getGlobalDiagnostics().map(fromTsDiagnostic));
-
-    const syntactic = program.getSyntacticDiagnostics();
-    diagnostics.push(...syntactic.map(fromTsDiagnostic));
-    if (syntactic.length === 0) {
-      diagnostics.push(...program.getSemanticDiagnostics().map(fromTsDiagnostic));
+    constructor(options: CheckerOptions) {
+        this.#options = options;
+        this.#config = loadConfig(options.tsconfig);
+        this.#host = ts.createCompilerHost(this.#config.options, true);
     }
 
-    return {
-      program,
-      checker: program.getTypeChecker(),
-      config,
-      diagnostics,
-    };
-  }
+    /**
+     * Build (or rebuild) the program and collect every diagnostic.
+     *
+     * Syntactic errors are reported without also reporting the semantic errors
+     * that follow from them, because a missing brace produces a hundred type
+     * errors that all say the same thing.
+     */
+    check(): CheckResult {
+        const config = this.#config ?? loadConfig(this.#options.tsconfig);
+        this.#config = config;
 
-  /** Drop the cached config so the next {@link check} re-reads it from disk. */
-  invalidateConfig(): void {
-    this.#config = undefined;
-  }
+        const rootNames = rootsFor(config, this.#options.rootNames ?? []);
+        const program = ts.createProgram({
+            rootNames,
+            options: config.options,
+            host: this.#host,
+            // Spread rather than pass `undefined`: with `exactOptionalPropertyTypes`
+            // an absent optional property and one explicitly set to `undefined` are
+            // different things, and tsc's own signature wants the former.
+            ...(this.#program !== undefined ? {oldProgram: this.#program} : {}),
+        });
+        this.#program = program;
+
+        const diagnostics: Diagnostic[] = [...config.diagnostics];
+        diagnostics.push(...program.getOptionsDiagnostics().map(fromTsDiagnostic));
+        diagnostics.push(...program.getGlobalDiagnostics().map(fromTsDiagnostic));
+
+        const syntactic = program.getSyntacticDiagnostics();
+        diagnostics.push(...syntactic.map(fromTsDiagnostic));
+        if (syntactic.length === 0) {
+            diagnostics.push(...program.getSemanticDiagnostics().map(fromTsDiagnostic));
+        }
+
+        return {
+            program,
+            checker: program.getTypeChecker(),
+            config,
+            diagnostics,
+        };
+    }
+
+    /** Drop the cached config so the next {@link check} re-reads it from disk. */
+    invalidateConfig(): void {
+        this.#config = undefined;
+    }
 }
 
 /**
@@ -107,8 +106,8 @@ export class Checker {
  * {@link checkPreludeIsVisibleToEditors}.
  */
 function rootsFor(config: LoadedConfig, extra: readonly string[]): string[] {
-  const roots = new Set<string>([globalDeclarations(), ...config.fileNames, ...extra]);
-  return [...roots];
+    const roots = new Set<string>([globalDeclarations(), ...config.fileNames, ...extra]);
+    return [...roots];
 }
 
 /**
@@ -122,25 +121,27 @@ function rootsFor(config: LoadedConfig, extra: readonly string[]): string[] {
  * is that the user sees its verdict while typing.
  */
 export function checkPreludeIsVisibleToEditors(config: LoadedConfig): Diagnostic[] {
-  const named = config.fileNames.some(
-    (file) => normalise(file) === normalise(globalDeclarations()),
-  );
-  if (named) return [];
+    const named = config.fileNames.some(
+        (file) => normalise(file) === normalise(globalDeclarations()),
+    );
+    if (named) {
+        return [];
+    }
 
-  return [
-    {
-      severity: "warning",
-      code: "GF0003",
-      source: "goblin",
-      message:
-        "this tsconfig does not name the ambient prelude, so your editor is " +
-        "type-checking against a different language than the compiler is. Add " +
-        '"@goblin-forge/runtime/global.d.ts" to `files`.',
-      location: { file: config.path, line: 1, column: 1, length: 1 },
-    },
-  ];
+    return [
+        {
+            severity: "warning",
+            code: "GF0003",
+            source: "goblin",
+            message:
+                "this tsconfig does not name the ambient prelude, so your editor is " +
+                "type-checking against a different language than the compiler is. Add " +
+                "\"@goblin-forge/runtime/global.d.ts\" to `files`.",
+            location: {file: config.path, line: 1, column: 1, length: 1},
+        },
+    ];
 }
 
 function normalise(path: string): string {
-  return path.replace(/\\/g, "/").toLowerCase();
+    return path.replace(/\\/g, "/").toLowerCase();
 }

@@ -15,25 +15,20 @@
  *   pipeline does not.
  */
 
-import { mkdirSync, writeFileSync } from "node:fs";
-import { dirname, isAbsolute, join, resolve } from "node:path";
-
 import {
-  Checker,
-  checkPreludeIsVisibleToEditors,
-  type Diagnostic,
-  hasErrors,
-} from "@goblin-forge/checker";
-import {
-  Backend,
-  type BackendOptions,
-  checkBindingsMatchAddon,
-  encodeModule,
-  outputExtension,
-  printModule,
+    Backend,
+    type BackendOptions,
+    checkBindingsMatchAddon,
+    encodeModule,
+    outputExtension,
+    printModule,
 } from "@goblin-forge/backend";
 
+import { Checker, checkPreludeIsVisibleToEditors, type Diagnostic, hasErrors } from "@goblin-forge/checker";
+
 import { buildRuntime } from "@goblin-forge/runtime/build";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 
 import { elaborateDrops } from "./drop-elaboration.ts";
 import { emitHeader, HeaderError } from "./header.ts";
@@ -43,81 +38,81 @@ export type OutputKind = "bin" | "static-lib" | "shared-lib";
 export type OptLevel = "none" | "speed" | "size";
 
 export interface CompileOptions {
-  /** The entry module. Resolved against {@link CompileOptions.root}. */
-  readonly entry: string;
-  /** The project's tsconfig. Resolved against {@link CompileOptions.root}. */
-  readonly tsconfig: string;
+    /** The entry module. Resolved against {@link CompileOptions.root}. */
+    readonly entry: string;
+    /** The project's tsconfig. Resolved against {@link CompileOptions.root}. */
+    readonly tsconfig: string;
 
-  /**
-   * What every other relative path is resolved against.
-   *
-   * Defaults to the directory of the build script that called `compile`, not
-   * the working directory.
-   */
-  readonly root?: string;
+    /**
+     * What every other relative path is resolved against.
+     *
+     * Defaults to the directory of the build script that called `compile`, not
+     * the working directory.
+     */
+    readonly root?: string;
 
-  readonly type?: OutputKind;
-  /** Output path. The platform's extension for the target type is added. */
-  readonly output: string;
+    readonly type?: OutputKind;
+    /** Output path. The platform's extension for the target type is added. */
+    readonly output: string;
 
-  readonly nativeLibs?: readonly string[];
-  readonly manifests?: readonly string[];
+    readonly nativeLibs?: readonly string[];
+    readonly manifests?: readonly string[];
 
-  /** Target triple. Defaults to the host. */
-  readonly target?: string;
-  readonly optLevel?: OptLevel;
-  /** Runtime liveness checks. */
-  readonly checked?: boolean;
-  readonly debugInfo?: boolean;
+    /** Target triple. Defaults to the host. */
+    readonly target?: string;
+    readonly optLevel?: OptLevel;
+    /** Runtime liveness checks. */
+    readonly checked?: boolean;
+    readonly debugInfo?: boolean;
 
-  /** Where objects and other intermediates go. */
-  readonly outDir?: string;
-  readonly emit?: {
-    readonly ir?: boolean;
-    readonly header?: boolean;
-    readonly declarations?: boolean;
-  };
+    /** Where objects and other intermediates go. */
+    readonly outDir?: string;
+    readonly emit?: {
+        readonly ir?: boolean;
+        readonly header?: boolean;
+        readonly declarations?: boolean;
+    };
 
-  readonly incremental?: boolean;
+    readonly incremental?: boolean;
 
-  /**
-   * Panic inside the backend on an internal error rather than returning a
-   * diagnostic. REWRITE-PLAN §8: a compiler crash must not be able to read as
-   * a clean rejection. The test harness turns this on.
-   */
-  readonly strictInternalErrors?: boolean;
+    /**
+     * Panic inside the backend on an internal error rather than returning a
+     * diagnostic. REWRITE-PLAN §8: a compiler crash must not be able to read as
+     * a clean rejection. The test harness turns this on.
+     */
+    readonly strictInternalErrors?: boolean;
 }
 
 export interface CompileResult {
-  readonly ok: boolean;
-  readonly diagnostics: readonly Diagnostic[];
-  /** Absolute path of the artifact, when one was produced. */
-  readonly output?: string;
-  /** Absolute paths of every object file written. */
-  readonly objects: readonly string[];
-  /** The exact linker command, so a link failure can be reproduced by hand. */
-  readonly linkCommand?: string;
-  /** Where the MIR was written, when `emit.ir` asked for it. */
-  readonly irPath?: string;
-  /** Where the C header was written, for a library target. */
-  readonly headerPath?: string;
-  /**
-   * The import library beside a Windows `shared-lib`.
-   *
-   * Windows has no equivalent of linking straight against a `.so`: a consumer
-   * links this stub instead. Absent on every other platform, and absent for
-   * every other target kind.
-   */
-  readonly importLibrary?: string;
-  /**
-   * The Goblin runtime archive a consumer of a `static-lib` must also link.
-   *
-   * A Goblin archive carries only its own objects, so that two of them in one
-   * program do not each bring a copy of `gf_string_free`. That makes this the
-   * consumer's job, and leaving it to be discovered from a linker error would
-   * be unkind.
-   */
-  readonly runtimeLibrary?: string;
+    readonly ok: boolean;
+    readonly diagnostics: readonly Diagnostic[];
+    /** Absolute path of the artifact, when one was produced. */
+    readonly output?: string;
+    /** Absolute paths of every object file written. */
+    readonly objects: readonly string[];
+    /** The exact linker command, so a link failure can be reproduced by hand. */
+    readonly linkCommand?: string;
+    /** Where the MIR was written, when `emit.ir` asked for it. */
+    readonly irPath?: string;
+    /** Where the C header was written, for a library target. */
+    readonly headerPath?: string;
+    /**
+     * The import library beside a Windows `shared-lib`.
+     *
+     * Windows has no equivalent of linking straight against a `.so`: a consumer
+     * links this stub instead. Absent on every other platform, and absent for
+     * every other target kind.
+     */
+    readonly importLibrary?: string;
+    /**
+     * The Goblin runtime archive a consumer of a `static-lib` must also link.
+     *
+     * A Goblin archive carries only its own objects, so that two of them in one
+     * program do not each bring a copy of `gf_string_free`. That makes this the
+     * consumer's job, and leaving it to be discovered from a linker error would
+     * be unkind.
+     */
+    readonly runtimeLibrary?: string;
 }
 
 /**
@@ -127,7 +122,7 @@ export interface CompileResult {
  * is what `watch` will use; this is the one-shot convenience over it.
  */
 export async function compile(options: CompileOptions): Promise<CompileResult> {
-  return new Compiler(options).build();
+    return new Compiler(options).build();
 }
 
 /**
@@ -136,182 +131,190 @@ export async function compile(options: CompileOptions): Promise<CompileResult> {
  * Build twice and the second build reuses everything tsc did not have to redo.
  */
 export class Compiler {
-  readonly #options: CompileOptions;
-  readonly #root: string;
-  readonly #checker: Checker;
-  readonly #backend: Backend;
+    readonly #options: CompileOptions;
+    readonly #root: string;
+    readonly #checker: Checker;
+    readonly #backend: Backend;
 
-  constructor(options: CompileOptions) {
-    this.#options = options;
-    this.#root = resolve(options.root ?? process.cwd());
+    constructor(options: CompileOptions) {
+        this.#options = options;
+        this.#root = resolve(options.root ?? process.cwd());
 
-    checkBindingsMatchAddon();
+        checkBindingsMatchAddon();
 
-    this.#checker = new Checker({
-      tsconfig: this.#resolve(options.tsconfig),
-      rootNames: [this.#resolve(options.entry)],
-    });
-
-    const backendOptions: BackendOptions = {
-      optLevel: options.optLevel ?? "speed",
-      debugInfo: options.debugInfo ?? true,
-      checked: options.checked ?? false,
-      ...(options.target !== undefined ? { target: options.target } : {}),
-      ...(options.strictInternalErrors !== undefined
-        ? { strictInternalErrors: options.strictInternalErrors }
-        : {}),
-    };
-    this.#backend = new Backend(backendOptions);
-  }
-
-  async build(): Promise<CompileResult> {
-    const diagnostics: Diagnostic[] = [];
-
-    // 1. tsc. Its verdict is final: nothing downstream runs if it says no.
-    const checked = this.#checker.check();
-    diagnostics.push(...checked.diagnostics);
-    diagnostics.push(...checkPreludeIsVisibleToEditors(checked.config));
-    if (hasErrors(diagnostics)) return failed(diagnostics);
-
-    // 2. Lower the checked AST to MIR.
-    const moduleName = basenameWithoutExtension(this.#resolve(this.#options.entry));
-    const kind = this.#options.type ?? "bin";
-    const lowered = lower(checked.program, checked.checker, moduleName, {
-      requireMain: kind === "bin",
-      root: this.#root,
-      entry: this.#resolve(this.#options.entry),
-    });
-    diagnostics.push(...lowered.diagnostics);
-    if (lowered.module === undefined || hasErrors(diagnostics)) return failed(diagnostics);
-
-    // 2a. Place the drops. A pass over the finished CFG, from the
-    // initialisedness of each local at each point — never spliced in by the
-    // lowerer, and never derived from a scope-depth counter (REWRITE-PLAN §5.1).
-    elaborateDrops(lowered.module);
-
-    const outDir = this.#resolve(this.#options.outDir ?? "build");
-
-    // 2b. `emit.ir` writes the MIR out. REWRITE-PLAN §9 asks for golden MIR on
-    // a handful of programs, because drop placement is the thing most likely to
-    // regress invisibly and a golden file makes a change to it visible in
-    // review.
-    let irPath: string | undefined;
-    if (this.#options.emit?.ir === true) {
-      irPath = join(outDir, `${moduleName}.mir`);
-      mkdirSync(outDir, { recursive: true });
-      writeFileSync(irPath, printModule(lowered.module), "utf8");
-    }
-
-    // 3. Across the boundary: one buffer, one call.
-    const objectPath = join(outDir, `${moduleName}.o`);
-    const artifact = this.#backend.compileModule(encodeModule(lowered.module), objectPath);
-    diagnostics.push(...artifact.diagnostics.map(fromBackend));
-    if (!artifact.ok || artifact.objectPath === undefined) {
-      return { ...failed(diagnostics), ...(irPath !== undefined ? { irPath } : {}) };
-    }
-
-    // 4. A C header, for a library somebody else has to be able to call.
-    let headerPath: string | undefined;
-    if (kind !== "bin" && (this.#options.emit?.header ?? true)) {
-      headerPath = join(outDir, `${moduleName}.h`);
-      try {
-        writeFileSync(headerPath, emitHeader(lowered.module, { name: moduleName }));
-      } catch (error) {
-        if (!(error instanceof HeaderError)) throw error;
-        // The ABI classifier is meant to reject anything with no C spelling
-        // before this is asked, so the two disagreeing is a compiler bug.
-        diagnostics.push({
-          severity: "error",
-          code: "GF9006",
-          source: "goblin",
-          message: `could not write a C header for \`${moduleName}\`: ${error.message}`,
+        this.#checker = new Checker({
+            tsconfig: this.#resolve(options.tsconfig),
+            rootNames: [this.#resolve(options.entry)],
         });
-        return { ...failed(diagnostics), objects: [artifact.objectPath] };
-      }
+
+        const backendOptions: BackendOptions = {
+            optLevel: options.optLevel ?? "speed",
+            debugInfo: options.debugInfo ?? true,
+            checked: options.checked ?? false,
+            ...(options.target !== undefined ? {target: options.target} : {}),
+            ...(options.strictInternalErrors !== undefined
+                ? {strictInternalErrors: options.strictInternalErrors}
+                : {}),
+        };
+        this.#backend = new Backend(backendOptions);
     }
 
-    // 5. Link, against the runtime and whatever it needs.
-    //
-    // A `static-lib` is *archived* rather than linked, and gets neither the
-    // runtime nor any native library: an archive carries only its own objects,
-    // so that two Goblin libraries in one program do not each bring a copy of
-    // `gf_string_free`. Its consumer links the runtime once, at the executable
-    // — which is why `runtimeLibrary` comes back in the result.
-    const output = this.#outputPath(kind);
-    const runtime = buildRuntime(this.#options.target);
-    const selfContained = kind !== "static-lib";
-    const report = this.#backend.link({
-      kind,
-      objects: [artifact.objectPath],
-      archives: selfContained
-        ? [
-            ...(this.#options.nativeLibs ?? []).map((path) => this.#resolve(path)),
-            runtime.library,
-          ]
-        : [],
-      systemLibs: selfContained ? [...runtime.systemLibs] : [],
-      output,
-      // Only Windows needs these, and only for a DLL: an ELF shared object
-      // publishes every default-visibility symbol on its own.
-      exports: kind === "shared-lib" ? [...artifact.defines] : [],
-    });
-    diagnostics.push(...report.diagnostics.map(fromBackend));
-    if (!report.ok || report.output === undefined) {
-      return { ...failed(diagnostics), objects: [artifact.objectPath] };
+    async build(): Promise<CompileResult> {
+        const diagnostics: Diagnostic[] = [];
+
+        // 1. tsc. Its verdict is final: nothing downstream runs if it says no.
+        const checked = this.#checker.check();
+        diagnostics.push(...checked.diagnostics);
+        diagnostics.push(...checkPreludeIsVisibleToEditors(checked.config));
+        if (hasErrors(diagnostics)) {
+            return failed(diagnostics);
+        }
+
+        // 2. Lower the checked AST to MIR.
+        const moduleName = basenameWithoutExtension(this.#resolve(this.#options.entry));
+        const kind = this.#options.type ?? "bin";
+        const lowered = lower(checked.program, checked.checker, moduleName, {
+            requireMain: kind === "bin",
+            root: this.#root,
+            entry: this.#resolve(this.#options.entry),
+        });
+        diagnostics.push(...lowered.diagnostics);
+        if (lowered.module === undefined || hasErrors(diagnostics)) {
+            return failed(diagnostics);
+        }
+
+        // 2a. Place the drops. A pass over the finished CFG, from the
+        // initialisedness of each local at each point — never spliced in by the
+        // lowerer, and never derived from a scope-depth counter (REWRITE-PLAN §5.1).
+        elaborateDrops(lowered.module);
+
+        const outDir = this.#resolve(this.#options.outDir ?? "build");
+
+        // 2b. `emit.ir` writes the MIR out. REWRITE-PLAN §9 asks for golden MIR on
+        // a handful of programs, because drop placement is the thing most likely to
+        // regress invisibly and a golden file makes a change to it visible in
+        // review.
+        let irPath: string | undefined;
+        if (this.#options.emit?.ir === true) {
+            irPath = join(outDir, `${moduleName}.mir`);
+            mkdirSync(outDir, {recursive: true});
+            writeFileSync(irPath, printModule(lowered.module), "utf8");
+        }
+
+        // 3. Across the boundary: one buffer, one call.
+        const objectPath = join(outDir, `${moduleName}.o`);
+        const artifact = this.#backend.compileModule(encodeModule(lowered.module), objectPath);
+        diagnostics.push(...artifact.diagnostics.map(fromBackend));
+        if (!artifact.ok || artifact.objectPath === undefined) {
+            return {...failed(diagnostics), ...(irPath !== undefined ? {irPath} : {})};
+        }
+
+        // 4. A C header, for a library somebody else has to be able to call.
+        let headerPath: string | undefined;
+        if (kind !== "bin" && (this.#options.emit?.header ?? true)) {
+            headerPath = join(outDir, `${moduleName}.h`);
+            try {
+                writeFileSync(headerPath, emitHeader(lowered.module, {name: moduleName}));
+            } catch (error) {
+                if (!(error instanceof HeaderError)) {
+                    throw error;
+                }
+                // The ABI classifier is meant to reject anything with no C spelling
+                // before this is asked, so the two disagreeing is a compiler bug.
+                diagnostics.push({
+                    severity: "error",
+                    code: "GF9006",
+                    source: "goblin",
+                    message: `could not write a C header for \`${moduleName}\`: ${error.message}`,
+                });
+                return {...failed(diagnostics), objects: [artifact.objectPath]};
+            }
+        }
+
+        // 5. Link, against the runtime and whatever it needs.
+        //
+        // A `static-lib` is *archived* rather than linked, and gets neither the
+        // runtime nor any native library: an archive carries only its own objects,
+        // so that two Goblin libraries in one program do not each bring a copy of
+        // `gf_string_free`. Its consumer links the runtime once, at the executable
+        // — which is why `runtimeLibrary` comes back in the result.
+        const output = this.#outputPath(kind);
+        const runtime = buildRuntime(this.#options.target);
+        const selfContained = kind !== "static-lib";
+        const report = this.#backend.link({
+            kind,
+            objects: [artifact.objectPath],
+            archives: selfContained
+                ? [
+                    ...(this.#options.nativeLibs ?? []).map((path) => this.#resolve(path)),
+                    runtime.library,
+                ]
+                : [],
+            systemLibs: selfContained ? [...runtime.systemLibs] : [],
+            output,
+            // Only Windows needs these, and only for a DLL: an ELF shared object
+            // publishes every default-visibility symbol on its own.
+            exports: kind === "shared-lib" ? [...artifact.defines] : [],
+        });
+        diagnostics.push(...report.diagnostics.map(fromBackend));
+        if (!report.ok || report.output === undefined) {
+            return {...failed(diagnostics), objects: [artifact.objectPath]};
+        }
+
+        return {
+            ok: true,
+            diagnostics,
+            output: report.output,
+            objects: [artifact.objectPath],
+            ...(irPath !== undefined ? {irPath} : {}),
+            ...(headerPath !== undefined ? {headerPath} : {}),
+            ...(report.command !== undefined ? {linkCommand: report.command} : {}),
+            ...(kind === "static-lib" ? {runtimeLibrary: runtime.library} : {}),
+            ...(kind === "shared-lib" && outputExtension("shared-lib") === "dll"
+                ? {importLibrary: output.replace(/\.dll$/i, ".lib")}
+                : {}),
+        };
     }
 
-    return {
-      ok: true,
-      diagnostics,
-      output: report.output,
-      objects: [artifact.objectPath],
-      ...(irPath !== undefined ? { irPath } : {}),
-      ...(headerPath !== undefined ? { headerPath } : {}),
-      ...(report.command !== undefined ? { linkCommand: report.command } : {}),
-      ...(kind === "static-lib" ? { runtimeLibrary: runtime.library } : {}),
-      ...(kind === "shared-lib" && outputExtension("shared-lib") === "dll"
-        ? { importLibrary: output.replace(/\.dll$/i, ".lib") }
-        : {}),
-    };
-  }
+    #outputPath(kind: OutputKind): string {
+        const base = this.#resolve(this.#options.output);
+        const extension = outputExtension(kind);
+        if (extension === "") {
+            return base;
+        }
+        return base.toLowerCase().endsWith(`.${extension}`) ? base : `${base}.${extension}`;
+    }
 
-  #outputPath(kind: OutputKind): string {
-    const base = this.#resolve(this.#options.output);
-    const extension = outputExtension(kind);
-    if (extension === "") return base;
-    return base.toLowerCase().endsWith(`.${extension}`) ? base : `${base}.${extension}`;
-  }
-
-  #resolve(path: string): string {
-    return isAbsolute(path) ? path : resolve(this.#root, path);
-  }
+    #resolve(path: string): string {
+        return isAbsolute(path) ? path : resolve(this.#root, path);
+    }
 }
 
 function failed(diagnostics: readonly Diagnostic[]): CompileResult {
-  return { ok: false, diagnostics, objects: [] };
+    return {ok: false, diagnostics, objects: []};
 }
 
 /** A backend diagnostic, given the shape everything else uses. */
 function fromBackend(diagnostic: {
-  severity: string;
-  code: string;
-  message: string;
+    severity: string;
+    code: string;
+    message: string;
 }): Diagnostic {
-  return {
-    severity:
-      diagnostic.severity === "warning"
-        ? "warning"
-        : diagnostic.severity === "note"
-          ? "note"
-          : "error",
-    code: diagnostic.code,
-    message: diagnostic.message,
-    source: "goblin",
-  };
+    return {
+        severity:
+            diagnostic.severity === "warning"
+                ? "warning"
+                : diagnostic.severity === "note"
+                    ? "note"
+                    : "error",
+        code: diagnostic.code,
+        message: diagnostic.message,
+        source: "goblin",
+    };
 }
 
 function basenameWithoutExtension(path: string): string {
-  const base = path.slice(dirname(path).length + 1);
-  const dot = base.lastIndexOf(".");
-  return dot <= 0 ? base : base.slice(0, dot);
+    const base = path.slice(dirname(path).length + 1);
+    const dot = base.lastIndexOf(".");
+    return dot <= 0 ? base : base.slice(0, dot);
 }

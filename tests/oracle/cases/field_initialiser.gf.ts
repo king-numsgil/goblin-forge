@@ -15,34 +15,34 @@
 // The trace is the allocations, so every step is written to allocate: each
 // initialiser and each constructor body builds a string with `+`.
 class Base {
-  fromBase: string = "base" + "-init";
+    fromBase: string = "base" + "-init";
 
-  constructor() {
-    console.log("base-body");
-    this.fromBase = "base" + "-body";
-  }
+    constructor() {
+        console.log("base-body");
+        this.fromBase = "base" + "-body";
+    }
 }
 
 class Derived extends Base {
-  // Declaration order, and the second one reads the first — which only works
-  // because they run in the order they are written.
-  first: string = "derived" + "-init";
-  second: string = this.first;
+    // Declaration order, and the second one reads the first — which only works
+    // because they run in the order they are written.
+    first: string = "derived" + "-init";
+    second: string = this.first;
 
-  constructor() {
-    super();
-    console.log("derived-body");
-    this.second = "derived" + "-body";
-  }
+    constructor() {
+        super();
+        console.log("derived-body");
+        this.second = "derived" + "-body";
+    }
 }
 
 export function main(): i32 {
-  {
-    const value = new Derived();
-    console.log(value.fromBase);
-    console.log(value.first);
-    console.log(value.second);
-  }
-  console.log("done");
-  return 0;
+    {
+        const value = new Derived();
+        console.log(value.fromBase);
+        console.log(value.first);
+        console.log(value.second);
+    }
+    console.log("done");
+    return 0;
 }

@@ -27,14 +27,14 @@ import type { MachineType, ScalarName } from "./types.ts";
 
 /** What a fixed width is, as data. */
 export interface WidthInfo {
-  readonly name: ScalarName;
-  /**
-   * Width in bits, or `null` when it belongs to the target rather than to the
-   * language. `isize`/`usize` are the only two.
-   */
-  readonly bits: number | null;
-  readonly signed: boolean;
-  readonly float: boolean;
+    readonly name: ScalarName;
+    /**
+     * Width in bits, or `null` when it belongs to the target rather than to the
+     * language. `isize`/`usize` are the only two.
+     */
+    readonly bits: number | null;
+    readonly signed: boolean;
+    readonly float: boolean;
 }
 
 /**
@@ -45,23 +45,23 @@ export interface WidthInfo {
  * reason `i32` does not promote to `f32` and `i64` does not promote to `f64`.
  */
 const EXACT_INTEGER_BITS: Readonly<Record<"f32" | "f64", number>> = {
-  f32: 24,
-  f64: 53,
+    f32: 24,
+    f64: 53,
 };
 
 export const WIDTHS: Readonly<Record<ScalarName, WidthInfo>> = {
-  i8: { name: "i8", bits: 8, signed: true, float: false },
-  i16: { name: "i16", bits: 16, signed: true, float: false },
-  i32: { name: "i32", bits: 32, signed: true, float: false },
-  i64: { name: "i64", bits: 64, signed: true, float: false },
-  u8: { name: "u8", bits: 8, signed: false, float: false },
-  u16: { name: "u16", bits: 16, signed: false, float: false },
-  u32: { name: "u32", bits: 32, signed: false, float: false },
-  u64: { name: "u64", bits: 64, signed: false, float: false },
-  f32: { name: "f32", bits: 32, signed: true, float: true },
-  f64: { name: "f64", bits: 64, signed: true, float: true },
-  isize: { name: "isize", bits: null, signed: true, float: false },
-  usize: { name: "usize", bits: null, signed: false, float: false },
+    i8: {name: "i8", bits: 8, signed: true, float: false},
+    i16: {name: "i16", bits: 16, signed: true, float: false},
+    i32: {name: "i32", bits: 32, signed: true, float: false},
+    i64: {name: "i64", bits: 64, signed: true, float: false},
+    u8: {name: "u8", bits: 8, signed: false, float: false},
+    u16: {name: "u16", bits: 16, signed: false, float: false},
+    u32: {name: "u32", bits: 32, signed: false, float: false},
+    u64: {name: "u64", bits: 64, signed: false, float: false},
+    f32: {name: "f32", bits: 32, signed: true, float: true},
+    f64: {name: "f64", bits: 64, signed: true, float: true},
+    isize: {name: "isize", bits: null, signed: true, float: false},
+    usize: {name: "usize", bits: null, signed: false, float: false},
 };
 
 /**
@@ -75,7 +75,7 @@ export const WIDTHS: Readonly<Record<ScalarName, WidthInfo>> = {
 export const ASSUMED_POINTER_BITS = 64;
 
 function effectiveBits(info: WidthInfo): number {
-  return info.bits ?? ASSUMED_POINTER_BITS;
+    return info.bits ?? ASSUMED_POINTER_BITS;
 }
 
 /**
@@ -85,102 +85,112 @@ function effectiveBits(info: WidthInfo): number {
  * it.
  */
 export function fits(from: MachineType, to: MachineType): boolean {
-  if (from.kind !== "scalar" || to.kind !== "scalar") {
-    // `bool` and the pointer-shaped types do not promote to anything but
-    // themselves. There is no truthiness and no integer-pointer equivalence.
-    return sameType(from, to);
-  }
-  return fitsScalar(from.name, to.name);
+    if (from.kind !== "scalar" || to.kind !== "scalar") {
+        // `bool` and the pointer-shaped types do not promote to anything but
+        // themselves. There is no truthiness and no integer-pointer equivalence.
+        return sameType(from, to);
+    }
+    return fitsScalar(from.name, to.name);
 }
 
 export function fitsScalar(from: ScalarName, to: ScalarName): boolean {
-  if (from === to) return true;
+    if (from === to) {
+        return true;
+    }
 
-  const source = WIDTHS[from];
-  const target = WIDTHS[to];
+    const source = WIDTHS[from];
+    const target = WIDTHS[to];
 
-  // `isize`/`usize` promote only to themselves. Their width belongs to the
-  // target, and the frontend does not know it — so `usize` to `u64` would be a
-  // promotion on one machine and a narrowing on another.
-  if (source.bits === null || target.bits === null) return false;
+    // `isize`/`usize` promote only to themselves. Their width belongs to the
+    // target, and the frontend does not know it — so `usize` to `u64` would be a
+    // promotion on one machine and a narrowing on another.
+    if (source.bits === null || target.bits === null) {
+        return false;
+    }
 
-  if (source.float) {
-    // A float never becomes an integer implicitly, and only widens to a float.
-    return target.float && target.bits > source.bits;
-  }
+    if (source.float) {
+        // A float never becomes an integer implicitly, and only widens to a float.
+        return target.float && target.bits > source.bits;
+    }
 
-  if (target.float) {
-    // An integer promotes to a float only while the float is still exact over
-    // the integer's whole range.
-    const exact = EXACT_INTEGER_BITS[target.name as "f32" | "f64"];
-    // A signed `n`-bit integer needs `n - 1` value bits plus a sign; an
-    // unsigned one needs `n`. Both must land inside the float's exact range.
-    return (source.signed ? source.bits - 1 : source.bits) <= exact;
-  }
+    if (target.float) {
+        // An integer promotes to a float only while the float is still exact over
+        // the integer's whole range.
+        const exact = EXACT_INTEGER_BITS[target.name as "f32" | "f64"];
+        // A signed `n`-bit integer needs `n - 1` value bits plus a sign; an
+        // unsigned one needs `n`. Both must land inside the float's exact range.
+        return (source.signed ? source.bits - 1 : source.bits) <= exact;
+    }
 
-  if (source.signed === target.signed) return target.bits >= source.bits;
+    if (source.signed === target.signed) {
+        return target.bits >= source.bits;
+    }
 
-  // Unsigned into signed needs somewhere for the top bit to go, so it takes a
-  // strictly wider type: `u8` fits `i16` but not `i8`, which stops at 127.
-  if (!source.signed && target.signed) return target.bits > source.bits;
+    // Unsigned into signed needs somewhere for the top bit to go, so it takes a
+    // strictly wider type: `u8` fits `i16` but not `i8`, which stops at 127.
+    if (!source.signed && target.signed) {
+        return target.bits > source.bits;
+    }
 
-  // Signed never becomes unsigned, however wide the target: there is nowhere
-  // for a negative value to go.
-  return false;
+    // Signed never becomes unsigned, however wide the target: there is nowhere
+    // for a negative value to go.
+    return false;
 }
 
 /** Structural identity. Two machine types are the same or they are not. */
 export function sameType(a: MachineType, b: MachineType): boolean {
-  if (a.kind !== b.kind) return false;
-  switch (a.kind) {
-    case "scalar":
-      return a.name === (b as typeof a).name;
-    case "array":
-      return sameType(a.element, (b as typeof a).element);
-    case "pointer":
-      return sameType(a.pointee, (b as typeof a).pointee);
-    case "reference":
-      return sameType(a.referent, (b as typeof a).referent);
-    case "fixedArray": {
-      const other = b as typeof a;
-      return a.length === other.length && sameType(a.element, other.element);
+    if (a.kind !== b.kind) {
+        return false;
     }
-    case "struct": {
-      // Nominal, by the name erasure gave it. Two shapes with the same fields
-      // in a different order are different layouts, so structural comparison
-      // would be wrong even where it looks right.
-      const other = b as typeof a;
-      return a.name === other.name;
+    switch (a.kind) {
+        case "scalar":
+            return a.name === (b as typeof a).name;
+        case "array":
+            return sameType(a.element, (b as typeof a).element);
+        case "pointer":
+            return sameType(a.pointee, (b as typeof a).pointee);
+        case "reference":
+            return sameType(a.referent, (b as typeof a).referent);
+        case "fixedArray": {
+            const other = b as typeof a;
+            return a.length === other.length && sameType(a.element, other.element);
+        }
+        case "struct": {
+            // Nominal, by the name erasure gave it. Two shapes with the same fields
+            // in a different order are different layouts, so structural comparison
+            // would be wrong even where it looks right.
+            const other = b as typeof a;
+            return a.name === other.name;
+        }
+        // Nominal too, and more sharply so: two classes with identical fields have
+        // different vtables and different identities, and one is not the other.
+        //
+        // Falling into `default` here — which is what happened until classes
+        // existed and nothing noticed — makes every class the same type as every
+        // other, so a `Wolf` passed to an `Animal` parameter is never converted and
+        // therefore never **sliced**. The program keeps the derived vtable and
+        // dispatches to overrides a by-value `Animal` cannot have. No crash, just
+        // the wrong answer.
+        case "class":
+        case "interface": {
+            const other = b as typeof a;
+            return a.name === other.name;
+        }
+        // Structural, and it has to be: a function pointer's identity is its
+        // signature, because that is the only thing a caller and a definition on
+        // the far side of a boundary can both know.
+        case "fnptr": {
+            const other = b as typeof a;
+            return (
+                a.params.length === other.params.length &&
+                sameType(a.returns, other.returns) &&
+                a.params.every((param, index) => sameType(param, other.params[index]!))
+            );
+        }
+        // `void`, `bool` and `string` carry nothing to compare.
+        default:
+            return true;
     }
-    // Nominal too, and more sharply so: two classes with identical fields have
-    // different vtables and different identities, and one is not the other.
-    //
-    // Falling into `default` here — which is what happened until classes
-    // existed and nothing noticed — makes every class the same type as every
-    // other, so a `Wolf` passed to an `Animal` parameter is never converted and
-    // therefore never **sliced**. The program keeps the derived vtable and
-    // dispatches to overrides a by-value `Animal` cannot have. No crash, just
-    // the wrong answer.
-    case "class":
-    case "interface": {
-      const other = b as typeof a;
-      return a.name === other.name;
-    }
-    // Structural, and it has to be: a function pointer's identity is its
-    // signature, because that is the only thing a caller and a definition on
-    // the far side of a boundary can both know.
-    case "fnptr": {
-      const other = b as typeof a;
-      return (
-        a.params.length === other.params.length &&
-        sameType(a.returns, other.returns) &&
-        a.params.every((param, index) => sameType(param, other.params[index]!))
-      );
-    }
-    // `void`, `bool` and `string` carry nothing to compare.
-    default:
-      return true;
-  }
 }
 
 /**
@@ -191,9 +201,13 @@ export function sameType(a: MachineType, b: MachineType): boolean {
  * `i64` — is exactly the silent conversion this language exists to refuse.
  */
 export function commonType(a: MachineType, b: MachineType): MachineType | null {
-  if (fits(a, b)) return b;
-  if (fits(b, a)) return a;
-  return null;
+    if (fits(a, b)) {
+        return b;
+    }
+    if (fits(b, a)) {
+        return a;
+    }
+    return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -202,63 +216,63 @@ export function commonType(a: MachineType, b: MachineType): MachineType | null {
 
 /** The operators the language has, spelled as they are written. */
 export type Operator =
-  | "+"
-  | "-"
-  | "*"
-  | "/"
-  | "%"
-  | "&"
-  | "|"
-  | "^"
-  | "<<"
-  | ">>"
-  | "<"
-  | "<="
-  | ">"
-  | ">="
-  | "==="
-  | "!==";
+    | "+"
+    | "-"
+    | "*"
+    | "/"
+    | "%"
+    | "&"
+    | "|"
+    | "^"
+    | "<<"
+    | ">>"
+    | "<"
+    | "<="
+    | ">"
+    | ">="
+    | "==="
+    | "!==";
 
 export interface OperatorInfo {
-  /** `%`, `&`, `|`, `^`, `<<`, `>>` — undefined on floats. */
-  readonly integerOnly: boolean;
-  /**
-   * A shift does **not** promote its operands to a common type. The result is
-   * the value's type and the count is *converted* to it — which is what stops
-   * `u8 << someI64` from quietly becoming an `i64` shift.
-   */
-  readonly shift: boolean;
-  /** Produces a `bool` rather than a value of the operand type. */
-  readonly comparison: boolean;
-  /**
-   * `<`, `<=`, `>`, `>=` — asks which of two values comes first, where
-   * `===` and `!==` only ask whether they are the same.
-   *
-   * The two questions have different answers about which types may be asked.
-   * Every `string` can be compared for equality, because two of them are equal
-   * when their bytes are; ordering one against another needs a lexicographic
-   * comparison that does not exist yet.
-   */
-  readonly ordered: boolean;
+    /** `%`, `&`, `|`, `^`, `<<`, `>>` — undefined on floats. */
+    readonly integerOnly: boolean;
+    /**
+     * A shift does **not** promote its operands to a common type. The result is
+     * the value's type and the count is *converted* to it — which is what stops
+     * `u8 << someI64` from quietly becoming an `i64` shift.
+     */
+    readonly shift: boolean;
+    /** Produces a `bool` rather than a value of the operand type. */
+    readonly comparison: boolean;
+    /**
+     * `<`, `<=`, `>`, `>=` — asks which of two values comes first, where
+     * `===` and `!==` only ask whether they are the same.
+     *
+     * The two questions have different answers about which types may be asked.
+     * Every `string` can be compared for equality, because two of them are equal
+     * when their bytes are; ordering one against another needs a lexicographic
+     * comparison that does not exist yet.
+     */
+    readonly ordered: boolean;
 }
 
 export const OPERATORS: Readonly<Record<Operator, OperatorInfo>> = {
-  "+": { integerOnly: false, shift: false, comparison: false, ordered: false },
-  "-": { integerOnly: false, shift: false, comparison: false, ordered: false },
-  "*": { integerOnly: false, shift: false, comparison: false, ordered: false },
-  "/": { integerOnly: false, shift: false, comparison: false, ordered: false },
-  "%": { integerOnly: true, shift: false, comparison: false, ordered: false },
-  "&": { integerOnly: true, shift: false, comparison: false, ordered: false },
-  "|": { integerOnly: true, shift: false, comparison: false, ordered: false },
-  "^": { integerOnly: true, shift: false, comparison: false, ordered: false },
-  "<<": { integerOnly: true, shift: true, comparison: false, ordered: false },
-  ">>": { integerOnly: true, shift: true, comparison: false, ordered: false },
-  "<": { integerOnly: false, shift: false, comparison: true, ordered: true },
-  "<=": { integerOnly: false, shift: false, comparison: true, ordered: true },
-  ">": { integerOnly: false, shift: false, comparison: true, ordered: true },
-  ">=": { integerOnly: false, shift: false, comparison: true, ordered: true },
-  "===": { integerOnly: false, shift: false, comparison: true, ordered: false },
-  "!==": { integerOnly: false, shift: false, comparison: true, ordered: false },
+    "+": {integerOnly: false, shift: false, comparison: false, ordered: false},
+    "-": {integerOnly: false, shift: false, comparison: false, ordered: false},
+    "*": {integerOnly: false, shift: false, comparison: false, ordered: false},
+    "/": {integerOnly: false, shift: false, comparison: false, ordered: false},
+    "%": {integerOnly: true, shift: false, comparison: false, ordered: false},
+    "&": {integerOnly: true, shift: false, comparison: false, ordered: false},
+    "|": {integerOnly: true, shift: false, comparison: false, ordered: false},
+    "^": {integerOnly: true, shift: false, comparison: false, ordered: false},
+    "<<": {integerOnly: true, shift: true, comparison: false, ordered: false},
+    ">>": {integerOnly: true, shift: true, comparison: false, ordered: false},
+    "<": {integerOnly: false, shift: false, comparison: true, ordered: true},
+    "<=": {integerOnly: false, shift: false, comparison: true, ordered: true},
+    ">": {integerOnly: false, shift: false, comparison: true, ordered: true},
+    ">=": {integerOnly: false, shift: false, comparison: true, ordered: true},
+    "===": {integerOnly: false, shift: false, comparison: true, ordered: false},
+    "!==": {integerOnly: false, shift: false, comparison: true, ordered: false},
 };
 
 /**
@@ -273,27 +287,27 @@ export const OPERATORS: Readonly<Record<Operator, OperatorInfo>> = {
  * are named one at a time rather than assumed.
  */
 export function isMachineComparable(type: MachineType): boolean {
-  switch (type.kind) {
-    case "scalar":
-    case "bool":
-    case "pointer":
-    case "reference":
-    case "cstring":
-    // A code address, so two of them compare as addresses — which is how you
-    // ask whether a callback is the one you installed.
-    case "fnptr":
-      return true;
-    default:
-      return false;
-  }
+    switch (type.kind) {
+        case "scalar":
+        case "bool":
+        case "pointer":
+        case "reference":
+        case "cstring":
+        // A code address, so two of them compare as addresses — which is how you
+        // ask whether a callback is the one you installed.
+        case "fnptr":
+            return true;
+        default:
+            return false;
+    }
 }
 
 export function isFloatType(type: MachineType): boolean {
-  return type.kind === "scalar" && WIDTHS[type.name].float;
+    return type.kind === "scalar" && WIDTHS[type.name].float;
 }
 
 export function isIntegerType(type: MachineType): boolean {
-  return type.kind === "scalar" && !WIDTHS[type.name].float;
+    return type.kind === "scalar" && !WIDTHS[type.name].float;
 }
 
 // ---------------------------------------------------------------------------
@@ -301,25 +315,27 @@ export function isIntegerType(type: MachineType): boolean {
 // ---------------------------------------------------------------------------
 
 export interface Range {
-  readonly min: bigint;
-  readonly max: bigint;
+    readonly min: bigint;
+    readonly max: bigint;
 }
 
 /** The inclusive range of an integer width. `null` for the two floats. */
 export function rangeOf(name: ScalarName): Range | null {
-  const info = WIDTHS[name];
-  if (info.float) return null;
-  const span = 1n << BigInt(effectiveBits(info));
-  return info.signed
-    ? { min: -(span >> 1n), max: (span >> 1n) - 1n }
-    : { min: 0n, max: span - 1n };
+    const info = WIDTHS[name];
+    if (info.float) {
+        return null;
+    }
+    const span = 1n << BigInt(effectiveBits(info));
+    return info.signed
+        ? {min: -(span >> 1n), max: (span >> 1n) - 1n}
+        : {min: 0n, max: span - 1n};
 }
 
 export interface LiteralCheck {
-  readonly ok: boolean;
-  /** The two's-complement bit pattern, when the literal is in range. */
-  readonly bits?: bigint;
-  readonly range?: Range;
+    readonly ok: boolean;
+    /** The two's-complement bit pattern, when the literal is in range. */
+    readonly bits?: bigint;
+    readonly range?: Range;
 }
 
 /**
@@ -336,28 +352,30 @@ export interface LiteralCheck {
  *   because that is how anybody writes a bit pattern.
  */
 export function checkLiteral(
-  name: ScalarName,
-  value: bigint,
-  explicitRadix: boolean,
+    name: ScalarName,
+    value: bigint,
+    explicitRadix: boolean,
 ): LiteralCheck {
-  const range = rangeOf(name);
-  if (range === null) return { ok: true };
+    const range = rangeOf(name);
+    if (range === null) {
+        return {ok: true};
+    }
 
-  const info = WIDTHS[name];
-  const span = 1n << BigInt(effectiveBits(info));
+    const info = WIDTHS[name];
+    const span = 1n << BigInt(effectiveBits(info));
 
-  if (value >= range.min && value <= range.max) {
-    return { ok: true, bits: value < 0n ? value + span : value, range };
-  }
-  if (info.signed && explicitRadix && value >= 0n && value < span) {
-    return { ok: true, bits: value, range };
-  }
-  return { ok: false, range };
+    if (value >= range.min && value <= range.max) {
+        return {ok: true, bits: value < 0n ? value + span : value, range};
+    }
+    if (info.signed && explicitRadix && value >= 0n && value < span) {
+        return {ok: true, bits: value, range};
+    }
+    return {ok: false, range};
 }
 
 /** Whether a numeric literal's text was written in an explicit radix. */
 export function hasExplicitRadix(text: string): boolean {
-  return /^[+-]?0[xob]/i.test(text);
+    return /^[+-]?0[xob]/i.test(text);
 }
 
 /**
@@ -371,7 +389,7 @@ export function hasExplicitRadix(text: string): boolean {
  * answers `NaN` and emits it.
  */
 export function literalDigits(text: string): string {
-  return text.replace(/_/g, "");
+    return text.replace(/_/g, "");
 }
 
 /**
@@ -387,7 +405,9 @@ export function literalDigits(text: string): string {
  * here, and TypeScript has no hexadecimal float literal to inherit.
  */
 export function isIntegerLiteral(text: string): boolean {
-  const digits = literalDigits(text);
-  if (hasExplicitRadix(digits)) return true;
-  return /^[+-]?\d+$/.test(digits);
+    const digits = literalDigits(text);
+    if (hasExplicitRadix(digits)) {
+        return true;
+    }
+    return /^[+-]?\d+$/.test(digits);
 }

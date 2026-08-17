@@ -35,12 +35,19 @@
 // ---------------------------------------------------------------------------
 
 interface Object {}
+
 interface Function {}
+
 interface CallableFunction extends Function {}
+
 interface NewableFunction extends Function {}
+
 interface IArguments {}
+
 interface Number {}
+
 interface Boolean {}
+
 interface RegExp {}
 
 /**
@@ -82,16 +89,16 @@ interface RegExp {}
 declare const FixedLengthBrand: unique symbol;
 
 interface FixedArray<T, N extends number> extends CorePointer<T> {
-  /**
-   * **Required**, unlike the width brand, and that is what makes the relation
-   * one-way. An optional brand would be optional-and-*absent* on a plain
-   * `Pointer<T>`, and optional-and-absent is assignable — so a pointer would
-   * silently become a fixed array of any length you asked for. The same trap
-   * REWRITE-PLAN §7 describes for the widths, in a new place.
-   */
-  readonly [FixedLengthBrand]: N;
-  /** Known at compile time — this is a literal type, not a load. */
-  readonly length: N;
+    /**
+     * **Required**, unlike the width brand, and that is what makes the relation
+     * one-way. An optional brand would be optional-and-*absent* on a plain
+     * `Pointer<T>`, and optional-and-absent is assignable — so a pointer would
+     * silently become a fixed array of any length you asked for. The same trap
+     * REWRITE-PLAN §7 describes for the widths, in a new place.
+     */
+    readonly [FixedLengthBrand]: N;
+    /** Known at compile time — this is a literal type, not a load. */
+    readonly length: N;
 }
 
 /**
@@ -139,37 +146,38 @@ declare function fixedArray<T, N extends number>(length: N, fill: T): FixedArray
  * elements first if the element type owns anything.
  */
 interface Array<T> {
-  /** Element count. A load from the header, not a scan. */
-  readonly length: usize;
-  /**
-   * Mutable, unlike `length`: `xs[0] = 1` is the point of the type. A
-   * `readonly` index signature is what TypeScript's own `ReadonlyArray` has,
-   * and it would make this a different container.
-   */
-  [index: number]: T;
+    /** Element count. A load from the header, not a scan. */
+    readonly length: usize;
 
-  /**
-   * Append one element, growing the buffer if it is full.
-   *
-   * The element is **copied** in, by the same rule every other assignment
-   * follows — so pushing a `string` allocates a second one. `push(move(s))`
-   * hands the buffer over instead.
-   *
-   * Growing reallocates, which moves the elements. Anything holding a
-   * `Pointer<T>` into this array is dangling afterwards, exactly as it is with
-   * `std::vector::push_back`.
-   */
-  push(value: T): void;
+    /**
+     * Mutable, unlike `length`: `xs[0] = 1` is the point of the type. A
+     * `readonly` index signature is what TypeScript's own `ReadonlyArray` has,
+     * and it would make this a different container.
+     */
+    [index: number]: T;
 
-  /**
-   * Remove the last element and hand it back.
-   *
-   * A move, not a copy: the element is leaving the array. The buffer is kept,
-   * as `std::vector::pop_back` keeps its capacity.
-   *
-   * Popping an empty array is unchecked, like indexing one.
-   */
-  pop(): T;
+    /**
+     * Append one element, growing the buffer if it is full.
+     *
+     * The element is **copied** in, by the same rule every other assignment
+     * follows — so pushing a `string` allocates a second one. `push(move(s))`
+     * hands the buffer over instead.
+     *
+     * Growing reallocates, which moves the elements. Anything holding a
+     * `Pointer<T>` into this array is dangling afterwards, exactly as it is with
+     * `std::vector::push_back`.
+     */
+    push(value: T): void;
+
+    /**
+     * Remove the last element and hand it back.
+     *
+     * A move, not a copy: the element is leaving the array. The buffer is kept,
+     * as `std::vector::pop_back` keeps its capacity.
+     *
+     * Popping an empty array is unchecked, like indexing one.
+     */
+    pop(): T;
 }
 
 /**
@@ -185,32 +193,32 @@ interface Array<T> {
  * releases it.
  */
 interface String {
-  readonly length: usize;
+    readonly length: usize;
 
-  /**
-   * The bytes between two offsets, as a new string.
-   *
-   * Out-of-range offsets are clamped and a reversed pair is swapped, matching
-   * JavaScript, so parsing code does not need a bounds check on every call.
-   * Omitting `end` runs to the end of the string.
-   *
-   * Offsets are bytes. Cutting through the middle of a multi-byte character
-   * produces a string that is no longer valid UTF-8; use `codePointAt` to find
-   * boundaries if you are not working in ASCII.
-   */
-  substring(start: usize, end?: usize): string;
+    /**
+     * The bytes between two offsets, as a new string.
+     *
+     * Out-of-range offsets are clamped and a reversed pair is swapped, matching
+     * JavaScript, so parsing code does not need a bounds check on every call.
+     * Omitting `end` runs to the end of the string.
+     *
+     * Offsets are bytes. Cutting through the middle of a multi-byte character
+     * produces a string that is no longer valid UTF-8; use `codePointAt` to find
+     * boundaries if you are not working in ASCII.
+     */
+    substring(start: usize, end?: usize): string;
 
-  /** Byte offset of `search` at or after `from`, or -1 if it does not occur. */
-  indexOf(search: string, from?: usize): isize;
+    /** Byte offset of `search` at or after `from`, or -1 if it does not occur. */
+    indexOf(search: string, from?: usize): isize;
 
-  /**
-   * The Unicode code point whose encoding starts at byte `index`.
-   *
-   * Zero if `index` is past the end, or lands inside a multi-byte character —
-   * which is how a byte-by-byte scan tells characters from continuation bytes.
-   * For ASCII this is just the byte.
-   */
-  codePointAt(index: usize): u32;
+    /**
+     * The Unicode code point whose encoding starts at byte `index`.
+     *
+     * Zero if `index` is past the end, or lands inside a multi-byte character —
+     * which is how a byte-by-byte scan tells characters from continuation bytes.
+     * For ASCII this is just the byte.
+     */
+    codePointAt(index: usize): u32;
 }
 
 // ---------------------------------------------------------------------------
@@ -241,7 +249,7 @@ interface String {
 declare const WidthBrand: unique symbol;
 
 interface __GfWidth<N extends string> {
-  readonly [WidthBrand]?: N;
+    readonly [WidthBrand]?: N;
 }
 
 type i8 = number & __GfWidth<"i8">;
@@ -294,12 +302,12 @@ type usize = number & __GfWidth<"usize">;
 declare const UnionBrand: unique symbol;
 
 interface Union {
-  /**
-   * Optional, so that extending it costs nothing structurally and adds no
-   * field. Symbol-keyed, so no source file can spell it and claim to be a
-   * union without saying so.
-   */
-  readonly [UnionBrand]?: never;
+    /**
+     * Optional, so that extending it costs nothing structurally and adds no
+     * field. Symbol-keyed, so no source file can spell it and claim to be a
+     * union without saying so.
+     */
+    readonly [UnionBrand]?: never;
 }
 
 // ---------------------------------------------------------------------------
@@ -344,84 +352,84 @@ interface Union {
 declare const PointerBrand: unique symbol;
 
 interface CorePointer<T> {
-  /**
-   * Covariant in `T`, so a `Pointer<Rect>` is a `Pointer<Shape>` — the upcast
-   * that makes `Pointer<Shape>[]` the way to hold mixed subtypes. It is exactly
-   * as unsound as `Shape**` is in C++, and that is the trade: this is an unsafe
-   * language on purpose. Opaque FFI handles stay unrelated regardless, because
-   * a class with a private member is nominal.
-   */
-  readonly [PointerBrand]: T;
+    /**
+     * Covariant in `T`, so a `Pointer<Rect>` is a `Pointer<Shape>` — the upcast
+     * that makes `Pointer<Shape>[]` the way to hold mixed subtypes. It is exactly
+     * as unsound as `Shape**` is in C++, and that is the trade: this is an unsafe
+     * language on purpose. Opaque FFI handles stay unrelated regardless, because
+     * a class with a private member is nominal.
+     */
+    readonly [PointerBrand]: T;
 
-  /** The address, for FFI and for comparison. */
-  readonly address: usize;
+    /** The address, for FFI and for comparison. */
+    readonly address: usize;
 
-  /**
-   * The pointee, borrowed. Needed only where the auto-dereference cannot
-   * reach: a pointer to a primitive, or where a `Reference<T>` is wanted as a
-   * value rather than as a receiver.
-   */
-  deref(): Reference<T>;
+    /**
+     * The pointee, borrowed. Needed only where the auto-dereference cannot
+     * reach: a pointer to a primitive, or where a `Reference<T>` is wanted as a
+     * value rather than as a receiver.
+     */
+    deref(): Reference<T>;
 
-  /**
-   * `p[i]` — the `i`th element from here, in units of `T`.
-   *
-   * Exactly C's `*(p + i)`, including the part where nothing checks that there
-   * *is* an `i`th element. A pointer to one `T` and a pointer to the first of
-   * many are the same type here, as they are in C.
-   */
-  [index: number]: T;
+    /**
+     * `p[i]` — the `i`th element from here, in units of `T`.
+     *
+     * Exactly C's `*(p + i)`, including the part where nothing checks that there
+     * *is* an `i`th element. A pointer to one `T` and a pointer to the first of
+     * many are the same type here, as they are in C.
+     */
+    [index: number]: T;
 
-  /**
-   * Run the destructor and release the storage — C++ `delete`, and just as
-   * unchecked. The pointer is poisoned afterwards, so a use-after-free through
-   * *this* binding is a null dereference rather than a read of reused memory.
-   * Aliases are not poisoned; `checked` catches the double free instead.
-   */
-  free(): void;
+    /**
+     * Run the destructor and release the storage — C++ `delete`, and just as
+     * unchecked. The pointer is poisoned afterwards, so a use-after-free through
+     * *this* binding is a null dereference rather than a read of reused memory.
+     * Aliases are not poisoned; `checked` catches the double free instead.
+     */
+    free(): void;
 
-  /**
-   * Release storage obtained from `allocArray` — C++ `delete[]`.
-   *
-   * Distinct from `free` for the same reason C++ distinguishes `delete` from
-   * `delete[]`: one destructor has to run per element, and only this knows how
-   * many there are. Calling the wrong one is undefined behaviour, exactly as it
-   * is in C++.
-   */
-  freeArray(): void;
+    /**
+     * Release storage obtained from `allocArray` — C++ `delete[]`.
+     *
+     * Distinct from `free` for the same reason C++ distinguishes `delete` from
+     * `delete[]`: one destructor has to run per element, and only this knows how
+     * many there are. Calling the wrong one is undefined behaviour, exactly as it
+     * is in C++.
+     */
+    freeArray(): void;
 
-  /**
-   * `p + n`, in units of `T` — C's pointer arithmetic.
-   *
-   * A method rather than a free function because there is a receiver to hang it
-   * on, which is also why it needs no prefix to say it is unsafe. Nothing
-   * checks that the result points at anything.
-   */
-  offset(elements: isize): Pointer<T>;
+    /**
+     * `p + n`, in units of `T` — C's pointer arithmetic.
+     *
+     * A method rather than a free function because there is a receiver to hang it
+     * on, which is also why it needs no prefix to say it is unsafe. Nothing
+     * checks that the result points at anything.
+     */
+    offset(elements: isize): Pointer<T>;
 
-  /**
-   * Discard the pointee type. `Pointer<unknown>` is the language's only
-   * type-erased pointer and the only escape hatch in the ambient surface —
-   * there is deliberately no `any` and no unchecked cast between two concrete
-   * pointee types.
-   *
-   * Rarely needed, because erasure is **implicit** wherever a `Pointer<unknown>`
-   * is expected, exactly as `T *` converts to `void *` in C. Write it where
-   * there is no such context to convert into — a binding being handed to
-   * something generic, or a `const` with no annotation.
-   */
-  erase(): Pointer<unknown>;
+    /**
+     * Discard the pointee type. `Pointer<unknown>` is the language's only
+     * type-erased pointer and the only escape hatch in the ambient surface —
+     * there is deliberately no `any` and no unchecked cast between two concrete
+     * pointee types.
+     *
+     * Rarely needed, because erasure is **implicit** wherever a `Pointer<unknown>`
+     * is expected, exactly as `T *` converts to `void *` in C. Write it where
+     * there is no such context to convert into — a binding being handed to
+     * something generic, or a `const` with no annotation.
+     */
+    erase(): Pointer<unknown>;
 
-  /**
-   * Re-attach a pointee type to an erased pointer. Entirely on your honour.
-   *
-   * The direction that is never implicit, for C's reason: throwing the type
-   * away cannot be wrong, and guessing it back can. Only callable on a
-   * `Pointer<unknown>` — reinterpreting one concrete type as another is
-   * `p.erase().reify<Other>()`, written out (`GF0306`), so that the escape
-   * hatch is visible at the site that depends on it.
-   */
-  reify<U>(): Pointer<U>;
+    /**
+     * Re-attach a pointee type to an erased pointer. Entirely on your honour.
+     *
+     * The direction that is never implicit, for C's reason: throwing the type
+     * away cannot be wrong, and guessing it back can. Only callable on a
+     * `Pointer<unknown>` — reinterpreting one concrete type as another is
+     * `p.erase().reify<Other>()`, written out (`GF0306`), so that the escape
+     * hatch is visible at the site that depends on it.
+     */
+    reify<U>(): Pointer<U>;
 }
 
 /**
@@ -469,7 +477,7 @@ type Pointer<T> = T extends GfPrimitive ? CorePointer<T> : T & CorePointer<T>;
 declare const ReferenceBrand: unique symbol;
 
 interface ReferenceCore<T> {
-  readonly [ReferenceBrand]?: T;
+    readonly [ReferenceBrand]?: T;
 }
 
 /**
@@ -514,8 +522,8 @@ type Reference<T> = T extends GfPrimitive ? ReferenceCore<T> : T & ReferenceCore
  */
 declare function alloc<T>(): Pointer<T>;
 declare function alloc<T extends object, A extends readonly unknown[]>(
-  klass: new (...args: A) => T,
-  ...args: A
+    klass: new (...args: A) => T,
+    ...args: A
 ): Pointer<T>;
 
 /**
@@ -743,22 +751,22 @@ declare function stringFromBytes(bytes: Pointer<u8> | CString, length: usize): s
 declare const CStringBrand: unique symbol;
 
 interface CString {
-  /**
-   * Unforgeable, and required rather than optional for the same reason
-   * `FixedArray`'s is: an optional brand is *absent* on other types, and
-   * optional-and-absent is assignable, so every pointer would silently become
-   * a `CString`.
-   */
-  readonly [CStringBrand]: void;
+    /**
+     * Unforgeable, and required rather than optional for the same reason
+     * `FixedArray`'s is: an optional brand is *absent* on other types, and
+     * optional-and-absent is assignable, so every pointer would silently become
+     * a `CString`.
+     */
+    readonly [CStringBrand]: void;
 
-  /**
-   * `strlen`. **O(n)** — it scans to the NUL, because there is no header to
-   * read a length out of.
-   *
-   * A `string`'s `length` is a single load. That difference is the reason
-   * these are two types.
-   */
-  readonly length: usize;
+    /**
+     * `strlen`. **O(n)** — it scans to the NUL, because there is no header to
+     * read a length out of.
+     *
+     * A `string`'s `length` is a single load. That difference is the reason
+     * these are two types.
+     */
+    readonly length: usize;
 }
 
 /**
@@ -822,11 +830,15 @@ declare function cstringFree(value: CString): void;
 // ---------------------------------------------------------------------------
 
 interface Console {
-  log(message: string | number | boolean): void;
-  info(message: string | number | boolean): void;
-  debug(message: string | number | boolean): void;
-  warn(message: string | number | boolean): void;
-  error(message: string | number | boolean): void;
+    log(message: string | number | boolean): void;
+
+    info(message: string | number | boolean): void;
+
+    debug(message: string | number | boolean): void;
+
+    warn(message: string | number | boolean): void;
+
+    error(message: string | number | boolean): void;
 }
 
 declare const console: Console;

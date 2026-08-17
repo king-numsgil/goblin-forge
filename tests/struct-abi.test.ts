@@ -37,26 +37,28 @@ const BUILD = join(ORACLE, "build");
 let library = "";
 
 beforeAll(() => {
-  const configure = spawnSync("cmake", ["-S", ORACLE, "-B", BUILD], { encoding: "utf8" });
-  if (configure.status !== 0) {
-    throw new Error(`cmake configure failed:\n${configure.stdout}${configure.stderr}`);
-  }
-  const build = spawnSync(
-    "cmake",
-    ["--build", BUILD, "--config", "Release", "--target", "gfcabi"],
-    { encoding: "utf8" },
-  );
-  if (build.status !== 0) {
-    throw new Error(`cmake build failed:\n${build.stdout}${build.stderr}`);
-  }
+    const configure = spawnSync("cmake", ["-S", ORACLE, "-B", BUILD], {encoding: "utf8"});
+    if (configure.status !== 0) {
+        throw new Error(`cmake configure failed:\n${configure.stdout}${configure.stderr}`);
+    }
+    const build = spawnSync(
+        "cmake",
+        ["--build", BUILD, "--config", "Release", "--target", "gfcabi"],
+        {encoding: "utf8"},
+    );
+    if (build.status !== 0) {
+        throw new Error(`cmake build failed:\n${build.stdout}${build.stderr}`);
+    }
 
-  const found = [
-    join(BUILD, "lib", "gfcabi.lib"),
-    join(BUILD, "lib", "libgfcabi.a"),
-    join(BUILD, "lib", "Release", "gfcabi.lib"),
-  ].find((candidate) => existsSync(candidate));
-  if (found === undefined) throw new Error(`the C ABI library was not built into ${BUILD}`);
-  library = found;
+    const found = [
+        join(BUILD, "lib", "gfcabi.lib"),
+        join(BUILD, "lib", "libgfcabi.a"),
+        join(BUILD, "lib", "Release", "gfcabi.lib"),
+    ].find((candidate) => existsSync(candidate));
+    if (found === undefined) {
+        throw new Error(`the C ABI library was not built into ${BUILD}`);
+    }
+    library = found;
 });
 
 /** The Goblin declarations of everything the C library exports. */
@@ -105,242 +107,242 @@ declare function gf_c_mixed(a: i32, b: i32, c: i32, d: i32, e: Pair, f: i32): i3
 
 /** Compile and run a body against the C library, returning its stdout. */
 async function acrossTheBoundary(name: string, body: string): Promise<string> {
-  const result = await run(
-    name,
-    `${DECLARATIONS}
+    const result = await run(
+        name,
+        `${DECLARATIONS}
      export function main(): i32 {
        ${body}
        return 0;
      }\n`,
-    { nativeLibs: [library] },
-  );
-  expect(result.stderr).toBe("");
-  return result.stdout;
+        {nativeLibs: [library]},
+    );
+    expect(result.stderr).toBe("");
+    return result.stdout;
 }
 
 describe("scalars cross intact", () => {
-  test("plain integers", async () => {
-    expect(await acrossTheBoundary("abi-add", `console.log(\`\${gf_c_add(40, 2)}\`);`)).toBe(
-      "42\n",
-    );
-  });
+    test("plain integers", async () => {
+        expect(await acrossTheBoundary("abi-add", `console.log(\`\${gf_c_add(40, 2)}\`);`)).toBe(
+            "42\n",
+        );
+    });
 
-  test("sub-register widths carry their extension", async () => {
-    // A callee compiled by a C compiler may use the whole register without
-    // masking, so the caller has to sign- or zero-extend. Cranelift defaults to
-    // neither, which is why this is asserted rather than assumed (§6).
-    expect(
-      await acrossTheBoundary(
-        "abi-narrow",
-        `console.log(\`\${gf_c_add_narrow(-1, 255, -1000, 60000)}\`);`,
-      ),
-    ).toBe(`${-1 + 255 - 1000 + 60000}\n`);
-  });
+    test("sub-register widths carry their extension", async () => {
+        // A callee compiled by a C compiler may use the whole register without
+        // masking, so the caller has to sign- or zero-extend. Cranelift defaults to
+        // neither, which is why this is asserted rather than assumed (§6).
+        expect(
+            await acrossTheBoundary(
+                "abi-narrow",
+                `console.log(\`\${gf_c_add_narrow(-1, 255, -1000, 60000)}\`);`,
+            ),
+        ).toBe(`${-1 + 255 - 1000 + 60000}\n`);
+    });
 
-  test("floats land in the float registers", async () => {
-    expect(
-      await acrossTheBoundary("abi-scale", `console.log(\`\${gf_c_scale(2.5, 4)}\`);`),
-    ).toBe("10\n");
-  });
+    test("floats land in the float registers", async () => {
+        expect(
+            await acrossTheBoundary("abi-scale", `console.log(\`\${gf_c_scale(2.5, 4)}\`);`),
+        ).toBe("10\n");
+    });
 });
 
 describe("small structs travel in registers", () => {
-  test("one byte", async () => {
-    expect(
-      await acrossTheBoundary("abi-one", `console.log(\`\${gf_c_one({ a: 7 })}\`);`),
-    ).toBe("7\n");
-  });
+    test("one byte", async () => {
+        expect(
+            await acrossTheBoundary("abi-one", `console.log(\`\${gf_c_one({ a: 7 })}\`);`),
+        ).toBe("7\n");
+    });
 
-  test("two bytes", async () => {
-    expect(
-      await acrossTheBoundary("abi-two", `console.log(\`\${gf_c_two({ a: 3, b: 4 })}\`);`),
-    ).toBe("304\n");
-  });
+    test("two bytes", async () => {
+        expect(
+            await acrossTheBoundary("abi-two", `console.log(\`\${gf_c_two({ a: 3, b: 4 })}\`);`),
+        ).toBe("304\n");
+    });
 
-  test("four bytes", async () => {
-    expect(
-      await acrossTheBoundary("abi-four", `console.log(\`\${gf_c_four({ a: 5, b: 6 })}\`);`),
-    ).toBe("5006\n");
-  });
+    test("four bytes", async () => {
+        expect(
+            await acrossTheBoundary("abi-four", `console.log(\`\${gf_c_four({ a: 5, b: 6 })}\`);`),
+        ).toBe("5006\n");
+    });
 
-  test("eight bytes, two integers", async () => {
-    expect(
-      await acrossTheBoundary("abi-pair", `console.log(\`\${gf_c_pair({ x: 12, y: 34 })}\`);`),
-    ).toBe("12034\n");
-  });
+    test("eight bytes, two integers", async () => {
+        expect(
+            await acrossTheBoundary("abi-pair", `console.log(\`\${gf_c_pair({ x: 12, y: 34 })}\`);`),
+        ).toBe("12034\n");
+    });
 
-  test("eight bytes, two floats — one SSE register on System V", async () => {
-    expect(
-      await acrossTheBoundary(
-        "abi-two-floats",
-        `console.log(\`\${gf_c_two_floats({ x: 2, y: 5 })}\`);`,
-      ),
-    ).toBe("2005\n");
-  });
+    test("eight bytes, two floats — one SSE register on System V", async () => {
+        expect(
+            await acrossTheBoundary(
+                "abi-two-floats",
+                `console.log(\`\${gf_c_two_floats({ x: 2, y: 5 })}\`);`,
+            ),
+        ).toBe("2005\n");
+    });
 
-  test("eight bytes, mixed — one integer register on System V", async () => {
-    // One integer anywhere in an eightbyte makes the whole eightbyte INTEGER.
-    // This and the previous test are the pair that catches the classification
-    // being backwards.
-    expect(
-      await acrossTheBoundary(
-        "abi-int-float",
-        `console.log(\`\${gf_c_int_float({ a: 3, b: 7 })}\`);`,
-      ),
-    ).toBe("3007\n");
-  });
+    test("eight bytes, mixed — one integer register on System V", async () => {
+        // One integer anywhere in an eightbyte makes the whole eightbyte INTEGER.
+        // This and the previous test are the pair that catches the classification
+        // being backwards.
+        expect(
+            await acrossTheBoundary(
+                "abi-int-float",
+                `console.log(\`\${gf_c_int_float({ a: 3, b: 7 })}\`);`,
+            ),
+        ).toBe("3007\n");
+    });
 });
 
 describe("large structs travel by address or on the stack", () => {
-  test("twelve bytes", async () => {
-    expect(
-      await acrossTheBoundary(
-        "abi-twelve",
-        `console.log(\`\${gf_c_twelve({ a: 1, b: 2, c: 3 })}\`);`,
-      ),
-    ).toBe("10203\n");
-  });
+    test("twelve bytes", async () => {
+        expect(
+            await acrossTheBoundary(
+                "abi-twelve",
+                `console.log(\`\${gf_c_twelve({ a: 1, b: 2, c: 3 })}\`);`,
+            ),
+        ).toBe("10203\n");
+    });
 
-  test("sixteen bytes of floats", async () => {
-    expect(
-      await acrossTheBoundary(
-        "abi-two-doubles",
-        `console.log(\`\${gf_c_two_doubles({ x: 4, y: 9 })}\`);`,
-      ),
-    ).toBe("4009\n");
-  });
+    test("sixteen bytes of floats", async () => {
+        expect(
+            await acrossTheBoundary(
+                "abi-two-doubles",
+                `console.log(\`\${gf_c_two_doubles({ x: 4, y: 9 })}\`);`,
+            ),
+        ).toBe("4009\n");
+    });
 
-  test("twenty-four bytes", async () => {
-    expect(
-      await acrossTheBoundary(
-        "abi-big",
-        `console.log(\`\${gf_c_big({ a: 1, b: 2, c: 3 })}\`);`,
-      ),
-    ).toBe("10203\n");
-  });
+    test("twenty-four bytes", async () => {
+        expect(
+            await acrossTheBoundary(
+                "abi-big",
+                `console.log(\`\${gf_c_big({ a: 1, b: 2, c: 3 })}\`);`,
+            ),
+        ).toBe("10203\n");
+    });
 
-  test("a nested aggregate flattens through", async () => {
-    expect(
-      await acrossTheBoundary(
-        "abi-nested",
-        `console.log(\`\${gf_c_nested({ inner: { x: 1, y: 2 }, tail: 3 })}\`);`,
-      ),
-    ).toBe("10203\n");
-  });
+    test("a nested aggregate flattens through", async () => {
+        expect(
+            await acrossTheBoundary(
+                "abi-nested",
+                `console.log(\`\${gf_c_nested({ inner: { x: 1, y: 2 }, tail: 3 })}\`);`,
+            ),
+        ).toBe("10203\n");
+    });
 });
 
 describe("structs come back", () => {
-  test("one byte", async () => {
-    expect(
-      await acrossTheBoundary(
-        "abi-ret-one",
-        `const v: One = gf_c_make_one(9);
+    test("one byte", async () => {
+        expect(
+            await acrossTheBoundary(
+                "abi-ret-one",
+                `const v: One = gf_c_make_one(9);
          console.log(\`\${v.a}\`);`,
-      ),
-    ).toBe("9\n");
-  });
+            ),
+        ).toBe("9\n");
+    });
 
-  test("eight bytes of integers", async () => {
-    expect(
-      await acrossTheBoundary(
-        "abi-ret-pair",
-        `const v: Pair = gf_c_make_pair(11, 22);
+    test("eight bytes of integers", async () => {
+        expect(
+            await acrossTheBoundary(
+                "abi-ret-pair",
+                `const v: Pair = gf_c_make_pair(11, 22);
          console.log(\`\${v.x} \${v.y}\`);`,
-      ),
-    ).toBe("11 22\n");
-  });
+            ),
+        ).toBe("11 22\n");
+    });
 
-  test("eight bytes of floats", async () => {
-    expect(
-      await acrossTheBoundary(
-        "abi-ret-two-floats",
-        `const v: TwoFloats = gf_c_make_two_floats(1.5, 2.5);
+    test("eight bytes of floats", async () => {
+        expect(
+            await acrossTheBoundary(
+                "abi-ret-two-floats",
+                `const v: TwoFloats = gf_c_make_two_floats(1.5, 2.5);
          console.log(\`\${v.x} \${v.y}\`);`,
-      ),
-    ).toBe("1.5 2.5\n");
-  });
+            ),
+        ).toBe("1.5 2.5\n");
+    });
 
-  test("eight bytes, mixed", async () => {
-    expect(
-      await acrossTheBoundary(
-        "abi-ret-int-float",
-        `const v: IntFloat = gf_c_make_int_float(4, 0.5);
+    test("eight bytes, mixed", async () => {
+        expect(
+            await acrossTheBoundary(
+                "abi-ret-int-float",
+                `const v: IntFloat = gf_c_make_int_float(4, 0.5);
          console.log(\`\${v.a} \${v.b}\`);`,
-      ),
-    ).toBe("4 0.5\n");
-  });
+            ),
+        ).toBe("4 0.5\n");
+    });
 
-  test("twelve bytes", async () => {
-    expect(
-      await acrossTheBoundary(
-        "abi-ret-twelve",
-        `const v: Twelve = gf_c_make_twelve(1, 2, 3);
+    test("twelve bytes", async () => {
+        expect(
+            await acrossTheBoundary(
+                "abi-ret-twelve",
+                `const v: Twelve = gf_c_make_twelve(1, 2, 3);
          console.log(\`\${v.a} \${v.b} \${v.c}\`);`,
-      ),
-    ).toBe("1 2 3\n");
-  });
+            ),
+        ).toBe("1 2 3\n");
+    });
 
-  test("sixteen bytes of floats", async () => {
-    expect(
-      await acrossTheBoundary(
-        "abi-ret-two-doubles",
-        `const v: TwoDoubles = gf_c_make_two_doubles(1.25, 2.75);
+    test("sixteen bytes of floats", async () => {
+        expect(
+            await acrossTheBoundary(
+                "abi-ret-two-doubles",
+                `const v: TwoDoubles = gf_c_make_two_doubles(1.25, 2.75);
          console.log(\`\${v.x} \${v.y}\`);`,
-      ),
-    ).toBe("1.25 2.75\n");
-  });
+            ),
+        ).toBe("1.25 2.75\n");
+    });
 
-  test("twenty-four bytes, through a hidden pointer", async () => {
-    expect(
-      await acrossTheBoundary(
-        "abi-ret-big",
-        `const v: Big = gf_c_make_big(7, 8, 9);
+    test("twenty-four bytes, through a hidden pointer", async () => {
+        expect(
+            await acrossTheBoundary(
+                "abi-ret-big",
+                `const v: Big = gf_c_make_big(7, 8, 9);
          console.log(\`\${v.a} \${v.b} \${v.c}\`);`,
-      ),
-    ).toBe("7 8 9\n");
-  });
+            ),
+        ).toBe("7 8 9\n");
+    });
 
-  test("a nested aggregate", async () => {
-    expect(
-      await acrossTheBoundary(
-        "abi-ret-nested",
-        `const v: Nested = gf_c_make_nested(1, 2, 3);
+    test("a nested aggregate", async () => {
+        expect(
+            await acrossTheBoundary(
+                "abi-ret-nested",
+                `const v: Nested = gf_c_make_nested(1, 2, 3);
          console.log(\`\${v.inner.x} \${v.inner.y} \${v.tail}\`);`,
-      ),
-    ).toBe("1 2 3\n");
-  });
+            ),
+        ).toBe("1 2 3\n");
+    });
 });
 
 describe("by-value means the caller keeps its own", () => {
-  test("a callee mutating its parameter does not reach back", async () => {
-    // The by-value path v1 had silently broken the whole time, because nothing
-    // exercised it.
-    expect(
-      await acrossTheBoundary(
-        "abi-clobber",
-        `const mine: Pair = { x: 1, y: 2 };
+    test("a callee mutating its parameter does not reach back", async () => {
+        // The by-value path v1 had silently broken the whole time, because nothing
+        // exercised it.
+        expect(
+            await acrossTheBoundary(
+                "abi-clobber",
+                `const mine: Pair = { x: 1, y: 2 };
          const theirs: i32 = gf_c_clobber(mine);
          console.log(\`\${theirs} \${mine.x} \${mine.y}\`);`,
-      ),
-    ).toBe("1998 1 2\n");
-  });
+            ),
+        ).toBe("1998 1 2\n");
+    });
 
-  test("more structs than fit in registers", async () => {
-    expect(
-      await acrossTheBoundary(
-        "abi-many",
-        `const p: Pair = { x: 1, y: 2 };
+    test("more structs than fit in registers", async () => {
+        expect(
+            await acrossTheBoundary(
+                "abi-many",
+                `const p: Pair = { x: 1, y: 2 };
          console.log(\`\${gf_c_many(p, p, p, p, p)}\`);`,
-      ),
-    ).toBe("15\n");
-  });
+            ),
+        ).toBe("15\n");
+    });
 
-  test("a struct after the integer registers are spoken for", async () => {
-    expect(
-      await acrossTheBoundary(
-        "abi-mixed",
-        `console.log(\`\${gf_c_mixed(1, 2, 3, 4, { x: 5, y: 6 }, 7)}\`);`,
-      ),
-    ).toBe("28\n");
-  });
+    test("a struct after the integer registers are spoken for", async () => {
+        expect(
+            await acrossTheBoundary(
+                "abi-mixed",
+                `console.log(\`\${gf_c_mixed(1, 2, 3, 4, { x: 5, y: 6 }, 7)}\`);`,
+            ),
+        ).toBe("28\n");
+    });
 });
