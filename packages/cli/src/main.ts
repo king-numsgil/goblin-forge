@@ -199,13 +199,21 @@ function init(root: string): number {
         `${JSON.stringify(
             {
                 extends: `./${PROJECT_DIR}/tsconfig.base.json`,
-                // Both named explicitly, and `files` rather than `include`: the prelude
-                // has to be *in* the program for the globals to resolve, and the editor
-                // reads this file and nothing else.
-                files: [`./${PROJECT_DIR}/global.d.ts`, "./src/main.ts"],
+                // The prelude in `files`, unconditionally: it is not reached by any
+                // import, so `include` alone would never find it and the globals would
+                // go unresolved in the editor. `include` covers the rest — every file
+                // under `src/`, not just the entry point — so a helper module gets
+                // tsserver coverage as soon as it exists, not only once `main.ts`
+                // imports it.
+                files: [
+                    `./${PROJECT_DIR}/global.d.ts`,
+                ],
+                include: [
+                    "src/**/*.ts",
+                ],
             },
             null,
-            2,
+            4,
         )}\n`,
     );
 
