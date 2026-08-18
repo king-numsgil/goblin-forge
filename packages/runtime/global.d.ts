@@ -441,7 +441,25 @@ interface CorePointer<T> {
  * intersection is perfectly well typed; the compiler rejects it instead
  * (`GF0002`), at the declaration rather than at the confusing call site.
  */
-type Pointer<T> = T extends GfPrimitive ? CorePointer<T> : T & CorePointer<T>;
+/**
+ * `[T] extends […]`, not `T extends …`, and the brackets are load-bearing.
+ *
+ * A naked `T` on the left of a conditional type is *distributive*: for a `T`
+ * that is a union, tsc evaluates the conditional once per constituent and
+ * unions the results, rather than once for the union as a whole. A
+ * multi-member enum's type **is** such a union — `E` is `E.A | E.B | …` — so
+ * an unbracketed `Pointer<E>` resolved to `CorePointer<E.A> | CorePointer<E.B>`
+ * instead of `CorePointer<E>`, and that reconstructed union does not carry the
+ * `EnumLike` flag `enumUnderlying` (`checker/src/types.ts`) checks for, so
+ * `E` erased as "no machine representation yet" — silently, and only for an
+ * enum with more than one member, since a single-member enum's type is not a
+ * union and never distributes. Verified against real tsc, not assumed.
+ *
+ * The one-tuple on both sides is the standard way to opt a conditional type
+ * out of distribution: `[T] extends [U]` compares the *tuple*, which is never
+ * a union even when `T` is one.
+ */
+type Pointer<T> = [T] extends [GfPrimitive] ? CorePointer<T> : T & CorePointer<T>;
 
 // ---------------------------------------------------------------------------
 // References.
@@ -487,7 +505,8 @@ interface ReferenceCore<T> {
  */
 type GfPrimitive = number | string | boolean;
 
-type Reference<T> = T extends GfPrimitive ? ReferenceCore<T> : T & ReferenceCore<T>;
+/** `[T] extends […]`, not `T extends …` — same distribution hazard as {@link Pointer}. */
+type Reference<T> = [T] extends [GfPrimitive] ? ReferenceCore<T> : T & ReferenceCore<T>;
 
 // ---------------------------------------------------------------------------
 // Memory intrinsics. Manual, C++-style, unverified. There is no GC, no

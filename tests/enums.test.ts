@@ -191,3 +191,33 @@ describe("the rules", () => {
         );
     });
 });
+
+describe("through a pointer", () => {
+    test("`Pointer<E>` and `alloc<E>()` work for a multi-member enum", async () => {
+        // A regression test for a distributive-conditional-type trap. Once an enum
+        // has more than one member, its type *is* the union of its members'
+        // literal types — `E` is `E.A | E.B`, not one type — and `Pointer<T>` /
+        // `Reference<T>` used to have a naked `T` in their conditional, which tsc
+        // distributes over a union: `Pointer<E>` resolved to
+        // `CorePointer<E.A> | CorePointer<E.B>` rather than `CorePointer<E>`. That
+        // reconstructed union carries no `EnumLike` flag, so `enumUnderlying`
+        // (`checker/src/types.ts`) missed it and `E` erased as "no machine
+        // representation yet" — silently, and only once a second member made the
+        // type a union. A single-member enum was never a union and never
+        // distributed, which is what made this easy to miss.
+        const result = await run(
+            "enum-pointer-multi-member",
+            `enum E { A = 1, B = 2 }
+       function bump(p: Pointer<E>): void { p[0] = E.B; }
+       export function main(): i32 {
+         const p = alloc<E>();
+         p[0] = E.A;
+         bump(p);
+         console.log(\`\${cast<i32>(p[0])}\`);
+         p.free();
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("2\n");
+    });
+});
