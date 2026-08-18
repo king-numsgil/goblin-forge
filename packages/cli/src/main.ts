@@ -252,6 +252,11 @@ async function main(argv: readonly string[]): Promise<number> {
     if (result.runtimeImage !== undefined) {
         process.stdout.write(`  with ${result.runtimeImage}, which has to stay beside it\n`);
     }
+    // Not needed to *run* — needed to link against, which is a different
+    // audience and worth a different sentence.
+    if (result.runtimeImportLibrary !== undefined) {
+        process.stdout.write(`  and ${result.runtimeImportLibrary}, which a consumer links\n`);
+    }
     return 0;
 }
 

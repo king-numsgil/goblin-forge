@@ -671,6 +671,60 @@ int main(void) {
         );
     }, CMAKE_TIMEOUT);
 
+    test("a C program links a `runtime: \"shared\"` library from what the build shipped", async () => {
+        // The other half of the boundary, and the one that is easy to declare
+        // finished while it is not. Linked shared, this library does *not*
+        // export `gf_string_free` — it imports it — so the consumer links the
+        // runtime's own stub instead.
+        //
+        // Which means the build has to *produce* that stub next to the library.
+        // It did not until it was tried: the runtime `.dll` was copied out and
+        // its `.lib` was left in the compiler's cache, so the header's advice
+        // named a file the consumer did not have and the link failed on
+        // `gf_string_from_cstr`. Nothing below reaches outside the output
+        // directory, which is the point of the test.
+        const {project, result} = await compileSource(
+            "shared-rt-lib-strings",
+            `export function greet(name: string): string { return \`hi \${name}\`; }\n`,
+            {type: "shared-lib", runtime: "shared"},
+        );
+        expect(result.ok).toBe(true);
+        expect(result.runtimeImage).toBeDefined();
+
+        // On Windows the runtime travels as two files and the stub is required;
+        // elsewhere the shared object is both and is linked against directly.
+        // Asserted rather than fallen back to, because a missing stub would
+        // otherwise reach the linker as "link the `.dll`" and come back as a
+        // corrupt-file error about a file that is perfectly fine.
+        if (result.output?.endsWith(".dll") === true) {
+            expect(result.runtimeImportLibrary).toBeDefined();
+        }
+        const runtimeStub = result.runtimeImportLibrary ?? result.runtimeImage!;
+        expect(existsSync(runtimeStub)).toBe(true);
+        expect(dirname(runtimeStub)).toBe(dirname(result.output!));
+
+        const stdout = buildConsumer({
+            dir: project.dir,
+            library: result.importLibrary ?? result.output!,
+            header: result.headerPath!,
+            runtime: runtimeStub,
+            beside: [result.output!, result.runtimeImage!],
+            main: `#include <stdio.h>
+#include "main.h"
+
+int main(void) {
+  GoblinString name = gf_string_from_cstr("goblin");
+  GoblinString loud = greet(name);
+  printf("%s\\n", loud);
+  gf_string_free(loud);
+  gf_string_free(name);
+  return 0;
+}
+`,
+        });
+        expect(stdout).toBe("hi goblin\n");
+    }, CMAKE_TIMEOUT);
+
     test("a `shared-lib` publishes runtime symbols only when its header declares them", async () => {
         // The invariant, checked from the other side: the export list and the
         // header read one list, so a library whose boundary never mentions a

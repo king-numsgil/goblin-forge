@@ -550,6 +550,13 @@ program — a second heap and a second allocation counter, which is the same fau
 as two Goblin artefacts each carrying their own, arrived at from the other side.
 It is a link line that succeeds, so nothing tells you but the behaviour.
 
+Everything the bottom row needs is produced beside the library, so a consumer
+never has to reach into the compiler's cache: on Windows that is four files —
+`app.dll` and `app.lib` for this library, `goblin_runtime.dll` and
+`goblin_runtime.dll.lib` for the runtime. The build names the last two on the
+way out. On ELF and Mach-O the shared object is linked against directly, so
+there is no separate stub and no fourth file.
+
 ### Adding your own library
 
 `nativeLibs` takes **paths**, resolved against the build script's directory —

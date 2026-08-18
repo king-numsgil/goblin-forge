@@ -189,6 +189,15 @@ export interface CompileResult {
      * has two answers and only one of them is the output path.
      */
     readonly runtimeImage?: string;
+    /**
+     * The shared runtime's import stub, beside a `shared-lib` that links one.
+     *
+     * What a *consumer* links, alongside this library's own stub. Windows only
+     * and `shared-lib` only: an ELF or Mach-O consumer links the shared object
+     * itself, which is already reported as {@link runtimeImage}, and nobody
+     * links against a `bin` at all.
+     */
+    readonly runtimeImportLibrary?: string;
 }
 
 /**
@@ -444,10 +453,31 @@ export class Compiler {
         // on the machine that built it" is exactly what a bare `-rpath` into a
         // build tree buys, and the failure lands on whoever runs the binary.
         let runtimeImage: string | undefined;
+        let runtimeImportLibrary: string | undefined;
         if (shared && runtime.shared !== undefined) {
-            runtimeImage = join(dirname(report.output), basename(runtime.shared.image));
+            const beside = dirname(report.output);
+            runtimeImage = join(beside, basename(runtime.shared.image));
+            // A `shared-lib`'s consumer links the runtime as well as this
+            // library, so the *stub* has to travel too — and on Windows that is
+            // a second file. Without it the header's advice cannot be followed:
+            // it says to link the runtime beside this library, and the runtime
+            // beside this library would be a `.dll`, which is not something a
+            // consumer can link against.
+            //
+            // Only for a `shared-lib`. Nobody links against a `bin`, so shipping
+            // an import stub with one is clutter in the output directory.
+            //
+            // `link` and `image` are the same file on ELF and Mach-O — a shared
+            // object is linked against directly — so the second copy is skipped
+            // there rather than copied onto itself.
+            const stub = runtime.shared.link;
+            const wantsStub = kind === "shared-lib" && stub !== runtime.shared.image;
             try {
                 copyFileSync(runtime.shared.image, runtimeImage);
+                if (wantsStub) {
+                    runtimeImportLibrary = join(beside, basename(stub));
+                    copyFileSync(stub, runtimeImportLibrary);
+                }
             } catch (error) {
                 diagnostics.push({
                     severity: "error",
@@ -467,6 +497,7 @@ export class Compiler {
             output: report.output,
             objects: [artifact.objectPath],
             ...(runtimeImage !== undefined ? {runtimeImage} : {}),
+            ...(runtimeImportLibrary !== undefined ? {runtimeImportLibrary} : {}),
             ...(irPath !== undefined ? {irPath} : {}),
             ...(headerPath !== undefined ? {headerPath} : {}),
             ...(report.command !== undefined ? {linkCommand: report.command} : {}),
