@@ -171,6 +171,11 @@ async function main(argv: readonly string[]): Promise<number> {
         return 1;
     }
     process.stdout.write(`built ${result.output}\n`);
+    // Said out loud, because it is the one build where the output path is not
+    // the whole answer to "what do I ship?".
+    if (result.runtimeImage !== undefined) {
+        process.stdout.write(`  with ${result.runtimeImage}, which has to stay beside it\n`);
+    }
     return 0;
 }
 

@@ -486,6 +486,46 @@ Four things to know:
   and that is fine. The machinery for taking over unqualified `malloc()` calls
   is deliberately not enabled.
 
+### Two Goblin artefacts in one process: `runtime: "shared"`
+
+Everything above assumes one Goblin artefact. Two in the same process — a Goblin
+`shared-lib` loaded by a Goblin `bin` — is the case static linking cannot serve,
+because each artefact carries its own copy of the runtime and therefore its own
+mimalloc, its own live-allocation counter, and its own `gf_string_free`. A
+`string` allocated inside the library and released by the scope that holds it in
+the executable is then a free against a heap that never allocated it.
+
+The build option is the answer:
+
+```ts
+// build.ts — for *both* artefacts
+export default {
+  entry: "./src/main.ts",
+  output: "./bin/app",
+  type: "bin",
+  runtime: "shared",     // default is "static"
+};
+```
+
+Linked this way both artefacts import one runtime, so there is one heap, one
+counter and one `gf_string_free`. The compiler copies the runtime beside each
+output and tells you where it put it:
+
+```console
+$ goblin-forge
+built /project/bin/app.exe
+  with /project/bin/goblin_runtime.dll, which has to stay beside it
+```
+
+That file is the cost. `"static"` remains the default and remains the right
+answer for a single program: the runtime is inside the binary and there is one
+file to ship. This is `/MD` against `/MT`, and it is the same trade — take the
+extra file only when something else in the process needs the same heap.
+
+A `static-lib` is unaffected either way. An archive is not a link, so it carries
+only its own objects and its consumer supplies the runtime once, at the
+executable.
+
 ### Adding your own library
 
 `nativeLibs` takes **paths**, resolved against the build script's directory —

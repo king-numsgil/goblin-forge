@@ -783,6 +783,55 @@ no file and no line.
 
 ---
 
+## §16 — The runtime may be linked shared *(settled and built, 2026-08-18)*
+
+`runtime: "static" | "shared"` on the build config, defaulting to `"static"`.
+Everything below follows from one fact: a statically linked runtime is a *copy*,
+and two copies in one process is two of everything the runtime owns.
+
+**The problem is not new, and it was worse than it looked.** Two Goblin
+artefacts in one process — a `shared-lib` loaded by a `bin` — each carry a
+mimalloc, a `LIVE` counter, an `atexit` reporter and a `gf_string_free`. A
+`string` allocated in the library and released by the scope holding it in the
+executable is a cross-heap free. Before mimalloc the two copies happened to land
+in the same CRT heap and the corruption was silent; §15 made it loud, which is
+an improvement and not a regression.
+
+Checking the configuration turned up a second, independent bug: a `shared-lib`'s
+`.def` lists only the module's own defines, so a string-returning Goblin DLL
+exports `greet` and not `gf_string_free` — while its generated header tells the
+consumer to call exactly that. On Windows a C consumer could not link. So the
+path had never worked end to end, and there was less to preserve than it
+appeared.
+
+**Shared linking is the whole fix, and only for the case that needs it.** Both
+artefacts import one runtime: one heap, one counter, one reporter. The
+live-allocation check gets *more* correct rather than less — two artefacts used
+to produce two report lines. The cost is a file beside the binary, so it is
+opt-in; a single program stays one self-contained artefact, which is what almost
+every build is.
+
+**The `mi_*` surface is trampolined, and that was forced.** §15 published eight
+mimalloc entry points under their C names. A cdylib exports the Rust symbols it
+defines and does **not** re-export C symbols reaching it from a bundled native
+static library, and each platform hides them differently: MSVC wants `/EXPORT:`
+per symbol (verified working, and it composes — rustc uses `/EXPORT:` itself
+rather than a `.def`), ELF has a version script whose `local: *` outranks
+`--export-dynamic-symbol`, and Mach-O **fails the link** if `-exported_symbol`
+is passed beside the `-exported_symbols_list` rustc already supplies. Three
+mechanisms, one of them a hard error, and only the first testable on the machine
+this was written on.
+
+So the runtime defines eight one-line `gf_mi_*` wrappers instead. A Rust symbol
+exports from a staticlib and a cdylib identically on all three platforms with no
+linker argument anywhere. The prelude still spells them `mi_malloc` — the name
+has to type-check against a signature C wrote — and `PRELUDE_EXTERNS` maps the
+declaration to the symbol. The secondary benefit is the one likely to matter
+later: the published surface is now *ours*, so the allocator underneath it can
+change again without it moving.
+
+---
+
 ## Class decisions *(2026-08-12, milestone 8)*
 
 ### Every class has a vtable pointer, including one with no virtual methods

@@ -140,6 +140,9 @@ pub struct LinkRequest {
     /// Symbols a `shared-lib` publishes. Windows only — see `LinkRequest` in
     /// `goblin-codegen` for why the platforms differ here.
     pub exports: Option<Vec<String>>,
+    /// Search beside the artefact for shared libraries at load time, for a
+    /// program linked against the shared runtime. ELF and Mach-O only.
+    pub rpath_origin: Option<bool>,
 }
 
 #[napi(object)]
@@ -267,6 +270,7 @@ impl Backend {
             system_libs: &request.system_libs,
             output: &output,
             exports: request.exports.as_deref().unwrap_or(&[]),
+            rpath_origin: request.rpath_origin.unwrap_or(false),
         };
 
         match goblin_codegen::link(&link_request) {

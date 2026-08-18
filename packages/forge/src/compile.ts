@@ -27,8 +27,8 @@ import {
 import { Checker, checkPreludeIsVisibleToEditors, type Diagnostic, hasErrors } from "@goblin-forge/checker";
 
 import { buildRuntime } from "@goblin-forge/runtime/build";
-import { mkdirSync, writeFileSync } from "node:fs";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { copyFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
 import { elaborateDrops } from "./drop-elaboration.ts";
 import { emitHeader, HeaderError } from "./header.ts";
@@ -57,6 +57,28 @@ export interface CompileOptions {
 
     readonly nativeLibs?: readonly string[];
     readonly manifests?: readonly string[];
+
+    /**
+     * How the Goblin runtime is linked. Defaults to `"static"`.
+     *
+     * `"static"` is the self-contained answer and the right one for almost
+     * everything: the runtime is inside the artefact and there is one file to
+     * ship.
+     *
+     * `"shared"` exists for the one case static linking cannot serve — **two
+     * Goblin artefacts in the same process**, a `shared-lib` loaded by a `bin`.
+     * Each would otherwise carry its own runtime, and therefore its own heap,
+     * its own live-allocation counter and its own copy of `gf_string_free`; a
+     * `string` allocated on one side and released on the other is then a
+     * cross-heap free. Linked shared, both artefacts import one runtime and
+     * there is one of each.
+     *
+     * The cost is that the runtime is no longer inside the binary. It is copied
+     * beside the output and has to stay there — `runtimeImage` in the result
+     * says where it landed. This is `/MD` against `/MT`, and the trade is the
+     * same one.
+     */
+    readonly runtime?: "static" | "shared";
 
     /** Target triple. Defaults to the host. */
     readonly target?: string;
@@ -113,6 +135,14 @@ export interface CompileResult {
      * be unkind.
      */
     readonly runtimeLibrary?: string;
+    /**
+     * The shared runtime copied beside the output, for `runtime: "shared"`.
+     *
+     * It has to stay there: the artefact finds it by looking next to itself.
+     * Reported rather than merely done, because "which files do I ship?" now
+     * has two answers and only one of them is the output path.
+     */
+    readonly runtimeImage?: string;
 }
 
 /**
@@ -241,17 +271,44 @@ export class Compiler {
         const output = this.#outputPath(kind);
         const runtime = buildRuntime(this.#options.target);
         const selfContained = kind !== "static-lib";
+
+        // `shared` links the import stub instead of the archive, so that this
+        // artefact and any other one in the same process resolve `gf_*` to the
+        // same module — one heap, one live-allocation counter. A `static-lib`
+        // is archived rather than linked and gets neither, so the choice does
+        // not reach it: its consumer picks, at the executable.
+        const shared = this.#options.runtime === "shared" && selfContained;
+        if (shared && runtime.shared === undefined) {
+            diagnostics.push({
+                severity: "error",
+                code: "GF0005",
+                source: "goblin",
+                message:
+                    `\`runtime: "shared"\` was asked for, but the runtime crate did not ` +
+                    `produce a shared library for this target. Its manifest asks for ` +
+                    `\`crate-type = ["staticlib", "cdylib"]\`; a target whose toolchain ` +
+                    `cannot produce a cdylib can only be linked \`runtime: "static"\`.`,
+            });
+            return {...failed(diagnostics), objects: [artifact.objectPath]};
+        }
+        const runtimeLink = shared && runtime.shared !== undefined
+            ? runtime.shared.link
+            : runtime.library;
+
         const report = this.#backend.link({
             kind,
             objects: [artifact.objectPath],
             archives: selfContained
                 ? [
                     ...(this.#options.nativeLibs ?? []).map((path) => this.#resolve(path)),
-                    runtime.library,
+                    runtimeLink,
                 ]
                 : [],
             systemLibs: selfContained ? [...runtime.systemLibs] : [],
             output,
+            // Only matters when something shared has to be found beside the
+            // artefact, and only on the platforms that bake a search path in.
+            rpathOrigin: shared,
             // Only Windows needs these, and only for a DLL: an ELF shared object
             // publishes every default-visibility symbol on its own.
             exports: kind === "shared-lib" ? [...artifact.defines] : [],
@@ -261,11 +318,34 @@ export class Compiler {
             return {...failed(diagnostics), objects: [artifact.objectPath]};
         }
 
+        // The shared runtime, put where the artefact will look for it. Copied
+        // rather than left in the crate's target directory, because "it worked
+        // on the machine that built it" is exactly what a bare `-rpath` into a
+        // build tree buys, and the failure lands on whoever runs the binary.
+        let runtimeImage: string | undefined;
+        if (shared && runtime.shared !== undefined) {
+            runtimeImage = join(dirname(report.output), basename(runtime.shared.image));
+            try {
+                copyFileSync(runtime.shared.image, runtimeImage);
+            } catch (error) {
+                diagnostics.push({
+                    severity: "error",
+                    code: "GF9005",
+                    source: "goblin",
+                    message:
+                        `linked against the shared runtime, but could not copy it to ` +
+                        `${runtimeImage}: ${(error as Error).message}`,
+                });
+                return {...failed(diagnostics), objects: [artifact.objectPath]};
+            }
+        }
+
         return {
             ok: true,
             diagnostics,
             output: report.output,
             objects: [artifact.objectPath],
+            ...(runtimeImage !== undefined ? {runtimeImage} : {}),
             ...(irPath !== undefined ? {irPath} : {}),
             ...(headerPath !== undefined ? {headerPath} : {}),
             ...(report.command !== undefined ? {linkCommand: report.command} : {}),

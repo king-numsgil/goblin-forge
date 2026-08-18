@@ -81,6 +81,14 @@ export interface ProjectOptions {
     /** What to build. Defaults to `bin`, which is what most tests want. */
     readonly type?: "bin" | "static-lib" | "shared-lib";
     /**
+     * How the runtime is linked. Defaults to `static`, as a build does.
+     *
+     * `shared` is what the two-artefacts-in-one-process suite needs, and the
+     * compiler copies the runtime beside the output — so a test runs the binary
+     * the same way either way.
+     */
+    readonly runtime?: "static" | "shared";
+    /**
      * `compilerOptions` written into the project's tsconfig, over the base.
      *
      * Only `GF0003` needs this — the diagnostic exists precisely because a
@@ -166,6 +174,7 @@ export async function compileSource(
         checked: options.checked ?? false,
         emit: {ir: options.emitIr ?? false},
         ...(options.nativeLibs !== undefined ? {nativeLibs: [...options.nativeLibs]} : {}),
+        ...(options.runtime !== undefined ? {runtime: options.runtime} : {}),
         // The whole point of §8's hard rule. A backend error must be a loud crash,
         // not something a test can read as the compiler correctly saying no.
         strictInternalErrors: true,
@@ -214,8 +223,24 @@ export async function run(
     if (!existsSync(result.output)) {
         throw new Error(`the compiler reported success but ${result.output} does not exist`);
     }
+    return runBinary(name, result.output, options);
+}
 
-    const child = spawnSync(result.output, [...(options.args ?? [])], {
+/**
+ * Run an already-compiled program, with the whole leak check.
+ *
+ * Split out of {@link run} for the suites that have something to do between
+ * compiling and running — a second artefact to build, a library to put beside
+ * the executable. Sharing this rather than spawning directly is what keeps the
+ * automatic live-allocation check on *every* run test, which REWRITE-PLAN §9
+ * calls non-negotiable and which a test cannot opt out of by accident.
+ */
+export function runBinary(
+    name: string,
+    binary: string,
+    options: ProjectOptions = {},
+): RunResult {
+    const child = spawnSync(binary, [...(options.args ?? [])], {
         encoding: "utf8",
         // The runtime prints its live-allocation count on exit when this is set.
         env: {...process.env, GOBLIN_LEAK_CHECK: "1"},

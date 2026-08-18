@@ -28,6 +28,11 @@ const UNREACHABLE: Partial<Record<string, string>> = {
     GF0227:
         "the diagnostic is about a `Pointer<T>` used where a `T` is expected, and " +
         "`Pointer<T>` cannot be written as a type yet (GF0001).",
+    GF0005:
+        "`runtime: \"shared\"` needs the runtime crate to have produced a cdylib, " +
+        "and its manifest asks for one on every target this suite can build for. " +
+        "Reaching it needs a triple whose toolchain cannot make a shared library " +
+        "at all, which is not something a test can arrange on the host.",
     GF9001: "the frontend and the backend are built from one MIR definition.",
     GF9002: "requires an addon built from a different MIR definition.",
     GF9003: "the backend panics under `strictInternalErrors`, which every test uses.",

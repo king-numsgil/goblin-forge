@@ -274,6 +274,17 @@ SDL_SetMemoryFunctions(mi_malloc, mi_calloc, mi_realloc, mi_free);
 
 [`LINKING.md`](LINKING.md) has the rules that come with that.
 
+A program is one self-contained file, runtime included. The exception is opt-in
+and exists for exactly one situation — a Goblin `shared-lib` loaded by a Goblin
+`bin`, where two private runtimes would mean two heaps:
+
+```ts
+export default { entry: "./src/main.ts", output: "./bin/app", runtime: "shared" };
+```
+
+Both artefacts then share one runtime, one heap and one allocation counter, at
+the cost of a runtime library shipped beside them.
+
 ### Classes are values, and copying one slices
 
 ```ts

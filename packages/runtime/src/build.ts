@@ -24,6 +24,22 @@ export interface RuntimeBuild {
     readonly library: string;
     /** System libraries the linker needs, in the platform's spelling. */
     readonly systemLibs: readonly string[];
+    /**
+     * The runtime as a shared library, for `runtime: "shared"`.
+     *
+     * Two paths because Windows needs two: a DLL cannot be linked against
+     * directly, so the linker is given an import stub and the loader is given
+     * the DLL. On ELF and Mach-O both are the same file, and saying so here
+     * keeps the asymmetry in one place instead of at every use.
+     */
+    readonly shared?: SharedRuntime;
+}
+
+export interface SharedRuntime {
+    /** What the linker is given. */
+    readonly link: string;
+    /** What has to sit beside the executable when it runs. */
+    readonly image: string;
 }
 
 const cache = new Map<string, RuntimeBuild>();
@@ -83,20 +99,56 @@ export function buildRuntime(target?: string): RuntimeBuild {
         );
     }
 
+    const shared = locateShared(target);
     const build: RuntimeBuild = {
         library,
         systemLibs: parseNativeStaticLibs(result.stderr ?? ""),
+        ...(shared !== undefined ? {shared} : {}),
     };
     cache.set(key, build);
     return build;
 }
 
+function releaseDir(target?: string): string {
+    return join(RUNTIME_CRATE(), "target", ...(target ? [target] : []), "release");
+}
+
 function locateLibrary(target?: string): string | undefined {
-    const base = join(RUNTIME_CRATE(), "target", ...(target ? [target] : []), "release");
+    const base = releaseDir(target);
     for (const name of ["goblin_runtime.lib", "libgoblin_runtime.a"]) {
         const candidate = join(base, name);
         if (existsSync(candidate)) {
             return candidate;
+        }
+    }
+    return undefined;
+}
+
+/**
+ * The shared runtime, when the crate produced one.
+ *
+ * Both crate types come out of a single build — the manifest asks for
+ * `["staticlib", "cdylib"]` — so this is a lookup rather than a second
+ * compilation. It is *optional* on purpose: a `static-lib` never needs it, and
+ * a target whose toolchain cannot produce a cdylib should fail when someone
+ * asks for one rather than at every build.
+ *
+ * The import library is `goblin_runtime.dll.lib`, which is deliberately not the
+ * staticlib's `goblin_runtime.lib`. The two sit in the same directory and only
+ * the `.dll` in the middle tells them apart, so picking the wrong one links a
+ * whole second copy of the runtime into a program that meant to share one.
+ */
+function locateShared(target?: string): SharedRuntime | undefined {
+    const base = releaseDir(target);
+    for (const [image, link] of [
+        ["goblin_runtime.dll", "goblin_runtime.dll.lib"],
+        ["libgoblin_runtime.so", "libgoblin_runtime.so"],
+        ["libgoblin_runtime.dylib", "libgoblin_runtime.dylib"],
+    ] as const) {
+        const imagePath = join(base, image);
+        const linkPath = join(base, link);
+        if (existsSync(imagePath) && existsSync(linkPath)) {
+            return {link: linkPath, image: imagePath};
         }
     }
     return undefined;

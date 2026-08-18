@@ -78,6 +78,21 @@ export const CODES = {
             "before your first statement, so there is no version of this signature " +
             "that names the two halves separately.",
     },
+    GF0005: {
+        title: "the runtime cannot be linked the way this build asked for",
+        explanation:
+            "`runtime: \"shared\"` links one runtime that several Goblin artefacts " +
+            "in a process share, instead of putting a copy inside each. It needs " +
+            "the runtime crate to have produced a shared library, which its " +
+            "manifest asks for with `crate-type = [\"staticlib\", \"cdylib\"]`.\n\n" +
+            "A target whose toolchain cannot produce a `cdylib` — a bare-metal or " +
+            "static-only triple — can still be built `runtime: \"static\"`, which is " +
+            "the default and needs nothing beyond the archive. The shared runtime " +
+            "buys exactly one thing: two Goblin artefacts in one process sharing a " +
+            "heap, a live-allocation counter and one copy of `gf_string_free`. If " +
+            "you are not doing that, you do not need it.",
+    },
+
     // -- Widths and arithmetic ----------------------------------------------
     GF0160: {
         title: "implicit narrowing",

@@ -39,6 +39,18 @@ pub struct LinkRequest<'a> {
     /// and has no entry points — a failure that looks like a mystery at the
     /// call site rather than an error at the link.
     pub exports: &'a [String],
+    /// Look for shared libraries beside the artefact itself, at load time.
+    ///
+    /// Set when the runtime is linked as a shared library, so that
+    /// `goblin_runtime.so` shipped next to the binary is the one found — rather
+    /// than nothing being found, which on ELF is a loader error naming a file
+    /// the user can see is right there.
+    ///
+    /// Nothing to do on Windows, which searches the executable's own directory
+    /// first and has no equivalent to bake in. The spelling differs on the two
+    /// platforms that do need it: ELF says `$ORIGIN` and Mach-O says
+    /// `@loader_path`.
+    pub rpath_origin: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -248,6 +260,17 @@ fn unix_command(request: &LinkRequest<'_>) -> Command {
         // file in `msvc_command`), and the asymmetry is the platforms', not
         // this compiler's.
     }
+    if request.rpath_origin {
+        // Mach-O has no `$ORIGIN`; `@loader_path` is the same idea under a
+        // different name, and passing the wrong one is silently ignored rather
+        // than reported, so the two are spelled out separately.
+        let origin = if cfg!(target_os = "macos") {
+            "@loader_path"
+        } else {
+            "$ORIGIN"
+        };
+        command.arg(format!("-Wl,-rpath,{origin}"));
+    }
     for object in request.objects {
         command.arg(object);
     }
@@ -315,6 +338,7 @@ mod tests {
             system_libs: &[],
             output: Path::new("libdemo.so"),
             exports: &["greet".to_owned()],
+            rpath_origin: false,
         };
         let rendered = render(&unix_command(&request));
         assert!(rendered.contains("-shared"), "{rendered}");
@@ -346,6 +370,7 @@ mod tests {
             system_libs: &["m".to_owned(), "-pthread".to_owned()],
             output: Path::new("hello"),
             exports: &[],
+            rpath_origin: false,
         };
         let rendered = render(&unix_command(&request));
         assert!(rendered.contains("-lm"), "{rendered}");

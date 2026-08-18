@@ -8,10 +8,18 @@ publish = false
 
 [lib]
 name = "goblin_runtime"
-# A static library, linked into every compiled program. It is built for the
-# *user's* target rather than the host, which is why this crate is outside the
-# compiler's cargo workspace and is built on demand.
-crate-type = ["staticlib"]
+# Linked into every compiled program, and built for the *user's* target rather
+# than the host — which is why this crate is outside the compiler's cargo
+# workspace and is built on demand.
+#
+# Both forms, from one build. `staticlib` is the default and makes a program one
+# self-contained file. `cdylib` is what `runtime: "shared"` links instead, for
+# the one case a copy per artefact cannot serve: two Goblin artefacts in one
+# process, which need one heap and one live-allocation counter between them
+# rather than one each. Neither is expensive to have sitting there, and building
+# the second on demand would mean a second cargo invocation to discover it was
+# not needed.
+crate-type = ["staticlib", "cdylib"]
 
 [dependencies]
 libc = "0.2"
