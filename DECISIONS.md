@@ -830,6 +830,27 @@ declaration to the symbol. The secondary benefit is the one likely to matter
 later: the published surface is now *ours*, so the allocator underneath it can
 change again without it moving.
 
+**The header and the export list are now one list.** The second bug above is
+fixed rather than worked around, and independently of heap sharing: a
+`shared-lib` publishes the runtime functions its own header declares. Both read
+`RUNTIME_STRING_API` in `header.ts`, so the pair cannot drift — which is the
+only reason they disagreed in the first place, one being a literal in the
+header generator and the other a field on the link request.
+
+Gated on the runtime being linked *statically*, and the reason is not the one
+that first suggests itself. `link.exe` accepts an imported symbol in a `.def`
+quite happily and emits a forwarder; that was checked rather than assumed. It is
+gated because ELF records an import as an undefined entry rather than a
+definition, so a consumer there has to link the runtime whichever way this went.
+One rule for both platforms is worth more than one fewer import library on one
+of them.
+
+The header's banner had the same class of fault and is fixed with it. It told
+every consumer to "link the Goblin runtime alongside this library", which is
+right for an archive and actively harmful for a DLL — the runtime is already
+inside, so taking the advice puts a second copy in the program. Three cases,
+three different sentences, and a test that they are different.
+
 ---
 
 ## Class decisions *(2026-08-12, milestone 8)*

@@ -22,6 +22,44 @@ import type { Module, Signature, TyKind } from "@goblin-forge/backend";
 export interface HeaderOptions {
     /** The library's name, used for the include guard and the banner. */
     readonly name: string;
+    /** What is being produced, which decides what a consumer has to link. */
+    readonly kind: "static-lib" | "shared-lib";
+    /** How the runtime was linked into it. */
+    readonly runtime: "static" | "shared";
+}
+
+/**
+ * What a consumer has to link, in the banner, because getting it wrong is not
+ * a compile error — it is a second runtime.
+ *
+ * An archive carries only its own objects, so a `static-lib`'s consumer
+ * supplies the runtime. A `shared-lib` already resolved everything at its own
+ * link, so its consumer must **not** link the runtime archive as well: that
+ * would put a second copy, with a second heap and a second allocation counter,
+ * in the same program. Telling everyone the same thing was how this header came
+ * to advise exactly that.
+ */
+function linkingAdvice(options: HeaderOptions): readonly string[] {
+    if (options.kind === "static-lib") {
+        return [
+            " * Link the Goblin runtime alongside this library. A Goblin archive carries",
+            " * only its own objects, so that two of them in one program do not each bring",
+            " * a copy of the runtime.",
+        ];
+    }
+    if (options.runtime === "shared") {
+        return [
+            " * Link this library's import stub, and the Goblin runtime's beside it — the",
+            " * runtime is its own shared library here, shipped next to this one, and both",
+            " * of you are calling into that one copy.",
+        ];
+    }
+    return [
+        " * Link this library's import stub and nothing else. The Goblin runtime is",
+        " * already inside it, so linking the runtime archive as well would give your",
+        " * program a second copy of it, with a second heap — and memory allocated by",
+        " * one is not memory the other can free.",
+    ];
 }
 
 /** Raised when an exported signature has no C spelling. */
@@ -30,6 +68,39 @@ export class HeaderError extends Error {
         super(message);
         this.name = "HeaderError";
     }
+}
+
+/**
+ * The runtime functions a header declares when a `string` crosses, as both the
+ * C declaration and the symbol behind it.
+ *
+ * One list rather than two, because the two disagreeing is the bug it exists to
+ * prevent. A header naming `gf_string_free` beside a DLL that does not export
+ * it is a consumer who cannot link, and the failure lands on them rather than
+ * here — which is exactly what shipped until this was written down once.
+ */
+const RUNTIME_STRING_API = [
+    {symbol: "gf_string_from_cstr", declaration: "GoblinString gf_string_from_cstr(const char* bytes);"},
+    {symbol: "gf_string_clone", declaration: "GoblinString gf_string_clone(GoblinString s);"},
+    {symbol: "gf_string_free", declaration: "void gf_string_free(GoblinString s);"},
+] as const;
+
+/**
+ * Runtime symbols this module's header declares, and therefore the ones a
+ * `shared-lib` has to publish beside its own.
+ *
+ * Empty unless a `string` actually crosses the boundary: the header declares
+ * these under the same condition, and a library trafficking in none of them has
+ * no reason to publish somebody else's symbols.
+ *
+ * Used only when the runtime is linked *statically* into the library, which is
+ * the case where the library holds the only definition to publish. Linked
+ * shared it holds an import, and the consumer links the runtime's own import
+ * library — see the export list in `compile.ts` for why that is the uniform
+ * answer rather than the forced one.
+ */
+export function runtimeSymbols(module: Module): readonly string[] {
+    return usesStrings(module) ? RUNTIME_STRING_API.map((entry) => entry.symbol) : [];
 }
 
 /**
@@ -50,9 +121,7 @@ export function emitHeader(module: Module, options: HeaderOptions): string {
     out.push(" * registers, stack slots and hidden return pointers without either side");
     out.push(" * being told.");
     out.push(" *");
-    out.push(" * Link the Goblin runtime alongside this library. A Goblin archive carries");
-    out.push(" * only its own objects, so that two of them in one program do not each bring");
-    out.push(" * a copy of the runtime.");
+    out.push(...linkingAdvice(options));
     out.push(" */");
     out.push(`#ifndef ${guard}`);
     out.push(`#define ${guard}`);
@@ -86,9 +155,9 @@ export function emitHeader(module: Module, options: HeaderOptions): string {
         out.push(" */");
         out.push("typedef const char* GoblinString;");
         out.push("");
-        out.push("GoblinString gf_string_from_cstr(const char* bytes);");
-        out.push("GoblinString gf_string_clone(GoblinString s);");
-        out.push("void gf_string_free(GoblinString s);");
+        for (const entry of RUNTIME_STRING_API) {
+            out.push(entry.declaration);
+        }
         out.push("");
     }
 

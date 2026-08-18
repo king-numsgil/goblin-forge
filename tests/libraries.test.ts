@@ -19,8 +19,8 @@
 
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 
 import { compileSource, expectRejected } from "./harness.ts";
 
@@ -30,12 +30,22 @@ import { compileSource, expectRejected } from "./harness.ts";
  */
 const CMAKE_TIMEOUT = 120_000;
 
-/** Build a Goblin static library, then a C program that uses it. */
+/** Build a Goblin library, then a C program that uses it. */
 function buildConsumer(options: {
     readonly dir: string;
     readonly library: string;
     readonly header: string;
-    readonly runtime: string;
+    /**
+     * The Goblin runtime archive, for a `static-lib`.
+     *
+     * Absent for a `shared-lib`, and absent deliberately: the runtime is inside
+     * the DLL there, so linking the archive as well would put a *second* copy
+     * in the consumer — the two-runtimes-one-process bug, arrived at from the
+     * other direction.
+     */
+    readonly runtime?: string;
+    /** Files to place beside the consumer executable before it runs. */
+    readonly beside?: readonly string[];
     readonly main: string;
 }): string {
     const consumer = join(options.dir, "consumer");
@@ -53,9 +63,10 @@ function buildConsumer(options: {
         `target_include_directories(consumer PRIVATE "${forward(dirname(options.header))}")`,
         // The Goblin archive first, then the runtime it needs. Order matters to a
         // Unix linker, which resolves left to right and will not go back.
-        `target_link_libraries(consumer PRIVATE "${forward(options.library)}" "${forward(
-            options.runtime,
-        )}")`,
+        `target_link_libraries(consumer PRIVATE ${[options.library, options.runtime]
+            .filter((path): path is string => path !== undefined)
+            .map((path) => `"${forward(path)}"`)
+            .join(" ")})`,
         // The runtime is a Rust staticlib and wants the platform's own libraries.
         "if(WIN32)",
         "  target_link_libraries(consumer PRIVATE ws2_32 userenv ntdll bcrypt advapi32)",
@@ -89,13 +100,22 @@ function buildConsumer(options: {
         join(build, "Debug", "consumer.exe"),
         join(build, "consumer"),
     ]) {
-        const run = spawnSync(candidate, [], {encoding: "utf8"});
-        if (run.error === undefined) {
-            if (run.status !== 0) {
-                throw new Error(`${candidate} exited ${run.status}:\n${run.stderr ?? ""}`);
-            }
-            return (run.stdout ?? "").replaceAll("\r\n", "\n");
+        if (!existsSync(candidate)) {
+            continue;
         }
+        // A shared library has to be *beside the executable* when it loads, not
+        // merely on the link line — the link only records that it is wanted.
+        for (const file of options.beside ?? []) {
+            copyFileSync(file, join(dirname(candidate), basename(file)));
+        }
+        const run = spawnSync(candidate, [], {encoding: "utf8"});
+        if (run.error !== undefined) {
+            throw new Error(`could not run ${candidate}: ${run.error.message}`);
+        }
+        if (run.status !== 0) {
+            throw new Error(`${candidate} exited ${run.status}:\n${run.stderr ?? ""}`);
+        }
+        return (run.stdout ?? "").replaceAll("\r\n", "\n");
     }
     throw new Error(`no consumer executable was produced in ${build}`);
 }
@@ -579,4 +599,94 @@ describe("library targets", () => {
             expect(result.importLibrary).toMatch(/\.lib$/);
         }
     });
+
+    test("a C program links a `shared-lib` and frees the strings it is handed", async () => {
+        // A DLL exports **nothing** it is not told to, and what it was told
+        // used to be the module's own functions and no more — while the header
+        // beside it declared `gf_string_free` for the consumer to call. The two
+        // disagreed, and on Windows the consumer could not link at all.
+        //
+        // The runtime is *inside* this DLL, so the DLL is the only thing with a
+        // definition to publish. Sharing a heap is a separate question with a
+        // separate answer (`runtime: "shared"`); this is only about the surface
+        // being honest, and a C consumer allocating and freeing through it is
+        // the one test that proves the header is not lying.
+        const {project, result} = await compileSource(
+            "shared-lib-strings",
+            `export function greet(name: string): string { return \`hi \${name}\`; }\n`,
+            {type: "shared-lib"},
+        );
+        expect(result.ok).toBe(true);
+
+        const headerText = readFileSync(result.headerPath!, "utf8");
+        expect(headerText).toContain("void gf_string_free(GoblinString s);");
+
+        const stdout = buildConsumer({
+            dir: project.dir,
+            library: result.importLibrary ?? result.output!,
+            header: result.headerPath!,
+            // No `runtime`: it is in the DLL. Linking the archive as well would
+            // give the consumer a second copy, which is the bug from the far side.
+            beside: [result.output!],
+            main: `#include <stdio.h>
+#include "main.h"
+
+int main(void) {
+  /* Both directions across the boundary, and both allocations released through
+     the library's own runtime — which is reachable only because the DLL now
+     exports what its header promised. */
+  GoblinString name = gf_string_from_cstr("goblin");
+  GoblinString loud = greet(name);
+  printf("%s\\n", loud);
+  gf_string_free(loud);
+  gf_string_free(name);
+  return 0;
+}
+`,
+        });
+        expect(stdout).toBe("hi goblin\n");
+    }, CMAKE_TIMEOUT);
+
+    test("the header says which runtime to link, and the answer is not the same one", async () => {
+        // Getting this wrong is not a compile error, it is a second runtime —
+        // so the three cases have to say three different things rather than one
+        // convenient thing. The archive case genuinely needs the consumer to
+        // supply the runtime; the DLL case genuinely needs them not to.
+        const source = `export function add(a: i32, b: i32): i32 { return a + b; }\n`;
+
+        const archive = await library("advice-archive", source);
+        expect(archive.headerText).toContain("Link the Goblin runtime alongside this library");
+
+        const dll = await compileSource("advice-dll", source, {type: "shared-lib"});
+        const dllHeader = readFileSync(dll.result.headerPath!, "utf8");
+        expect(dllHeader).toContain("import stub and nothing else");
+        expect(dllHeader).not.toContain("Link the Goblin runtime alongside this library");
+
+        const sharedRt = await compileSource("advice-dll-shared-rt", source, {
+            type: "shared-lib",
+            runtime: "shared",
+        });
+        expect(readFileSync(sharedRt.result.headerPath!, "utf8")).toContain(
+            "the Goblin runtime's beside it",
+        );
+    }, CMAKE_TIMEOUT);
+
+    test("a `shared-lib` publishes runtime symbols only when its header declares them", async () => {
+        // The invariant, checked from the other side: the export list and the
+        // header read one list, so a library whose boundary never mentions a
+        // `string` publishes none of them and its header declares none.
+        const {result} = await compileSource(
+            "shared-lib-no-strings",
+            `export function add(a: i32, b: i32): i32 { return a + b; }\n`,
+            {type: "shared-lib"},
+        );
+        expect(result.ok).toBe(true);
+        expect(readFileSync(result.headerPath!, "utf8")).not.toContain("gf_string_free");
+
+        if (result.output?.endsWith(".dll") === true) {
+            const def = readFileSync(result.output.replace(/\.dll$/i, ".def"), "utf8");
+            expect(def).toContain("add");
+            expect(def).not.toContain("gf_string_free");
+        }
+    }, CMAKE_TIMEOUT);
 });

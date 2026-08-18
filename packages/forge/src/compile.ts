@@ -31,7 +31,7 @@ import { copyFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
 import { elaborateDrops } from "./drop-elaboration.ts";
-import { emitHeader, HeaderError } from "./header.ts";
+import { emitHeader, HeaderError, runtimeSymbols } from "./header.ts";
 import { lower } from "./lower.ts";
 
 export type OutputKind = "bin" | "static-lib" | "shared-lib";
@@ -244,7 +244,16 @@ export class Compiler {
         if (kind !== "bin" && (this.#options.emit?.header ?? true)) {
             headerPath = join(outDir, `${moduleName}.h`);
             try {
-                writeFileSync(headerPath, emitHeader(lowered.module, {name: moduleName}));
+                writeFileSync(
+                    headerPath,
+                    emitHeader(lowered.module, {
+                        name: moduleName,
+                        // `kind` is not `bin` here, and the two library kinds
+                        // want opposite advice about linking the runtime.
+                        kind: kind === "shared-lib" ? "shared-lib" : "static-lib",
+                        runtime: this.#options.runtime ?? "static",
+                    }),
+                );
             } catch (error) {
                 if (!(error instanceof HeaderError)) {
                     throw error;
@@ -311,7 +320,29 @@ export class Compiler {
             rpathOrigin: shared,
             // Only Windows needs these, and only for a DLL: an ELF shared object
             // publishes every default-visibility symbol on its own.
-            exports: kind === "shared-lib" ? [...artifact.defines] : [],
+            //
+            // The module's own defines are not the whole list. When a `string`
+            // crosses, the generated header also declares `gf_string_free` and
+            // its two companions for the consumer to call — and a header that
+            // names a symbol the library does not export is a consumer who
+            // cannot link. The runtime is *inside* this DLL in that case, so
+            // this is the only thing that has a definition to publish.
+            //
+            // Linked shared it has an import rather than a definition, and the
+            // consumer links the runtime's own import library instead. Not
+            // because re-exporting would fail — `link.exe` accepts an imported
+            // symbol in a `.def` quite happily and emits a forwarder, which was
+            // checked rather than assumed. Because it would make the platforms
+            // disagree: ELF records an import as an undefined entry rather than
+            // a definition, so a consumer there has to link the runtime whether
+            // this list names it or not. One rule for both is worth more than
+            // one fewer import library on one of them.
+            exports: kind === "shared-lib"
+                ? [
+                    ...artifact.defines,
+                    ...(shared ? [] : runtimeSymbols(lowered.module)),
+                ]
+                : [],
         });
         diagnostics.push(...report.diagnostics.map(fromBackend));
         if (!report.ok || report.output === undefined) {

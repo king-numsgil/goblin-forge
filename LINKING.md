@@ -526,6 +526,30 @@ A `static-lib` is unaffected either way. An archive is not a link, so it carries
 only its own objects and its consumer supplies the runtime once, at the
 executable.
 
+### What a consumer of a `shared-lib` links
+
+A DLL exports nothing it is not told to, and what it is told now includes the
+runtime functions its own header declares. When a `string` crosses the boundary
+the header declares `gf_string_from_cstr`, `gf_string_clone` and
+`gf_string_free` — and the library publishes exactly those three, because the
+export list and the header are generated from one list. A library whose
+boundary never mentions a `string` publishes none of them and declares none.
+
+What the consumer links depends on how the library was built, and the header
+says which case it is in its banner:
+
+| Library | Consumer links | And must not link |
+|---|---|---|
+| `static-lib` | the archive, **and** the Goblin runtime archive | — |
+| `shared-lib`, `runtime: "static"` | its import stub, and nothing else | the runtime archive — that is a second copy |
+| `shared-lib`, `runtime: "shared"` | its import stub **and** `goblin_runtime`'s | the runtime archive |
+
+The middle row is the one to be careful with. The runtime is inside the DLL, so
+adding the runtime archive to the consumer's link line puts a second copy in the
+program — a second heap and a second allocation counter, which is the same fault
+as two Goblin artefacts each carrying their own, arrived at from the other side.
+It is a link line that succeeds, so nothing tells you but the behaviour.
+
 ### Adding your own library
 
 `nativeLibs` takes **paths**, resolved against the build script's directory —
