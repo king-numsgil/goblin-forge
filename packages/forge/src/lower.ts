@@ -123,6 +123,40 @@ const STRING_FROM_BYTES = "stringFromBytes";
 const POINTER_ADDRESS = "address";
 
 /**
+ * The prelude declarations that are ordinary `extern "C"` imports.
+ *
+ * Everything else the prelude declares is a name this file recognises and lowers
+ * itself. These eight are the exception: mimalloc's own entry points, already in
+ * every binary because the runtime allocates through them, published under their
+ * C names so a library that lets its allocator be replaced can be handed the
+ * program's own heap.
+ *
+ * An **allowlist**, rather than "any prelude declaration no intrinsic claims",
+ * because what matters is how the rule fails. A new intrinsic added to the
+ * prelude and not yet lowered should be `GF0001` with a caret under it; under a
+ * general fallback it would instead be an unresolved external from the linker,
+ * with no file and no line — the shape of error REWRITE-PLAN §8 exists to stop.
+ *
+ * The value is the symbol actually called, and it is deliberately not the name
+ * written. `mi_malloc` is the spelling because it has to type-check against a
+ * signature C wrote; `gf_mi_malloc` is a thin trampoline in the runtime,
+ * because a cdylib exports the Rust symbols it defines and does *not*
+ * re-export C symbols reaching it from a native static library — a difference
+ * that has three per-platform workarounds, one of which is a hard link error
+ * on Mach-O. A Rust symbol needs no workaround on any of them.
+ */
+const PRELUDE_EXTERNS: ReadonlyMap<string, string> = new Map([
+    ["mi_malloc", "gf_mi_malloc"],
+    ["mi_calloc", "gf_mi_calloc"],
+    ["mi_realloc", "gf_mi_realloc"],
+    ["mi_free", "gf_mi_free"],
+    ["mi_zalloc", "gf_mi_zalloc"],
+    ["mi_malloc_aligned", "gf_mi_malloc_aligned"],
+    ["mi_realloc_aligned", "gf_mi_realloc_aligned"],
+    ["mi_usable_size", "gf_mi_usable_size"],
+]);
+
+/**
  * The methods `CorePointer<T>` declares.
  *
  * Recognised as a *set* rather than one name at a time, and resolved before the
@@ -175,11 +209,15 @@ const RUNTIME = {
      */
     arrayPop: "gf_array_pop",
     /**
-     * `gf_alloc(size, align)` and `gf_free(p, size, align)` — raw storage.
+     * `gf_alloc(size, align)` and `gf_free(p)` — raw storage.
      *
      * The runtime hands out and takes back bytes; constructing and destroying
      * what goes in them is the backend's, which is why the size and alignment
      * are arguments rather than something a type parameter would supply.
+     *
+     * The asymmetry is the allocator's. mimalloc is *asked* what a block was, so
+     * only the way in needs a layout — and the way out has no number a call site
+     * could compute differently from the one that allocated it.
      */
     alloc: "gf_alloc",
     free: "gf_free",
@@ -187,11 +225,11 @@ const RUNTIME = {
      * `new T[n]` and `delete[]`, with the count in a cookie behind the pointer.
      *
      * The count has to survive the allocation because `freeArray` is given only a
-     * pointer and needs two things it does not carry: how many destructors to run
-     * and how many bytes to release. C++ writes the cookie only when the
-     * destructor is non-trivial, because `operator delete[]` can ask the
-     * allocator how big the block was; Rust's cannot be asked, so it is always
-     * written and `gf_alloc_array_count` is how the loop bound is recovered.
+     * pointer and needs something it does not carry: how many destructors to run.
+     * C++ writes the cookie only when the destructor is non-trivial, since
+     * `operator delete[]` can ask the allocator how big the block was — and this
+     * one could ask too, but a byte count is not an element count, so the cookie
+     * is written unconditionally and `gf_alloc_array_count` reads it back.
      */
     allocArray: "gf_alloc_array",
     allocArrayCount: "gf_alloc_array_count",
@@ -764,6 +802,12 @@ class Lowerer {
                 (file) =>
                     !file.isDeclarationFile && !this.#program.isSourceFileFromExternalLibrary(file),
             );
+
+        // The prelude's plain C imports, which the loop below never reaches: it
+        // walks the program's own files, and the prelude is a declaration file.
+        // Only the *record* is made here — `externIdOf` makes the MIR extern at
+        // the first call site, so a program that names none of them carries none.
+        this.#declarePreludeExterns();
 
         // Before anything is declared: whether a function's address is taken
         // decides its calling convention, and a declaration cannot be revised once
@@ -1857,12 +1901,16 @@ class Lowerer {
      * of it fails to link on the half you did not call — which is not how a C
      * header behaves. {@link externIdOf} makes it at the first call site.
      */
-    #declareImport(node: ts.FunctionDeclaration): void {
+    #declareImport(node: ts.FunctionDeclaration, symbol?: string): void {
         if (node.name === undefined) {
             return;
         }
-        const name = node.name.text;
-        const key = this.#keyOf(node, name);
+        // The symbol, which is the name written unless a caller says otherwise.
+        // Only {@link PRELUDE_EXTERNS} does, and only because the runtime
+        // trampolines those under `gf_` names it can export from a shared
+        // library on every platform.
+        const name = symbol ?? node.name.text;
+        const key = this.#keyOf(node, node.name.text);
         if (this.#functions.has(key)) {
             return;
         }
@@ -1897,6 +1945,32 @@ class Lowerer {
             exported: true,
             declaration: node,
         });
+    }
+
+    /**
+     * {@link PRELUDE_EXTERNS}, registered so that a call site resolves to one.
+     *
+     * They go through {@link #declareImport} like any other body-less
+     * declaration, which is the whole point: an `mi_malloc` call is an ordinary
+     * C call and `mi_malloc` written as a *value* is an ordinary code address,
+     * because neither goes down a path that knows the name. That is what lets
+     * the four SDL wants be passed to `SDL_SetMemoryFunctions` directly.
+     */
+    #declarePreludeExterns(): void {
+        for (const file of this.#program.getSourceFiles()) {
+            if (!file.isDeclarationFile) {
+                continue;
+            }
+            for (const statement of file.statements) {
+                if (!ts.isFunctionDeclaration(statement) || statement.name === undefined) {
+                    continue;
+                }
+                const symbol = PRELUDE_EXTERNS.get(statement.name.text);
+                if (symbol !== undefined) {
+                    this.#declareImport(statement, symbol);
+                }
+            }
+        }
     }
 
     /** Whether some other declaration of this name in this build has a body. */
@@ -6445,7 +6519,6 @@ class BodyLowerer {
             return undefined;
         }
         const pointee = subject.type.pointee;
-        const ty = this.#outer.tyOf(pointee, expression);
 
         // The value first, then its storage — a destructor is still reading live
         // memory when it runs.
@@ -6478,15 +6551,10 @@ class BodyLowerer {
             });
         }
 
-        const size = this.#temporaryTyped(expression, USIZE, {kind: "SizeOf", value: ty});
-        const align = this.#temporaryTyped(expression, USIZE, {kind: "AlignOf", value: ty});
-        if (size === undefined || align === undefined) {
-            return undefined;
-        }
         return this.#callRuntime(
             expression,
             RUNTIME.free,
-            [{operand: {kind: "Copy", value: place}, type: subject.type}, size, align],
+            [{operand: {kind: "Copy", value: place}, type: subject.type}],
             VOID,
         );
     }
@@ -6687,13 +6755,6 @@ class BodyLowerer {
             return undefined;
         }
         const element = subject.type.pointee;
-        const ty = this.#outer.tyOf(element, expression);
-
-        const size = this.#temporaryTyped(expression, USIZE, {kind: "SizeOf", value: ty});
-        const align = this.#temporaryTyped(expression, USIZE, {kind: "AlignOf", value: ty});
-        if (size === undefined || align === undefined) {
-            return undefined;
-        }
 
         const place = this.#placeOfSubject(expression, subject);
         if (place === undefined) {
@@ -6705,7 +6766,7 @@ class BodyLowerer {
             const count = this.#callRuntime(
                 expression,
                 RUNTIME.allocArrayCount,
-                [pointer, align],
+                [pointer],
                 USIZE,
             );
             if (count === undefined) {
@@ -6731,7 +6792,7 @@ class BodyLowerer {
 
         // The elements first, then the storage — a destructor is still reading live
         // memory when it runs.
-        return this.#callRuntime(expression, RUNTIME.freeArray, [pointer, size, align], VOID);
+        return this.#callRuntime(expression, RUNTIME.freeArray, [pointer], VOID);
     }
 
     /**

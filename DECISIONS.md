@@ -612,8 +612,11 @@ obsolete: every operation needing a pointee's layout already funnels through
 `p.deref()`, `p.free()`, `p.freeArray()`, `alloc`, `allocArray`, `sizeOf`,
 `alignOf` and `zeroed` (`GF0305`). They have to be written down because `void`
 *has* a layout — nought bytes, aligned to one — so not one of them fails on its
-own. `free()` is the one that would not merely be wrong: `gf_free` is Rust's
-`dealloc` and must be handed the layout the block was allocated with.
+own. `free()` is the one that would not merely be wrong: it would run no
+destructor, so whatever the value owned is leaked in silence. (As first written
+this said `gf_free` was Rust's `dealloc` and had to be handed the layout, making
+the call a corrupted heap. That stopped being true when the allocator became
+mimalloc — see §15 — and the refusal now rests on the destructor alone.)
 
 **Erasing is implicit; reifying is written.** C's asymmetry, for C's reason —
 throwing the type away cannot be wrong, and guessing it back can. tsc already
@@ -709,6 +712,74 @@ rule a borrow gets, enforced by the same `borrowsTemporary` flag and reported as
 the same `GF0234`: the call finishes inside the enclosing full-expression, so a
 pointer to a temporary array is alive for exactly as long as the call, and a
 binding would outlive it.
+
+---
+
+## §15 — The allocator is mimalloc *(settled and built, 2026-08-18)*
+
+The runtime called `std::alloc::{alloc, dealloc}` at seven sites. It now calls
+mimalloc's C API directly, by FFI, bypassing `std::alloc` entirely. There are
+three separate things here and conflating them is the mistake to avoid.
+
+**The direct `mi_malloc`/`mi_free` calls are the substance.** Nearly all of a
+Goblin program's allocation traffic goes through `gf_alloc`, `gf_string_*` and
+the two array families, so this is both the Windows performance win — the
+platform default is the weakest of the three — and the thing that changes the
+ABI. `libc` was already the runtime's only dependency and a `cc` toolchain is
+already required for linking on every user's machine, so mimalloc's C source
+compiles through a path that had to exist anyway.
+
+**Every free in the ABI now takes one argument.** `gf_free(p)`,
+`gf_free_array(p)`, `gf_array_free(a)`, `gf_alloc_array_count(p)`. Rust's
+`dealloc` is *given* the layout and cannot be asked; mimalloc can, so the size
+and the alignment stopped being numbers a call site carries — and therefore
+stopped being numbers a call site can carry wrongly. Ownership stays written
+down, and one fewer thing about it has to be re-derived at each site.
+
+The alignment half is subtler and is the part worth recording. The obvious
+arrangement — round the header up to the element's alignment and align the
+*base* — is what the code did, and it forces the free to be told the alignment
+again to find its way back. Instead the headers are **fixed sizes** (one word
+for an `allocArray` run, two for a `T[]`) and it is `base + offset` that is
+aligned, through `mi_malloc_aligned_at`. The base is then a constant distance
+behind the pointer, which is what makes the one-argument free possible at all.
+
+That also fixed a live bug rather than only enabling an ABI. `T[]` aligned the
+block and put the elements at a fixed 16 bytes past it, so any element wanting
+more than 16 was under-aligned. Unreachable today, since nothing the layout
+engine produces exceeds 8 — and exactly what the planned SIMD work would have
+hit first. `packages/runtime/native/src/lib.rs`'s tests cover alignments up to
+128 for that reason: it is the one arrangement no Goblin program can currently
+ask for, so the language cannot test it.
+
+**`#[global_allocator]` is a separate, smaller step**, taken in the same change
+and worth keeping distinct. It covers the runtime's own incidental Rust
+allocations (`to_string` in the number conversions, `std::io` buffering) and the
+compiler's, in the napi addon. It would **not** have delivered the ABI
+simplification on its own: `GlobalAlloc::dealloc` takes a `Layout` by the trait's
+definition, so a `gf_free` left on `std::alloc` would still have needed one.
+
+**`p.erase().free()` is still refused, for a different reason.** It was a
+corrupted heap, because the layout could not be reconstructed. It is now a
+silent leak, because no destructor can run without a type. `GF0305` stands and
+its prose was rewritten; POINTER-ERASURE.md carries the amendment beside the
+original claim rather than in place of it.
+
+**Sharing the heap is opt-in and needs no override machinery.** `mi_malloc`,
+`mi_calloc`, `mi_realloc`, `mi_free`, `mi_zalloc`, `mi_malloc_aligned`,
+`mi_realloc_aligned` and `mi_usable_size` are declared in the prelude as
+ordinary `extern "C"` imports, so `SDL_SetMemoryFunctions(mi_malloc, mi_calloc,
+mi_realloc, mi_free)` is a line that compiles — the signatures match C's
+exactly. No `mimalloc-override` feature and no redirect DLL: that machinery
+exists for *unqualified* `malloc()` calls in third-party code, which a library's
+own hook sidesteps.
+
+These eight are the only prelude declarations that are not intrinsics, and they
+are an **allowlist** in `lower.ts` rather than a general "any prelude
+declaration nothing else claims is an extern" rule. The fallback matters when it
+is wrong: a new intrinsic added to the prelude and not yet lowered should be
+`GF0001` with a caret under it, not an unresolved external from the linker with
+no file and no line.
 
 ---
 

@@ -838,6 +838,94 @@ declare function cstring(value: string): CString;
 declare function cstringFree(value: CString): void;
 
 // ---------------------------------------------------------------------------
+// The allocator, by its C name
+//
+// Every Goblin program links mimalloc, because the runtime allocates through
+// it: `new`, `alloc`, a `string`, a `T[]` — all of it is `mi_malloc` underneath.
+// These eight are that same allocator under its own C names, and they are the
+// only names in this prelude that are **not** intrinsics: each one is an
+// ordinary `extern "C"` call to a symbol already in the binary.
+//
+// They exist for one job. A C library that lets its allocator be replaced —
+// SDL's `SDL_SetMemoryFunctions`, and it is far from alone — wants four
+// function pointers whose signatures are exactly C's `malloc`, `calloc`,
+// `realloc` and `free`. Handing it these makes the library allocate from the
+// same heap the program does, which turns two allocators competing over one
+// address space into one:
+//
+// ```ts
+// declare function SDL_SetMemoryFunctions(
+//   malloc_fn: (size: usize) => Pointer<unknown> | null,
+//   calloc_fn: (count: usize, size: usize) => Pointer<unknown> | null,
+//   realloc_fn: (mem: Pointer<unknown> | null, size: usize) => Pointer<unknown> | null,
+//   free_fn: (mem: Pointer<unknown> | null) => void,
+// ): boolean;
+//
+// SDL_SetMemoryFunctions(mi_malloc, mi_calloc, mi_realloc, mi_free);
+// ```
+//
+// Write the parameter types **exactly** as above. A function pointer is checked
+// one level in, so a `(size: usize) => Pointer<unknown>` that drops the `| null`
+// is a different type from `mi_malloc` and is refused — which is the check
+// doing its job, because a `malloc` that cannot fail is a claim C does not make.
+//
+// Two things to know before reaching for them:
+//
+//   * **A block from here is not a Goblin value.** Nothing constructs into it,
+//     nothing destroys out of it, and no scope releases it. `alloc<T>()` is what
+//     you want for a `T`; these are for handing an allocator to someone else.
+//   * **The library has to be told before it allocates.** SDL wants
+//     `SDL_SetMemoryFunctions` before `SDL_Init`. Memory a library took from its
+//     own allocator before the swap must still go back to that one, and passing
+//     it to `mi_free` afterwards is heap corruption rather than a leak.
+// ---------------------------------------------------------------------------
+
+/** C's `malloc`. Null when the allocation fails. */
+declare function mi_malloc(size: usize): Pointer<unknown> | null;
+
+/** C's `calloc`: `count * size` bytes, zeroed. */
+declare function mi_calloc(count: usize, size: usize): Pointer<unknown> | null;
+
+/**
+ * C's `realloc`. Null on failure, and the original block is **still live** —
+ * assigning the result over the only copy of the pointer leaks it, exactly as
+ * it does in C.
+ */
+declare function mi_realloc(mem: Pointer<unknown> | null, size: usize): Pointer<unknown> | null;
+
+/** C's `free`. A null pointer is a no-op, as it is in C. */
+declare function mi_free(mem: Pointer<unknown> | null): void;
+
+/** `size` bytes, zeroed. `mi_calloc` without the multiplication. */
+declare function mi_zalloc(size: usize): Pointer<unknown> | null;
+
+/**
+ * `size` bytes on an `align` boundary, where `align` is a power of two.
+ *
+ * The reason this family is worth having at all: a block from here goes back
+ * through the same one-argument `mi_free`, whatever its alignment. Windows'
+ * `_aligned_malloc` needs `_aligned_free` and pairing them wrongly is
+ * undefined; there is no second free here to pair wrongly.
+ */
+declare function mi_malloc_aligned(size: usize, align: usize): Pointer<unknown> | null;
+
+/** `mi_realloc`, keeping the block on an `align` boundary. */
+declare function mi_realloc_aligned(
+    mem: Pointer<unknown> | null,
+    size: usize,
+    align: usize,
+): Pointer<unknown> | null;
+
+/**
+ * How many bytes are actually usable at `mem` — at least what was asked for,
+ * and often more, because a request is rounded up to a size class.
+ *
+ * Zero for a null pointer. Undefined for anything this allocator did not hand
+ * out, which includes a pointer from a C library that never took the swap.
+ */
+declare function mi_usable_size(mem: Pointer<unknown> | null): usize;
+
+// ---------------------------------------------------------------------------
 // console
 //
 // The output methods, and only those. `log`, `info` and `debug` write to

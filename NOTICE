@@ -40,6 +40,23 @@ attribution obligations follow the artefact rather than the repository.
   https://github.com/rust-lang/libc
   Used by the Goblin runtime, which is statically linked into every program.
 
+  mimalloc                        MIT
+  (mimalloc, libmimalloc-sys)
+  Microsoft Corporation
+  https://github.com/microsoft/mimalloc
+  The allocator. Every allocation a compiled program makes goes through it and
+  its C object code is linked into every binary; the prelude also publishes its
+  entry points under their own C names, so a program can hand the same heap to
+  a library. It is the compiler's own allocator too, in the native backend.
+  One wrinkle for the paragraph above: mimalloc's C source is vendored inside
+  the `libmimalloc-sys` crate and compiled from there. Still fetched by cargo
+  rather than kept in this repository, but it is C source in a Rust crate
+  rather than a Rust crate, and the licence to read is mimalloc's own.
+
+  cty                             MIT OR Apache-2.0
+  https://github.com/japaric/cty
+  C type aliases, by way of libmimalloc-sys.
+
 --------------------------------------------------------------------------------
 Used to build the compiler
 --------------------------------------------------------------------------------

@@ -32,8 +32,25 @@
 
 use core::mem::align_of;
 use core::sync::atomic::{AtomicI64, AtomicBool, Ordering};
-use std::alloc::{Layout, alloc, dealloc};
 use std::io::Write;
+
+use core::ffi::c_void;
+
+use libmimalloc_sys::{
+    mi_calloc, mi_free, mi_malloc, mi_malloc_aligned, mi_malloc_aligned_at, mi_realloc,
+    mi_realloc_aligned, mi_usable_size, mi_zalloc,
+};
+
+/// The runtime's *own* incidental Rust allocations — `to_string` in the number
+/// conversions, the buffering inside `std::io` — on the same heap as everything
+/// the program allocates.
+///
+/// Separate from, and much smaller than, the swap below it. `GlobalAlloc` is
+/// handed a `Layout` on the way out by the trait's own definition, so routing
+/// Rust's allocations here buys uniformity and nothing else; it is the *direct*
+/// `mi_malloc`/`mi_free` calls that let a free take one argument.
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 /// A `string`: a pointer to the first byte, with a [`Header`] behind it.
 pub type GfStr = *mut u8;
@@ -143,15 +160,60 @@ extern "C" fn report_leaks() {
 // Allocation
 // ---------------------------------------------------------------------------
 
-fn layout_for(len: usize) -> Layout {
-    // header + bytes + the NUL that makes this a C string.
-    Layout::from_size_align(HEADER + len + 1, ALIGN).expect("string layout")
+/// The alignment `mi_malloc` gives without being asked for one.
+///
+/// Deliberately a machine word rather than mimalloc's `MI_MAX_ALIGN_SIZE` of
+/// 16. mimalloc's own natural-alignment test is `alignment <= size` on top of
+/// the size class, so a one-byte block really can come back 8-aligned and no
+/// more; restating that rule here would be restating it wrongly. Eight is what
+/// holds for every block, and every allocation this runtime makes today is at
+/// or below it — so the branch below always takes the plain `mi_malloc` path
+/// until an over-aligned type exists to need the other one.
+const NATURAL_ALIGN: usize = align_of::<usize>();
+
+/// `bytes` of storage, aligned to `align`, or null.
+///
+/// Where Rust's `alloc`/`dealloc` pair needed the `Layout` on *both* ends,
+/// mimalloc takes every one of these back through the same one-argument
+/// [`mi_free`] — including the over-aligned ones, which is the property the
+/// whole free-side ABI rests on and which `_aligned_malloc` on Windows does
+/// not have.
+unsafe fn raw_alloc(bytes: usize, align: usize) -> *mut u8 {
+    if align <= NATURAL_ALIGN {
+        unsafe { mi_malloc(bytes).cast() }
+    } else {
+        unsafe { mi_malloc_aligned(bytes, align).cast() }
+    }
+}
+
+/// `bytes` of storage where it is `base + offset` — not the base — that lands
+/// on `align`.
+///
+/// What a header in front of the elements needs. Aligning the *base* would put
+/// the elements `offset` bytes past an aligned address, which is only aligned
+/// again when `offset` happens to be a multiple of `align`; that coincidence
+/// held for every type this compiler can lay out today and would stop holding
+/// on the first 32-byte vector.
+unsafe fn raw_alloc_at(bytes: usize, align: usize, offset: usize) -> *mut u8 {
+    if align <= NATURAL_ALIGN {
+        // `offset` is a multiple of `align` here — both headers are whole
+        // machine words — so the base's own alignment is the elements' too.
+        unsafe { mi_malloc(bytes).cast() }
+    } else {
+        unsafe { mi_malloc_aligned_at(bytes, align, offset).cast() }
+    }
+}
+
+/// Hand storage back. One argument, whatever it was allocated with.
+unsafe fn raw_free(pointer: *mut u8) {
+    unsafe { mi_free(pointer.cast()) };
 }
 
 /// Allocate an owned string of `len` bytes, uninitialised.
 unsafe fn allocate(len: usize) -> GfStr {
     install_reporter();
-    let raw = unsafe { alloc(layout_for(len)) };
+    // header + bytes + the NUL that makes this a C string.
+    let raw = unsafe { raw_alloc(HEADER + len + 1, ALIGN) };
     if raw.is_null() {
         std::process::abort();
     }
@@ -240,9 +302,8 @@ pub unsafe extern "C" fn gf_string_free(s: GfStr) {
         if (*header).owned == 0 {
             return;
         }
-        let len = (*header).len as usize;
         LIVE.fetch_sub(1, Ordering::SeqCst);
-        dealloc(header as *mut u8, layout_for(len));
+        raw_free(header as *mut u8);
         trace("free");
     }
 }
@@ -258,6 +319,10 @@ pub unsafe extern "C" fn gf_string_free(s: GfStr) {
 // backend is the only thing that lays a type out and it knows both as
 // constants. That is also why there is no `gf_alloc<T>`: there is nothing to
 // specialise.
+//
+// The *free* side takes neither. mimalloc is asked what a block was, where
+// Rust's `dealloc` had to be told — so the one number a caller could get wrong
+// is not a number any caller passes.
 // ---------------------------------------------------------------------------
 
 /// Storage for one value, **uninitialised**. The caller constructs into it.
@@ -266,8 +331,7 @@ pub unsafe extern "C" fn gf_alloc(size: usize, align: usize) -> *mut u8 {
     install_reporter();
     // A zero-sized type still gets a distinct address, as it does in C++: two
     // objects that exist are not the same object.
-    let layout = Layout::from_size_align(size.max(1), align.max(1)).expect("alloc layout");
-    let raw = unsafe { alloc(layout) };
+    let raw = unsafe { raw_alloc(size.max(1), align.max(1)) };
     if raw.is_null() {
         std::process::abort();
     }
@@ -278,18 +342,96 @@ pub unsafe extern "C" fn gf_alloc(size: usize, align: usize) -> *mut u8 {
 
 /// Release storage from [`gf_alloc`]. The value in it is already destroyed.
 ///
-/// The size and alignment must be the ones it was allocated with — Rust's
-/// allocator is given the layout on the way out as well as on the way in, which
-/// is why they are parameters rather than something the pointer remembers.
+/// One argument. The block remembers its own size and alignment, so there is no
+/// layout for a caller to reconstruct and therefore none to reconstruct wrongly
+/// — which is why an erased `Pointer<unknown>` freed here would leak rather
+/// than corrupt (it is still refused, by `GF0305`, because the *destructor*
+/// cannot run without a type).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gf_free(pointer: *mut u8, size: usize, align: usize) {
+pub unsafe extern "C" fn gf_free(pointer: *mut u8) {
     if pointer.is_null() {
         return;
     }
-    let layout = Layout::from_size_align(size.max(1), align.max(1)).expect("free layout");
     LIVE.fetch_sub(1, Ordering::SeqCst);
-    unsafe { dealloc(pointer, layout) };
+    unsafe { raw_free(pointer) };
     trace("free");
+}
+
+// ---------------------------------------------------------------------------
+// The allocator, published
+//
+// The prelude declares these eight as `mi_malloc`, `mi_calloc` and so on — the
+// C names, because the whole point is that a call to
+// `SDL_SetMemoryFunctions(mi_malloc, …)` type-checks against a signature C
+// wrote. What is *emitted* is the `gf_` name below, and the indirection is
+// worth one jump for a reason that only shows up when the runtime is a shared
+// library.
+//
+// A cdylib exports the Rust symbols it defines. It does **not** re-export C
+// symbols that arrived from a native static library it linked, and each
+// platform hides them differently: MSVC needs `/EXPORT:` per symbol, ELF has a
+// version script whose `local: *` wins over `--export-dynamic-symbol`, and
+// Mach-O refuses `-exported_symbol` beside the `-exported_symbols_list` rustc
+// already passes. Three mechanisms, one of them a hard link error, and only the
+// first testable on the machine this was written on.
+//
+// A trampoline is a Rust symbol, so it exports from a staticlib and a cdylib
+// identically, on all three, with no linker argument anywhere. The second
+// benefit is the one that will matter later: this is *our* ABI, so the
+// allocator underneath it can change again without the published surface
+// moving.
+// ---------------------------------------------------------------------------
+
+/// C's `malloc`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gf_mi_malloc(size: usize) -> *mut c_void {
+    unsafe { mi_malloc(size) }
+}
+
+/// C's `calloc`: `count * size` bytes, zeroed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gf_mi_calloc(count: usize, size: usize) -> *mut c_void {
+    unsafe { mi_calloc(count, size) }
+}
+
+/// C's `realloc`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gf_mi_realloc(pointer: *mut c_void, size: usize) -> *mut c_void {
+    unsafe { mi_realloc(pointer, size) }
+}
+
+/// C's `free`. A null pointer is a no-op, as it is in C.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gf_mi_free(pointer: *mut c_void) {
+    unsafe { mi_free(pointer) };
+}
+
+/// `size` bytes, zeroed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gf_mi_zalloc(size: usize) -> *mut c_void {
+    unsafe { mi_zalloc(size) }
+}
+
+/// `size` bytes on an `align` boundary, freed through the same [`gf_mi_free`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gf_mi_malloc_aligned(size: usize, align: usize) -> *mut c_void {
+    unsafe { mi_malloc_aligned(size, align) }
+}
+
+/// `realloc`, keeping the block on an `align` boundary.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gf_mi_realloc_aligned(
+    pointer: *mut c_void,
+    size: usize,
+    align: usize,
+) -> *mut c_void {
+    unsafe { mi_realloc_aligned(pointer, size, align) }
+}
+
+/// Usable bytes at `pointer`; nought for null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gf_mi_usable_size(pointer: *mut c_void) -> usize {
+    unsafe { mi_usable_size(pointer) }
 }
 
 // ---------------------------------------------------------------------------
@@ -305,26 +447,26 @@ pub unsafe extern "C" fn gf_free(pointer: *mut u8, size: usize, align: usize) {
 //
 // C++ writes the cookie only when the element has a non-trivial destructor,
 // because `operator delete[]` can ask the allocator how big the block was.
-// Rust's allocator cannot be asked — `dealloc` is *given* the layout — so the
-// cookie is unconditional here. One word per array, and the alternative is a
-// size the caller would have to remember and pass back.
+// mimalloc *can* be asked, but the cookie stays unconditional all the same: it
+// carries the **count**, and `p.freeArray()` needs that to know how many
+// destructors to run, which is a question no allocator answers.
 //
-// The header is `max(align, align_of::<usize>())` bytes, and the block is
-// allocated at that alignment too: that keeps the cookie aligned for a `usize`
-// *and* leaves the elements at their own alignment, since the header is then a
-// multiple of both.
+// The header is one machine word and its size is a *constant*, not a function
+// of the element's alignment. That is what lets `gf_free_array` and
+// `gf_alloc_array_count` take a pointer and nothing else: the base is always
+// exactly `RUN_HEADER` bytes back. An over-aligned element is handled by
+// aligning the *elements* rather than the base — see `raw_alloc_at` — instead
+// of by growing the header to `align` bytes and having to be told `align`
+// again on the way out.
 // ---------------------------------------------------------------------------
 
-/// The block's alignment, and the offset from it to the first element.
+/// The hidden word in front of a run: the element count.
 ///
 /// Named for the *run* rather than for the array, because `T[]` a few hundred
 /// lines down has a header of its own and a different one — that one carries a
 /// length and a capacity and belongs to a growable container, where this is one
 /// hidden word behind a raw pointer.
-fn run_header(align: usize) -> (usize, usize) {
-    let align = align.max(align_of::<usize>()).max(1);
-    (align, align)
-}
+const RUN_HEADER: usize = core::mem::size_of::<usize>();
 
 /// Storage for `count` elements, **uninitialised**, with the count remembered.
 ///
@@ -335,20 +477,18 @@ fn run_header(align: usize) -> (usize, usize) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gf_alloc_array(count: usize, stride: usize, align: usize) -> *mut u8 {
     install_reporter();
-    let (align, offset) = run_header(align);
     let bytes = stride
         .checked_mul(count)
-        .and_then(|total| total.checked_add(offset))
+        .and_then(|total| total.checked_add(RUN_HEADER))
         .expect("array too large");
-    let layout = Layout::from_size_align(bytes, align).expect("array alloc layout");
-    let raw = unsafe { alloc(layout) };
+    let raw = unsafe { raw_alloc_at(bytes, align.max(1), RUN_HEADER) };
     if raw.is_null() {
         std::process::abort();
     }
     unsafe { raw.cast::<usize>().write(count) };
     LIVE.fetch_add(1, Ordering::SeqCst);
     trace("alloc");
-    unsafe { raw.add(offset) }
+    unsafe { raw.add(RUN_HEADER) }
 }
 
 /// How many elements [`gf_alloc_array`] was asked for.
@@ -356,27 +496,21 @@ pub unsafe extern "C" fn gf_alloc_array(count: usize, stride: usize, align: usiz
 /// Read back rather than remembered by the caller, which is the whole reason
 /// the cookie exists: `p.freeArray()` names a pointer and nothing else.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gf_alloc_array_count(pointer: *mut u8, align: usize) -> usize {
+pub unsafe extern "C" fn gf_alloc_array_count(pointer: *mut u8) -> usize {
     if pointer.is_null() {
         return 0;
     }
-    let (_, offset) = run_header(align);
-    unsafe { pointer.sub(offset).cast::<usize>().read() }
+    unsafe { pointer.sub(RUN_HEADER).cast::<usize>().read() }
 }
 
 /// Release storage from [`gf_alloc_array`]. The elements are already destroyed.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gf_free_array(pointer: *mut u8, stride: usize, align: usize) {
+pub unsafe extern "C" fn gf_free_array(pointer: *mut u8) {
     if pointer.is_null() {
         return;
     }
-    let (align, offset) = run_header(align);
-    let base = unsafe { pointer.sub(offset) };
-    let count = unsafe { base.cast::<usize>().read() };
-    let bytes = stride * count + offset;
-    let layout = Layout::from_size_align(bytes, align).expect("array free layout");
     LIVE.fetch_sub(1, Ordering::SeqCst);
-    unsafe { dealloc(base, layout) };
+    unsafe { raw_free(pointer.sub(RUN_HEADER)) };
     trace("free");
 }
 
@@ -432,13 +566,18 @@ unsafe fn array_header(a: GfArray) -> *mut ArrayHeader {
     unsafe { a.sub(ARRAY_HEADER) as *mut ArrayHeader }
 }
 
-fn array_layout(cap: u64, stride: u64, align: u64) -> Layout {
-    let size = ARRAY_HEADER + (cap as usize) * (stride as usize);
-    // The header is two words, so it is a multiple of every alignment an
-    // element can have — which is what keeps the first element correctly
-    // aligned while the header sits immediately in front of it.
-    let align = (align as usize).max(ALIGN);
-    Layout::from_size_align(size, align).expect("array layout")
+/// The bytes a buffer of `cap` elements occupies, header included.
+///
+/// The header is a fixed two words and does *not* grow with the element's
+/// alignment. Keeping the elements aligned is [`raw_alloc_at`]'s job: it aligns
+/// `base + ARRAY_HEADER` rather than `base`, so the two are correct
+/// independently. Rounding the header up to the element's alignment instead
+/// would leave `gf_array_free` needing to be told that alignment again to find
+/// its way back — and the previous arrangement, which aligned the *base* and
+/// left the header at two words, quietly under-aligned any element wanting
+/// more than the header's own 16 bytes.
+fn array_bytes(cap: u64, stride: u64) -> usize {
+    ARRAY_HEADER + (cap as usize) * (stride as usize)
 }
 
 /// `main(args: string[])` — argv, copied into an owned `string[]`.
@@ -484,7 +623,8 @@ pub unsafe extern "C" fn gf_array_new(len: u64, stride: u64, align: u64) -> GfAr
         return gf_array_empty();
     }
     install_reporter();
-    let raw = unsafe { alloc(array_layout(len, stride, align)) };
+    let align = (align as usize).max(1);
+    let raw = unsafe { raw_alloc_at(array_bytes(len, stride), align, ARRAY_HEADER) };
     if raw.is_null() {
         std::process::abort();
     }
@@ -529,7 +669,8 @@ pub unsafe extern "C" fn gf_array_push_slot(
             // exponent is what makes a loop of pushes linear rather than
             // quadratic.
             let grown = if cap == 0 { 4 } else { cap * 2 };
-            let raw = alloc(array_layout(grown, stride, align));
+            let align = (align as usize).max(1);
+            let raw = raw_alloc_at(array_bytes(grown, stride), align, ARRAY_HEADER);
             if raw.is_null() {
                 std::process::abort();
             }
@@ -544,7 +685,7 @@ pub unsafe extern "C" fn gf_array_push_slot(
             trace("alloc");
             if cap != 0 {
                 LIVE.fetch_sub(1, Ordering::SeqCst);
-                dealloc(header as *mut u8, array_layout(cap, stride, align));
+                raw_free(header as *mut u8);
                 trace("free");
             }
             *slot = elements;
@@ -570,20 +711,23 @@ pub unsafe extern "C" fn gf_array_pop(a: GfArray) {
 }
 
 /// Release the buffer. The elements are the backend's to destroy first.
+///
+/// The handle and nothing else. The header is a fixed distance behind it and
+/// the block remembers its own size, so neither the stride nor the alignment
+/// has to be carried back to the one place that used to need them.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gf_array_free(a: GfArray, stride: u64, align: u64) {
+pub unsafe extern "C" fn gf_array_free(a: GfArray) {
     if a.is_null() {
         return;
     }
     unsafe {
         let header = array_header(a);
-        let cap = (*header).cap;
         // Static, so there is nothing to give back — the empty array.
-        if cap == 0 {
+        if (*header).cap == 0 {
             return;
         }
         LIVE.fetch_sub(1, Ordering::SeqCst);
-        dealloc(header as *mut u8, array_layout(cap, stride, align));
+        raw_free(header as *mut u8);
         trace("free");
     }
 }
@@ -840,4 +984,122 @@ pub unsafe extern "C" fn gf_is_a(descriptor: *const u8, target: *const u8) -> u8
         current = unsafe { *(current as *const usize).add(1) } as *const u8;
     }
     0
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+//
+// Only the alignment invariants, and deliberately: everything else here is
+// exercised by real programs in `tests/`, which is where a runtime bug should
+// be caught. Alignment is the exception, because the compiler cannot yet lay
+// out a type wanting more than eight bytes — so the one arrangement these
+// functions have to get right for the SIMD work to land is the one no Goblin
+// program can currently ask for.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Alignments a vector type would plausibly want, either side of the
+    /// `NATURAL_ALIGN` branch: SSE, AVX, AVX-512, and one past it.
+    const ALIGNMENTS: [usize; 6] = [1, 8, 16, 32, 64, 128];
+
+    #[test]
+    fn a_headerless_block_lands_on_its_alignment() {
+        for align in ALIGNMENTS {
+            for size in [1usize, 7, 64, 4096] {
+                let p = unsafe { raw_alloc(size, align) };
+                assert!(!p.is_null(), "raw_alloc({size}, {align}) failed");
+                assert_eq!(
+                    p as usize % align,
+                    0,
+                    "raw_alloc({size}, {align}) came back at {p:p}"
+                );
+                unsafe { raw_free(p) };
+            }
+        }
+    }
+
+    /// The property the array headers depend on, and the one the previous
+    /// arrangement got wrong: it is `base + offset` that has to be aligned, not
+    /// `base`. Aligning the base and leaving a fixed header in front of the
+    /// elements only works while the header happens to be a multiple of the
+    /// element's alignment — true of every type this compiler lays out today,
+    /// and false for the first 32-byte vector.
+    #[test]
+    fn a_header_leaves_the_elements_on_their_alignment() {
+        for align in ALIGNMENTS {
+            for offset in [RUN_HEADER, ARRAY_HEADER] {
+                // A batch, held live so the blocks are distinct addresses. One
+                // sample would pass a broken implementation once every `align`
+                // tries by landing right anyway, which is exactly the sort of
+                // test that reports green while the bug ships.
+                let mut blocks = [core::ptr::null_mut::<u8>(); 16];
+                for block in &mut blocks {
+                    let p = unsafe { raw_alloc_at(offset + 256, align, offset) };
+                    assert!(!p.is_null(), "raw_alloc_at(_, {align}, {offset}) failed");
+                    assert_eq!(
+                        (p as usize + offset) % align,
+                        0,
+                        "elements at {offset} past {p:p} are not {align}-aligned"
+                    );
+                    *block = p;
+                }
+                for block in blocks {
+                    unsafe { raw_free(block) };
+                }
+            }
+        }
+    }
+
+    /// A run remembers its count and hands the storage back through a free that
+    /// is told neither the stride nor the alignment.
+    #[test]
+    fn a_run_round_trips_on_the_pointer_alone() {
+        for align in ALIGNMENTS {
+            for count in [0usize, 1, 37] {
+                let stride = align.max(1);
+                let p = unsafe { gf_alloc_array(count, stride, align) };
+                assert_eq!(unsafe { gf_alloc_array_count(p) }, count);
+                assert_eq!(p as usize % align, 0, "elements of a run are misaligned");
+                unsafe { gf_free_array(p) };
+            }
+        }
+    }
+
+    /// The same for `T[]`, whose header is two words rather than one.
+    #[test]
+    fn an_array_round_trips_on_the_handle_alone() {
+        for align in ALIGNMENTS {
+            let stride = align.max(1) as u64;
+            let a = unsafe { gf_array_new(9, stride, align as u64) };
+            assert_eq!(unsafe { gf_array_len(a) }, 9);
+            assert_eq!(a as usize % align, 0, "elements of a `T[]` are misaligned");
+            unsafe { gf_array_free(a) };
+        }
+    }
+
+    /// Freeing the shared empty array is a no-op rather than a free of static
+    /// data — `cap == 0` is what says so, and it is read through the handle the
+    /// same way now that nothing else is passed.
+    #[test]
+    fn the_empty_array_is_never_given_back() {
+        let a = gf_array_empty();
+        unsafe { gf_array_free(a) };
+        unsafe { gf_array_free(a) };
+        assert_eq!(unsafe { gf_array_len(a) }, 0);
+    }
+
+    /// Every free in the ABI takes a null pointer and does nothing with it.
+    #[test]
+    fn a_null_pointer_is_nobodys_block() {
+        unsafe {
+            gf_free(core::ptr::null_mut());
+            gf_free_array(core::ptr::null_mut());
+            gf_array_free(core::ptr::null_mut());
+            gf_string_free(core::ptr::null_mut());
+            assert_eq!(gf_alloc_array_count(core::ptr::null_mut()), 0);
+        }
+    }
 }

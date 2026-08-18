@@ -15,6 +15,8 @@ crate-type = ["staticlib"]
 
 [dependencies]
 libc = "0.2"
+libmimalloc-sys = { version = "0.1.49", features = ["extended"] }
+mimalloc = "0.1.52"
 
 [profile.release]
 opt-level = 3

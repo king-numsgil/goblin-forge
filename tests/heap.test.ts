@@ -1074,9 +1074,9 @@ describe("void pointers", () => {
     test("every operation that would need the pointee is GF0305", async () => {
         // The same list as the opaque handle's, and for a related reason with a
         // sharper edge: `void` *has* a layout — nought bytes, aligned to one — so
-        // not one of these refuses itself. `p[i]` would stride by nothing and
-        // `free` would hand the allocator a size of nothing, which is a corrupt
-        // heap rather than a wrong number.
+        // not one of these refuses itself. `p[i]` would stride by nothing, and
+        // `free` would give the storage back correctly and run no destructor,
+        // leaking whatever the value owned without a word.
         for (const [name, body] of [
             ["index", "const v = raw[1];"],
             ["offset", "const q = raw.offset(1);"],

@@ -1614,10 +1614,7 @@ impl<'a, 'm, M: ClifModule> FunctionTranslator<'a, 'm, M> {
             self.builder.switch_to_block(exit);
         }
 
-        self.call_runtime(
-            RuntimeFn::ArrayFree,
-            &[value, info.stride_call, info.align_call],
-        )?;
+        self.call_runtime(RuntimeFn::ArrayFree, &[value])?;
         Ok(())
     }
 

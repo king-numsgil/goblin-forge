@@ -16,6 +16,7 @@ napi.workspace = true
 napi-derive.workspace = true
 postcard.workspace = true
 serde.workspace = true
+mimalloc.workspace = true
 
 [build-dependencies]
 napi-build.workspace = true

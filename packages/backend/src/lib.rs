@@ -21,6 +21,18 @@ mod summary;
 
 use summary::summarise;
 
+/// The same allocator a compiled program gets, for the compiler itself.
+///
+/// Cranelift's IR is a great many small, short-lived allocations, and this addon
+/// is where all of them happen — the frontend's are V8's and no business of
+/// ours. Windows' default is the weakest of the three platforms', which is what
+/// makes one line worth writing.
+///
+/// Scoped to this dynamic library: it changes where *Rust* asks for memory
+/// inside the addon, and Node's own heap is untouched.
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 /// How the backend was configured for this build.
 #[napi(object)]
 pub struct BackendOptions {

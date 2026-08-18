@@ -78,7 +78,6 @@ export const CODES = {
             "before your first statement, so there is no version of this signature " +
             "that names the two halves separately.",
     },
-
     // -- Widths and arithmetic ----------------------------------------------
     GF0160: {
         title: "implicit narrowing",
@@ -320,13 +319,17 @@ export const CODES = {
             "A pointer to a concrete type may become one implicitly, exactly as `T *` " +
             "converts to `void *` in C. What it cannot do is anything that needs to " +
             "know what is there: `p[i]` and `p.offset(n)` need a stride, `p.free()` " +
-            "and `p.freeArray()` need the size and alignment the allocator was given, " +
-            "and `p.deref()` needs a shape to read through.\n\n" +
-            "The one that would not merely be wrong is `free`. `gf_free` is Rust's " +
-            "`dealloc` and must be handed the layout the block was allocated with; an " +
-            "erased pointer has none, so the call would corrupt the heap rather than " +
-            "return a wrong number. C++ makes `delete (void *)p` undefined for the " +
-            "same reason.\n\n" +
+            "and `p.freeArray()` need a destructor to run and — for a run — a count " +
+            "of how many times to run it, and `p.deref()` needs a shape to read " +
+            "through.\n\n" +
+            "`free` is the one whose reason is worth stating outright, because it is " +
+            "not the storage. `gf_free` takes a pointer and nothing else: mimalloc is " +
+            "asked what a block was, so the bytes really would go back correctly. " +
+            "What cannot happen is the destructor. An erased pointer has no type to " +
+            "run one from, so a `string` field would go unreleased and a class would " +
+            "never reach its own `delete` — a silent leak rather than a corrupt heap, " +
+            "and refused all the same. C++ makes `delete (void *)p` undefined for " +
+            "exactly this reason.\n\n" +
             "Attach the type back before doing any of it — `p.reify<Rect>()` — or " +
             "free it through whatever allocated it. `.address` still works, and so " +
             "does passing it along, which is the whole job of an erased pointer.",

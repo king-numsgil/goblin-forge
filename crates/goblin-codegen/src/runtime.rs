@@ -67,8 +67,12 @@ pub enum RuntimeFn {
     /// `gf_array_pop(a)` — forget the last element, after it has been
     /// destroyed. The capacity is kept, as `std::vector::pop_back` keeps it.
     ArrayPop,
-    /// `gf_array_free(a, stride, align)` — release the buffer. The elements are
-    /// destroyed by emitted code first.
+    /// `gf_array_free(a)` — release the buffer. The elements are destroyed by
+    /// emitted code first.
+    ///
+    /// The handle and nothing else: mimalloc is asked what the block was, where
+    /// Rust's `dealloc` had to be told, so the stride and alignment this used to
+    /// carry are two numbers no call site can now get wrong.
     ArrayFree,
 }
 
@@ -124,7 +128,7 @@ impl RuntimeFn {
             RuntimeFn::ArrayLen => (vec![pointer], Some(pointer)),
             RuntimeFn::ArrayPushSlot => (vec![pointer, types::I64, types::I64], Some(pointer)),
             RuntimeFn::ArrayPop => (vec![pointer], None),
-            RuntimeFn::ArrayFree => (vec![pointer, types::I64, types::I64], None),
+            RuntimeFn::ArrayFree => (vec![pointer], None),
         }
     }
 }

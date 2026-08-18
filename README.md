@@ -263,6 +263,17 @@ Nobody writes a destructor; there is no syntax for one. A value is released
 because its *type* says it owns something. Every test in the suite asserts the
 live allocation count is zero when the program exits, automatically.
 
+The allocator underneath all of it is **mimalloc**, statically linked into every
+program. It is also published under its own C names — `mi_malloc`, `mi_free` and
+six more — so a library that lets its allocator be replaced can be handed the
+program's own heap instead of running a second one beside it:
+
+```ts
+SDL_SetMemoryFunctions(mi_malloc, mi_calloc, mi_realloc, mi_free);
+```
+
+[`LINKING.md`](LINKING.md) has the rules that come with that.
+
 ### Classes are values, and copying one slices
 
 ```ts
@@ -344,8 +355,8 @@ cannot see that, so the compiler refuses it at the declaration.
 `Pointer<unknown>` is C's `void *`, for the C signatures that need one. Any
 pointer converts to one implicitly, `reify<T>()` gets a type back, and
 everything that would read through it in between is refused — including
-`free()`, which would hand the allocator a size it does not have.
-[`LINKING.md`](LINKING.md) has the details.
+`free()`, which has no type to run a destructor from and would leak whatever the
+value owned. [`LINKING.md`](LINKING.md) has the details.
 
 `sizeOf<T>()` and `alignOf<T>()` answer from the same layout engine
 the backend uses.
@@ -552,6 +563,6 @@ Apache License 2.0 — see [`LICENSE`](LICENSE).
 
 [`NOTICE`](NOTICE) attributes the projects this is built on, and separates the
 ones that end up *inside* a compiled program — Cranelift, `target-lexicon`, and
-`libc` by way of the runtime — from the ones that only build or test the
-compiler. That distinction is the one that matters if you ship what this
+`libc` and mimalloc by way of the runtime — from the ones that only build or
+test the compiler. That distinction is the one that matters if you ship what this
 produces.

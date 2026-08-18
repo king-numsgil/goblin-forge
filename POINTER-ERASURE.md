@@ -60,25 +60,41 @@ other members that all need `T`:
 | Member | Needs from `T` |
 |---|---|
 | `p[i]`, `p.offset(n)` | the stride |
-| `p.free()` | the size and alignment, for `gf_free` |
-| `p.freeArray()` | the size, and a destructor per element |
+| `p.free()` | a destructor to run |
+| `p.freeArray()` | a destructor per element |
 | `p.deref()` | a `Reference<T>` to hand back |
 
 ### The `free()` hazard, which is the real one
 
-`gf_free(pointer, size, align)` is Rust's `dealloc`, which **must** be given the
-layout the block was allocated with. So:
+> **Amended when the allocator became mimalloc.** As first written this section
+> said `gf_free(pointer, size, align)` was Rust's `dealloc` and **must** be
+> given the layout the block was allocated with, so that freeing through an
+> erased pointer was a *corrupted heap*. `gf_free(pointer)` now takes a pointer
+> and nothing else, because mimalloc can be asked what a block was. The
+> conclusion below is unchanged and the reason for it is not, so the original
+> claim is corrected rather than quietly deleted — anyone reasoning from "the
+> allocator cannot be asked" is reasoning from something that stopped being
+> true.
 
 ```ts
 const p = alloc<Big>();
 const raw = p.erase();
-raw.free();              // gf_free(raw, ?, ?) — mismatched layout
+raw.free();              // gf_free(raw) — the bytes go back; the destructor does not run
 ```
 
-A mismatched layout is undefined behaviour in the allocator: a corrupted heap,
-not a wrong number. C++ makes `delete (void *)p` undefined for exactly this
-reason. Whatever the design, this call has to be **refused**, and it has to be
-refused by the frontend — the backend does not report user errors.
+The *storage* is now returned correctly. What is lost is the destructor: an
+erased pointer has no type to run one from, so a `Big` holding a `string` gives
+back its own bytes and leaks the string's, and a class never reaches the virtual
+`delete` at slot 0. That is a silent leak rather than a corrupted heap — a
+downgrade in severity, and not one that changes the answer. C++ makes
+`delete (void *)p` undefined for the same reason, and this call still has to be
+**refused** by the frontend, because the backend does not report user errors.
+
+The narrower consequence is worth naming, because it is the sort of thing that
+looks like a reason to relax the rule and is not: it would be sound to allow
+`raw.free()` for a pointee whose destructor is trivial — but an erased pointer
+is precisely the one that cannot say whether its pointee's destructor is
+trivial.
 
 ## What `Pointer<unknown>` could erase to
 

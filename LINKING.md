@@ -360,11 +360,12 @@ through it is refused with `GF0305`, for the same reason and by the same check
 as the opaque handle's `GF0302`: `p[i]`, `p.offset(n)`, `p.deref()`, `p.free()`
 and `p.freeArray()`, plus `alloc` and `allocArray` at that type.
 
-`p.free()` is the one that matters most. `gf_free` is Rust's `dealloc` and must
-be handed the layout the block was allocated with — an erased pointer has none,
-so the call would corrupt the heap rather than return a wrong number. C++ makes
-`delete (void *)p` undefined for exactly this reason. Reify it first, or free it
-through whatever allocated it.
+`p.free()` is the one that matters most, and the reason is the destructor rather
+than the storage. `gf_free` takes a pointer and nothing else — mimalloc is asked
+what a block was — so the bytes would go back correctly; what cannot happen is
+running a destructor from a type that was thrown away, so whatever the value
+owned is leaked without a word. C++ makes `delete (void *)p` undefined for
+exactly this reason. Reify it first, or free it through whatever allocated it.
 
 **`char **` is `Pointer<CString>`**, and the NULL terminator is an ordinary
 null check on the element:
@@ -434,6 +435,56 @@ declare function sqrt(x: f64): f64;
 
 One portability note: **`strdup` is POSIX, `_strdup` is the MSVC spelling.**
 A `declare` names the symbol exactly, so cross-platform code has to pick.
+
+### Sharing the heap with a library that lets you
+
+Every Goblin program allocates through **mimalloc**: `new`, `alloc`, a `string`,
+a `T[]`, all of it. A C library you link brings its own `malloc` — usually the
+platform CRT's — so a program that talks to one is running two allocators over
+one address space, each with its own free lists and its own idea of which pages
+are warm.
+
+Many libraries let you replace theirs, and the prelude publishes mimalloc under
+its own C names so you can hand them the program's:
+
+```ts
+declare function SDL_SetMemoryFunctions(
+  malloc_fn: (size: usize) => Pointer<unknown> | null,
+  calloc_fn: (count: usize, size: usize) => Pointer<unknown> | null,
+  realloc_fn: (mem: Pointer<unknown> | null, size: usize) => Pointer<unknown> | null,
+  free_fn: (mem: Pointer<unknown> | null) => void,
+): boolean;
+
+export function main(): i32 {
+  SDL_SetMemoryFunctions(mi_malloc, mi_calloc, mi_realloc, mi_free);
+  // … SDL_Init and the rest
+  return 0;
+}
+```
+
+The signatures match C's `malloc`, `calloc`, `realloc` and `free` exactly, which
+is the point — there is no shim and no wrapper, only four addresses. Eight
+functions are declared in all: those four, plus `mi_zalloc`,
+`mi_malloc_aligned`, `mi_realloc_aligned` and `mi_usable_size`.
+
+Four things to know:
+
+- **Write the parameter types exactly as above.** A function pointer is checked
+  one level in, so a `(size: usize) => Pointer<unknown>` that drops the `| null`
+  is a different type and is refused — by tsc, as an ordinary assignability
+  failure. A `malloc` that cannot fail is a claim C does not make.
+- **Tell the library before it allocates.** SDL wants this before `SDL_Init`.
+  Memory the library took from its own allocator *before* the swap must still go
+  back to that one; passing it to `mi_free` afterwards is heap corruption rather
+  than a leak.
+- **A block from `mi_malloc` is not a Goblin value.** Nothing constructs into
+  it, nothing destroys out of it, no scope releases it, and it is not counted by
+  the live-allocation check — which counts what the *runtime* handed out and is
+  owed back. `alloc<T>()` is what you want for a `T`.
+- **This is not `malloc` interposition.** Nothing is overridden and no redirect
+  DLL is involved; a library that does not offer a hook keeps its own allocator,
+  and that is fine. The machinery for taking over unqualified `malloc()` calls
+  is deliberately not enabled.
 
 ### Adding your own library
 
