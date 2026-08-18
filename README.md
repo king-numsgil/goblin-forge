@@ -107,8 +107,18 @@ $ goblin-forge init
   src/main.ts
 
 $ goblin-forge
-built ./bin/app          # .exe on Windows
+  checking types… 118 ms
+  lowering to MIR… 24 ms
+  generating code… 6 ms
+  building the runtime… 7.0 s
+  linking… 51 ms
+built ./bin/app in 7.2 s          # .exe on Windows
 ```
+
+Each phase is named before it runs rather than after, because the first build
+compiles the runtime — mimalloc's C source included — and a minute of silence
+reads as a hang. Later builds reuse it and the whole thing takes well under a
+second. `--quiet` leaves only the result line.
 
 A build script *exports* what it wants built rather than calling the compiler:
 

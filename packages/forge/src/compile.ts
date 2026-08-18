@@ -37,6 +37,40 @@ import { lower } from "./lower.ts";
 export type OutputKind = "bin" | "static-lib" | "shared-lib";
 export type OptLevel = "none" | "speed" | "size";
 
+/**
+ * A stage of a build, for progress reporting.
+ *
+ * Named for what is happening rather than for the function that does it, since
+ * the audience is somebody watching a build rather than somebody reading this
+ * file. `runtime` is the one that earns its place on its own: a cold cache
+ * compiles mimalloc from C source, and a minute of silence there is
+ * indistinguishable from a hang.
+ */
+export type BuildPhase =
+    | "check"
+    | "lower"
+    | "codegen"
+    | "header"
+    | "runtime"
+    | "link";
+
+/**
+ * What a build reports as it goes.
+ *
+ * **Begin and end, not just end**, which is the whole point: a phase that takes
+ * a minute has to announce itself *before* it takes the minute. Reporting only
+ * completions would put the message after the wait it was meant to explain.
+ */
+export type BuildEvent =
+    | { readonly kind: "begin"; readonly phase: BuildPhase; readonly detail?: string }
+    | {
+          readonly kind: "end";
+          readonly phase: BuildPhase;
+          /** How long it took, in milliseconds. */
+          readonly ms: number;
+          readonly detail?: string;
+      };
+
 export interface CompileOptions {
     /** The entry module. Resolved against {@link CompileOptions.root}. */
     readonly entry: string;
@@ -103,6 +137,18 @@ export interface CompileOptions {
      * a clean rejection. The test harness turns this on.
      */
     readonly strictInternalErrors?: boolean;
+
+    /**
+     * Called as each phase begins and ends, for a caller that wants to say what
+     * is happening.
+     *
+     * The one field here that is not plain data, and deliberately the only one.
+     * `compile` writes nothing to stdout or stderr — a build is a *result*, and
+     * a library that prints is a library you cannot call twice or call quietly.
+     * Rendering is the caller's, which is why the CLI owns the wording and the
+     * examples stay silent by saying nothing.
+     */
+    readonly onProgress?: (event: BuildEvent) => void;
 }
 
 export interface CompileResult {
@@ -189,11 +235,33 @@ export class Compiler {
         this.#backend = new Backend(backendOptions);
     }
 
+    /**
+     * Run one phase, announcing it either side.
+     *
+     * The `finally` matters: a phase that throws still reports its end, so a
+     * caller rendering "checking types…" on one line and the duration on the
+     * next has no way to be left holding an unterminated line.
+     */
+    #phase<T>(phase: BuildPhase, run: () => T, detail?: string): T {
+        const report = this.#options.onProgress;
+        if (report === undefined) {
+            return run();
+        }
+        const extra = detail === undefined ? {} : {detail};
+        report({kind: "begin", phase, ...extra});
+        const started = performance.now();
+        try {
+            return run();
+        } finally {
+            report({kind: "end", phase, ms: performance.now() - started, ...extra});
+        }
+    }
+
     async build(): Promise<CompileResult> {
         const diagnostics: Diagnostic[] = [];
 
         // 1. tsc. Its verdict is final: nothing downstream runs if it says no.
-        const checked = this.#checker.check();
+        const checked = this.#phase("check", () => this.#checker.check());
         diagnostics.push(...checked.diagnostics);
         diagnostics.push(...checkPreludeIsVisibleToEditors(checked.config));
         if (hasErrors(diagnostics)) {
@@ -203,20 +271,26 @@ export class Compiler {
         // 2. Lower the checked AST to MIR.
         const moduleName = basenameWithoutExtension(this.#resolve(this.#options.entry));
         const kind = this.#options.type ?? "bin";
-        const lowered = lower(checked.program, checked.checker, moduleName, {
-            requireMain: kind === "bin",
-            root: this.#root,
-            entry: this.#resolve(this.#options.entry),
-        });
+        const lowered = this.#phase("lower", () =>
+            lower(checked.program, checked.checker, moduleName, {
+                requireMain: kind === "bin",
+                root: this.#root,
+                entry: this.#resolve(this.#options.entry),
+            }),
+        );
         diagnostics.push(...lowered.diagnostics);
         if (lowered.module === undefined || hasErrors(diagnostics)) {
             return failed(diagnostics);
         }
+        // Bound rather than reached through `lowered` from here on, because the
+        // narrowing above does not survive into a closure and the alternative is
+        // a non-null assertion at every use.
+        const module = lowered.module;
 
         // 2a. Place the drops. A pass over the finished CFG, from the
         // initialisedness of each local at each point — never spliced in by the
         // lowerer, and never derived from a scope-depth counter (REWRITE-PLAN §5.1).
-        elaborateDrops(lowered.module);
+        elaborateDrops(module);
 
         const outDir = this.#resolve(this.#options.outDir ?? "build");
 
@@ -228,31 +302,39 @@ export class Compiler {
         if (this.#options.emit?.ir === true) {
             irPath = join(outDir, `${moduleName}.mir`);
             mkdirSync(outDir, {recursive: true});
-            writeFileSync(irPath, printModule(lowered.module), "utf8");
+            writeFileSync(irPath, printModule(module), "utf8");
         }
 
         // 3. Across the boundary: one buffer, one call.
         const objectPath = join(outDir, `${moduleName}.o`);
-        const artifact = this.#backend.compileModule(encodeModule(lowered.module), objectPath);
+        const artifact = this.#phase("codegen", () =>
+            this.#backend.compileModule(encodeModule(module), objectPath),
+        );
         diagnostics.push(...artifact.diagnostics.map(fromBackend));
         if (!artifact.ok || artifact.objectPath === undefined) {
             return {...failed(diagnostics), ...(irPath !== undefined ? {irPath} : {})};
         }
+        // Bound for the same reason `module` is: the narrowing above does not
+        // reach inside the closures the phases below run in.
+        const objectFile = artifact.objectPath;
 
         // 4. A C header, for a library somebody else has to be able to call.
         let headerPath: string | undefined;
         if (kind !== "bin" && (this.#options.emit?.header ?? true)) {
-            headerPath = join(outDir, `${moduleName}.h`);
+            const path = join(outDir, `${moduleName}.h`);
+            headerPath = path;
             try {
-                writeFileSync(
-                    headerPath,
-                    emitHeader(lowered.module, {
-                        name: moduleName,
-                        // `kind` is not `bin` here, and the two library kinds
-                        // want opposite advice about linking the runtime.
-                        kind: kind === "shared-lib" ? "shared-lib" : "static-lib",
-                        runtime: this.#options.runtime ?? "static",
-                    }),
+                this.#phase("header", () =>
+                    writeFileSync(
+                        path,
+                        emitHeader(module, {
+                            name: moduleName,
+                            // `kind` is not `bin` here, and the two library kinds
+                            // want opposite advice about linking the runtime.
+                            kind: kind === "shared-lib" ? "shared-lib" : "static-lib",
+                            runtime: this.#options.runtime ?? "static",
+                        }),
+                    ),
                 );
             } catch (error) {
                 if (!(error instanceof HeaderError)) {
@@ -278,7 +360,11 @@ export class Compiler {
         // `gf_string_free`. Its consumer links the runtime once, at the executable
         // — which is why `runtimeLibrary` comes back in the result.
         const output = this.#outputPath(kind);
-        const runtime = buildRuntime(this.#options.target);
+        const runtime = this.#phase(
+            "runtime",
+            () => buildRuntime(this.#options.target),
+            this.#options.runtime ?? "static",
+        );
         const selfContained = kind !== "static-lib";
 
         // `shared` links the import stub instead of the archive, so that this
@@ -304,46 +390,50 @@ export class Compiler {
             ? runtime.shared.link
             : runtime.library;
 
-        const report = this.#backend.link({
+        const report = this.#phase(
+            "link",
+            () => this.#backend.link({
+                kind,
+                objects: [objectFile],
+                archives: selfContained
+                    ? [
+                        ...(this.#options.nativeLibs ?? []).map((path) => this.#resolve(path)),
+                        runtimeLink,
+                    ]
+                    : [],
+                systemLibs: selfContained ? [...runtime.systemLibs] : [],
+                output,
+                // Only matters when something shared has to be found beside the
+                // artefact, and only on the platforms that bake a search path in.
+                rpathOrigin: shared,
+                // Only Windows needs these, and only for a DLL: an ELF shared object
+                // publishes every default-visibility symbol on its own.
+                //
+                // The module's own defines are not the whole list. When a `string`
+                // crosses, the generated header also declares `gf_string_free` and
+                // its two companions for the consumer to call — and a header that
+                // names a symbol the library does not export is a consumer who
+                // cannot link. The runtime is *inside* this DLL in that case, so
+                // this is the only thing that has a definition to publish.
+                //
+                // Linked shared it has an import rather than a definition, and the
+                // consumer links the runtime's own import library instead. Not
+                // because re-exporting would fail — `link.exe` accepts an imported
+                // symbol in a `.def` quite happily and emits a forwarder, which was
+                // checked rather than assumed. Because it would make the platforms
+                // disagree: ELF records an import as an undefined entry rather than
+                // a definition, so a consumer there has to link the runtime whether
+                // this list names it or not. One rule for both is worth more than
+                // one fewer import library on one of them.
+                exports: kind === "shared-lib"
+                    ? [
+                        ...artifact.defines,
+                        ...(shared ? [] : runtimeSymbols(module)),
+                    ]
+                    : [],
+            }),
             kind,
-            objects: [artifact.objectPath],
-            archives: selfContained
-                ? [
-                    ...(this.#options.nativeLibs ?? []).map((path) => this.#resolve(path)),
-                    runtimeLink,
-                ]
-                : [],
-            systemLibs: selfContained ? [...runtime.systemLibs] : [],
-            output,
-            // Only matters when something shared has to be found beside the
-            // artefact, and only on the platforms that bake a search path in.
-            rpathOrigin: shared,
-            // Only Windows needs these, and only for a DLL: an ELF shared object
-            // publishes every default-visibility symbol on its own.
-            //
-            // The module's own defines are not the whole list. When a `string`
-            // crosses, the generated header also declares `gf_string_free` and
-            // its two companions for the consumer to call — and a header that
-            // names a symbol the library does not export is a consumer who
-            // cannot link. The runtime is *inside* this DLL in that case, so
-            // this is the only thing that has a definition to publish.
-            //
-            // Linked shared it has an import rather than a definition, and the
-            // consumer links the runtime's own import library instead. Not
-            // because re-exporting would fail — `link.exe` accepts an imported
-            // symbol in a `.def` quite happily and emits a forwarder, which was
-            // checked rather than assumed. Because it would make the platforms
-            // disagree: ELF records an import as an undefined entry rather than
-            // a definition, so a consumer there has to link the runtime whether
-            // this list names it or not. One rule for both is worth more than
-            // one fewer import library on one of them.
-            exports: kind === "shared-lib"
-                ? [
-                    ...artifact.defines,
-                    ...(shared ? [] : runtimeSymbols(lowered.module)),
-                ]
-                : [],
-        });
+        );
         diagnostics.push(...report.diagnostics.map(fromBackend));
         if (!report.ok || report.output === undefined) {
             return {...failed(diagnostics), objects: [artifact.objectPath]};

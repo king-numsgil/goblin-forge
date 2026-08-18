@@ -114,6 +114,31 @@ describe("`init`", () => {
         expect(result.stdout).toContain("built");
     }, TIMEOUT);
 
+    test("a build says what it is doing while it does it", () => {
+        // On stdout beside the result, not on stderr: a successful build says
+        // nothing on stderr, which the assertions above rely on and which is what
+        // makes stderr worth reading when something does go wrong.
+        const result = run(dir);
+        expect(result.stderr).toBe("");
+        for (const phase of ["checking types", "lowering to MIR", "generating code", "linking"]) {
+            expect(result.stdout).toContain(phase);
+        }
+        // The one that justifies the feature: a cold cache spends a minute here
+        // compiling mimalloc, and silence through it reads as a hang.
+        expect(result.stdout).toContain("building the runtime");
+        // Each phase carries its own duration, and the result line the total.
+        expect(result.stdout).toMatch(/checking types… \d+(\.\d+)? m?s/);
+        expect(result.stdout).toMatch(/^built .* in \d+(\.\d+)? m?s$/m);
+    }, TIMEOUT);
+
+    test("`--quiet` leaves only the result", () => {
+        const result = run(dir, "--quiet");
+        expect(result.status).toBe(0);
+        expect(result.stdout).toContain("built");
+        expect(result.stdout).not.toContain("checking types");
+        expect(result.stdout).not.toContain("building the runtime");
+    }, TIMEOUT);
+
     test("a stale project prelude is refreshed by a build, not obeyed", () => {
         // The project's copy is the compiler's file rather than the user's, and it
         // wins over the embedded one so that the editor and the build agree. That

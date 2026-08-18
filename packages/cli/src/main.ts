@@ -26,7 +26,13 @@
  * result: there is one place that reports diagnostics and sets the exit code.
  */
 
-import { compile, type CompileOptions, formatAll, useRuntimeFiles } from "goblin-forge";
+import {
+    type BuildEvent,
+    compile,
+    type CompileOptions,
+    formatAll,
+    useRuntimeFiles,
+} from "goblin-forge";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
@@ -56,6 +62,7 @@ const HELP = `goblin-forge ${VERSION} — a TypeScript subset, compiled to nativ
 USAGE
   goblin-forge [script]        build using a script's default export
   goblin-forge init [dir]      start a project here
+  goblin-forge --quiet         build without the per-phase progress
   goblin-forge --help          this
   goblin-forge --version       print the version
 
@@ -94,6 +101,64 @@ const PROJECT_DIR = ".goblin";
  * project this binary builds, and a `target/` directory per project would
  * rebuild the runtime for each one.
  */
+/**
+ * A duration, in the unit a person would have used.
+ *
+ * Milliseconds up to a second, then seconds — because "1400 ms" and "1.4 s" are
+ * the same number and only one of them is read at a glance.
+ */
+function duration(ms: number): string {
+    return ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`;
+}
+
+/** What a phase is called, for somebody watching rather than reading the source. */
+function phaseLabel(event: BuildEvent): string {
+    switch (event.phase) {
+        case "check":
+            return "checking types";
+        case "lower":
+            return "lowering to MIR";
+        case "codegen":
+            return "generating code";
+        case "header":
+            return "writing the C header";
+        case "runtime":
+            // Worth distinguishing: the shared one is the build that leaves a
+            // second file behind, and seeing it here is the first hint of that.
+            return event.detail === "shared"
+                ? "building the shared runtime"
+                : "building the runtime";
+        case "link":
+            // An archive is genuinely not a link — nothing is resolved and no
+            // runtime is pulled in — and this is the one moment somebody is
+            // watching to find out what happened, so it says which it was.
+            if (event.detail === "static-lib") {
+                return "archiving";
+            }
+            return event.detail === "shared-lib" ? "linking the shared library" : "linking";
+    }
+}
+
+/**
+ * One line per phase: the name before the work, the duration after it.
+ *
+ * The name goes out *unterminated*, so the wait a phase causes happens under
+ * its own label rather than before it. A cold cache spends a minute inside
+ * `building the runtime`, and that minute is the whole reason this exists —
+ * silence there is indistinguishable from a hang.
+ *
+ * No cursor movement and no redrawing, so this reads the same in a terminal, in
+ * a pipe and in CI. `compile` guarantees an `end` for every `begin`, including
+ * one that throws, so the line is always closed before anything else prints.
+ */
+function reportProgress(event: BuildEvent): void {
+    if (event.kind === "begin") {
+        process.stdout.write(`  ${phaseLabel(event)}…`);
+    } else {
+        process.stdout.write(` ${duration(event.ms)}\n`);
+    }
+}
+
 function cacheRoot(): string {
     const base =
         process.env["GOBLIN_CACHE"] ??
@@ -115,6 +180,12 @@ async function main(argv: readonly string[]): Promise<number> {
         process.stdout.write(`${VERSION}\n`);
         return 0;
     }
+
+    // Progress is on by default: the slowest phase is a cargo build that can
+    // run for a minute on a cold cache, and a tool that says nothing through it
+    // is a tool you assume has hung. `--quiet` is for a script that wants only
+    // the result line.
+    const quiet = args.includes("--quiet") || args.includes("-q");
 
     const positional = args.filter((arg) => !arg.startsWith("-"));
     if (positional[0] === "init") {
@@ -158,19 +229,24 @@ async function main(argv: readonly string[]): Promise<number> {
     } else {
         useRuntimeFiles(materialise(cacheRoot()));
     }
+    const started = performance.now();
     const result = await compile({
         ...config,
         root,
         // A project's tsconfig sits beside its build script unless it says
         // otherwise, which is true of every layout anybody actually writes.
         tsconfig: config.tsconfig ?? join(root, "tsconfig.json"),
+        ...(quiet ? {} : {onProgress: reportProgress}),
     });
 
     if (!result.ok) {
-        process.stderr.write(formatAll(result.diagnostics, {color: true, cwd: root}));
+        // Terminated here rather than by the formatter: `formatAll` returns text
+        // and lets the caller decide, which is right for a library and leaves
+        // the shell prompt on the same line as the last caret if nobody does it.
+        process.stderr.write(`${formatAll(result.diagnostics, {color: true, cwd: root})}\n`);
         return 1;
     }
-    process.stdout.write(`built ${result.output}\n`);
+    process.stdout.write(`built ${result.output} in ${duration(performance.now() - started)}\n`);
     // Said out loud, because it is the one build where the output path is not
     // the whole answer to "what do I ship?".
     if (result.runtimeImage !== undefined) {

@@ -15,7 +15,12 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync, statSync } from "node:fs";
 
+import type { BuildEvent } from "goblin-forge";
+
 import { compileSource, run } from "./harness.ts";
+
+/** The smallest program that still runs every phase. */
+const TRIVIAL = `export function main(): i32 { return 0; }\n`;
 
 /** Enough control flow and arithmetic that an optimiser has something to do. */
 const WORKLOAD = `function collatz(start: i32): i32 {
@@ -274,5 +279,96 @@ describe("exit codes", () => {
         expect((await run("exit-neg", "export function main(): i32 { return -1; }\n")).exitCode).toBe(
             255,
         );
+    });
+});
+
+describe("progress reporting", () => {
+    // `compile` writes nothing anywhere; it reports to a callback and the caller
+    // decides what that looks like. These check the *contract* a renderer
+    // depends on, because the CLI writes a phase name without a newline and
+    // closes the line when the phase ends — so an unmatched `begin` is not a
+    // cosmetic problem, it is a line that swallows whatever prints next.
+
+    function record(events: BuildEvent[]) {
+        return (event: BuildEvent) => {
+            events.push(event);
+        };
+    }
+
+    test("every phase that begins also ends", async () => {
+        const events: BuildEvent[] = [];
+        await compileSource("progress-pairs", TRIVIAL, {onProgress: record(events)});
+
+        const open: string[] = [];
+        for (const event of events) {
+            if (event.kind === "begin") {
+                open.push(event.phase);
+            } else {
+                // Ends match the most recent begin: phases do not nest and do not
+                // overlap, which is what lets a duration be printed on the line
+                // the name opened.
+                expect(open.pop()).toBe(event.phase);
+            }
+        }
+        expect(open).toEqual([]);
+        expect(events.length).toBeGreaterThan(0);
+    });
+
+    test("the phases a `bin` runs, in the order it runs them", async () => {
+        const events: BuildEvent[] = [];
+        await compileSource("progress-order", TRIVIAL, {onProgress: record(events)});
+
+        // No header phase: a `bin` publishes nothing for anyone else to call.
+        // The runtime is built before the link and not after, which is the whole
+        // reason the reporting exists — that is the phase that can sit for a
+        // minute on a cold cache.
+        expect(events.filter((e) => e.kind === "begin").map((e) => e.phase)).toEqual([
+            "check",
+            "lower",
+            "codegen",
+            "runtime",
+            "link",
+        ]);
+    });
+
+    test("a library adds the header, and the link says what it produced", async () => {
+        const events: BuildEvent[] = [];
+        await compileSource(
+            "progress-library",
+            "export function add(a: i32, b: i32): i32 { return a + b; }\n",
+            {type: "static-lib", onProgress: record(events)},
+        );
+
+        expect(events.filter((e) => e.kind === "begin").map((e) => e.phase)).toContain("header");
+        // The detail is what lets a renderer say "archiving" rather than
+        // "linking", which for a `static-lib` is the true word: nothing is
+        // resolved and no runtime is pulled in.
+        expect(events.find((e) => e.phase === "link")?.detail).toBe("static-lib");
+    });
+
+    test("a build that fails still closes the phase it failed in", async () => {
+        // The guarantee a renderer cannot do without. This program passes tsc and
+        // fails the width pass, so it dies *inside* `lower`, after `check` has
+        // already completed — the one shape where a missing `end` would leave a
+        // half-written line for the diagnostics to run into.
+        const events: BuildEvent[] = [];
+        const {result} = await compileSource(
+            "progress-failure",
+            "export function main(): i32 {\n  const s = `n=${41 + 1}`;\n  console.log(s);\n  return 0;\n}\n",
+            {onProgress: record(events)},
+        );
+
+        expect(result.ok).toBe(false);
+        const begins = events.filter((e) => e.kind === "begin").length;
+        const ends = events.filter((e) => e.kind === "end").length;
+        expect({begins, ends}).toEqual({begins: ends, ends});
+        expect(events.at(-1)?.kind).toBe("end");
+    });
+
+    test("nothing is reported when nobody is listening", async () => {
+        // The default, and what keeps `examples/*/build.ts` silent: reporting is
+        // a callback rather than a flag, so there is no output to suppress.
+        const {result} = await compileSource("progress-silent", TRIVIAL);
+        expect(result.ok).toBe(true);
     });
 });

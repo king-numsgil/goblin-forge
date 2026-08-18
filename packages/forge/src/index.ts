@@ -20,6 +20,8 @@
  */
 
 export {
+    type BuildEvent,
+    type BuildPhase,
     compile,
     Compiler,
     type CompileOptions,

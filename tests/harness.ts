@@ -21,7 +21,13 @@
 
 import { globalDeclarations, tsconfigBase } from "@goblin-forge/runtime/paths";
 
-import { compile, type CompileResult, type Diagnostic, formatAll } from "goblin-forge";
+import {
+    type BuildEvent,
+    compile,
+    type CompileResult,
+    type Diagnostic,
+    formatAll,
+} from "goblin-forge";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -88,6 +94,13 @@ export interface ProjectOptions {
      * the same way either way.
      */
     readonly runtime?: "static" | "shared";
+    /**
+     * Phase events, for the suite that watches a build report on itself.
+     *
+     * Off unless a test asks, exactly as it is for any other caller: `compile`
+     * reports only when given somewhere to report to.
+     */
+    readonly onProgress?: (event: BuildEvent) => void;
     /**
      * `compilerOptions` written into the project's tsconfig, over the base.
      *
@@ -175,6 +188,7 @@ export async function compileSource(
         emit: {ir: options.emitIr ?? false},
         ...(options.nativeLibs !== undefined ? {nativeLibs: [...options.nativeLibs]} : {}),
         ...(options.runtime !== undefined ? {runtime: options.runtime} : {}),
+        ...(options.onProgress !== undefined ? {onProgress: options.onProgress} : {}),
         // The whole point of §8's hard rule. A backend error must be a loud crash,
         // not something a test can read as the compiler correctly saying no.
         strictInternalErrors: true,
