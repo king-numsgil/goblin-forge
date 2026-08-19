@@ -1,0 +1,132 @@
+/**
+ * The types lowering passes around: what an expression's width came out as,
+ * what a lowered expression is, and what the module knows about a function or
+ * a class member before its body is reached.
+ */
+
+import {
+    type FuncId,
+    type FunctionBuilder,
+    LocalId,
+    type Module as MirModule,
+    type Operand,
+    type SigId,
+} from "@goblin-forge/backend";
+import type { Diagnostic, MachineType } from "@goblin-forge/checker";
+import ts from "typescript";
+import type { ClassInfo, MethodBody } from "../classes.ts";
+
+export interface LowerResult {
+    readonly module: MirModule | undefined;
+    readonly diagnostics: readonly Diagnostic[];
+}
+
+/**
+ * What {@link WidthPass.width} concluded about an expression.
+ *
+ * `poly` is the interesting one: an expression built only from literals has no
+ * width of its own and takes one from wherever it lands. `42` is an `i32` in
+ * one place and a `u8` in another, and neither is a conversion.
+ */
+export type Width =
+    | { readonly kind: "typed"; readonly type: MachineType }
+    | { readonly kind: "poly" }
+    | { readonly kind: "error" };
+
+export const STRING: MachineType = {kind: "string"};
+export const CSTRING_TYPE: MachineType = {kind: "cstring"};
+export const USIZE: MachineType = {kind: "scalar", name: "usize"};
+/** `offset` counts in elements and counts **backwards** too, hence signed. */
+export const ISIZE: MachineType = {kind: "scalar", name: "isize"};
+export const VOID: MachineType = {kind: "void"};
+
+export const POLY: Width = {kind: "poly"};
+export const ERROR: Width = {kind: "error"};
+export const typed = (type: MachineType): Width => ({kind: "typed", type});
+
+/**
+ * A lowered expression, and the type it actually has.
+ *
+ * `temporary` is set when the value lives in a temporary this expression
+ * created. That changes what its single use is allowed to do with it: a
+ * temporary can be *moved* into a binding rather than cloned, and *borrowed*
+ * into a call rather than cloned, because it is already the copy.
+ */
+export interface Typed {
+    readonly operand: Operand;
+    readonly type: MachineType;
+    readonly temporary?: LocalId;
+    /**
+     * A reference to something nothing owns.
+     *
+     * Legal as an *argument*: the temporary dies at the end of the enclosing
+     * full-expression, which is after the call returns. Illegal as a *binding*,
+     * which would outlive it — that is `GF0234`, and it is the one place the
+     * distinction matters, so the flag is set here and read only there.
+     */
+    readonly borrowsTemporary?: true;
+}
+
+export interface FnSignature {
+    readonly params: readonly { name: string; type: MachineType }[];
+    readonly returns: MachineType;
+}
+
+/**
+ * A function the module can call.
+ *
+ * `imported` is a function declared with no body — an `extern "C"` symbol some
+ * other library defines. It is classified by the C rules on both halves of the
+ * call, because the recorded signature is the only thing the two sides share.
+ */
+export type FnRecord =
+    | {
+          readonly kind: "defined";
+          readonly id: FuncId;
+          readonly sig: SigId;
+          readonly signature: FnSignature;
+          /** The name as written, before any qualification. */
+          readonly name: string;
+          readonly exported: boolean;
+      }
+    | {
+          readonly kind: "imported";
+          readonly sig: SigId;
+          readonly signature: FnSignature;
+          readonly name: string;
+          readonly exported: boolean;
+          /** Where it was declared, for the span on the extern when one is made. */
+          readonly declaration: ts.FunctionDeclaration;
+      };
+
+/** One member of a class, waiting for its body to be lowered. */
+export type ClassBody =
+    | { readonly kind: "destructor"; readonly info: ClassInfo; readonly builder: FunctionBuilder }
+    | {
+          readonly kind: "constructor";
+          readonly info: ClassInfo;
+          /** Absent when the class declares none and the constructor is generated. */
+          readonly node: ts.ConstructorDeclaration | undefined;
+          readonly builder: FunctionBuilder;
+          readonly params: readonly { name: string; type: MachineType }[];
+      }
+    | {
+          readonly kind: "method";
+          readonly info: ClassInfo;
+          readonly node: MethodBody;
+          readonly builder: FunctionBuilder;
+          readonly params: readonly { name: string; type: MachineType }[];
+          readonly returns: MachineType;
+      }
+    | {
+          /**
+           * A `static` method — the same shape as a plain function, and lowered as
+           * one. No `this` is bound, so parameters start at local 1 rather than 2.
+           */
+          readonly kind: "static";
+          readonly info: ClassInfo;
+          readonly node: MethodBody;
+          readonly builder: FunctionBuilder;
+          readonly params: readonly { name: string; type: MachineType }[];
+          readonly returns: MachineType;
+      };

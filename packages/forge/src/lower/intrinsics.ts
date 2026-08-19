@@ -1,0 +1,933 @@
+/**
+ * The prelude's memory operations, lowered.
+ *
+ * `alloc`, `free`, `FixedArray`, the pointer methods, and array push and pop.
+ * What they have in common is that each one is a *shape the frontend knows how
+ * to emit* rather than a call it can forward — the size and alignment are the
+ * compiler's to supply, because the runtime hands out bytes and has no idea
+ * what is going in them.
+ */
+
+import type { Operand, Place } from "@goblin-forge/backend";
+import { erase, type MachineType, renderType } from "@goblin-forge/checker";
+import ts from "typescript";
+import { NATIVE_ALIGN_OF, NATIVE_SIZE_OF, NATIVE_ZEROED, NO_UNWIND, RUNTIME } from "./tables.ts";
+import { ISIZE, type Typed, USIZE, VOID } from "./types.ts";
+import { needsDrop, placeOf } from "./util.ts";
+import { WidthPass } from "./width.ts";
+
+export abstract class IntrinsicLowerer extends WidthPass {
+    /**
+     * `sizeOf<T>()` / `alignOf<T>()`.
+     *
+     * The type argument is read from tsc rather than from the expression, because
+     * there is no expression — it is written only in the angle brackets.
+     */
+    protected layoutQuery(expression: ts.CallExpression, size: boolean): Typed | undefined {
+        const argument = expression.typeArguments?.[0];
+        if (argument === undefined) {
+            this.outer.error(
+                expression,
+                "GF0002",
+                `\`${size ? NATIVE_SIZE_OF : NATIVE_ALIGN_OF}\` needs the type written out: ` +
+                `\`${size ? NATIVE_SIZE_OF : NATIVE_ALIGN_OF}<i32>()\`.`,
+            );
+            return undefined;
+        }
+        const type = this.outer.erase(argument, this.outer.checker.getTypeAtLocation(argument));
+        if (type === undefined) {
+            return undefined;
+        }
+        const query = size ? NATIVE_SIZE_OF : NATIVE_ALIGN_OF;
+        if (!this.outer.requireKnownLayout(type, argument, `\`${query}\``)) {
+            return undefined;
+        }
+        const ty = this.outer.tyOf(type, argument);
+        return this.temporaryTyped(expression, USIZE, size ? {kind: "SizeOf", value: ty} : {
+            kind: "AlignOf",
+            value: ty,
+        });
+    }
+
+    /**
+     * `zeroed<T>()` — a `T` whose bytes are all zero.
+     *
+     * What `alloc<T>()` gives on the heap, given on the stack instead, and built
+     * from the same `Default` a class gets before its constructor runs.
+     *
+     * It exists because a union has no other way to come into being: an object
+     * literal would have to supply every member at once (`GF0304`), and a binding
+     * without an initialiser is not a thing yet. Zero is a valid starting state
+     * for every member of a union:
+     *
+     *     let event = zeroed<SDL_Event>();
+     *     event.type = SDL_EventType.Quit;
+     *
+     * By value only. A C function that *fills* a union takes a pointer, and
+     * nothing takes the address of a local, so that case is `alloc<SDL_Event>()`
+     * — which zeroes the same way and hands back something passable.
+     *
+     * Useful well beyond unions — a zeroed struct is a common enough thing to
+     * want — which is why it is spelled generally rather than as a union ritual.
+     */
+    protected zeroed(expression: ts.CallExpression, natural: MachineType): Typed | undefined {
+        const argument = expression.typeArguments?.[0];
+        const at = argument ?? expression;
+        // The written type argument wins, and the contextual type stands in when it
+        // is absent, so `const e: SDL_Event = zeroed()` reads as well as the
+        // explicit spelling.
+        const type =
+            argument === undefined
+                ? natural
+                : this.outer.erase(argument, this.outer.checker.getTypeAtLocation(argument));
+        if (type === undefined) {
+            return undefined;
+        }
+        if (!this.outer.requireKnownLayout(type, at, `\`${NATIVE_ZEROED}\``)) {
+            return undefined;
+        }
+
+        // A class is the one thing this must not make. `Default` would zero it and
+        // install its vtable — a constructed-looking object whose constructor never
+        // ran — and the language already has the spelling that does run it.
+        if (type.kind === "class") {
+            this.outer.error(
+                at,
+                "GF0002",
+                `\`${NATIVE_ZEROED}<${renderType(type)}>()\` would produce a \`${renderType(type)}\` ` +
+                "whose constructor never ran. Write `new " +
+                `${renderType(type)}(…)\`, which is the spelling that runs it.`,
+            );
+            return undefined;
+        }
+
+        return this.temporaryTyped(expression, type, {kind: "Default"});
+    }
+
+    /**
+     * `alloc(C, …args)` — construct a `C` on the heap, and hand back its address.
+     *
+     * C++'s `new C(…)`, and built from parts rather than from a node of its own:
+     * ask the runtime for storage the size and alignment of a `C`, zero it and
+     * install its vtable with the same `Default` a stack object gets, then run
+     * the constructor through a reference to it. The only thing the backend has
+     * to supply is the layout, and `SizeOf`/`AlignOf` already do that.
+     *
+     * Where `new C(…)` gives a value its scope releases, this gives a pointer
+     * that outlives the scope and leaks if you drop it — the same distinction
+     * C++ draws, and the reason `free()` is something you write.
+     */
+    protected alloc(expression: ts.CallExpression, natural: MachineType): Typed | undefined {
+        const [klass, ...args] = expression.arguments;
+
+        // `alloc<T>()` — no class, so nothing to construct beyond zeroing. One
+        // operation with two spellings rather than two operations: the storage is
+        // default-initialised either way, so `free()` has something well-defined
+        // to destroy in both.
+        if (klass === undefined) {
+            if (
+                natural.kind === "pointer" &&
+                !this.outer.requireKnownLayout(natural.pointee, expression, "`alloc`")
+            ) {
+                return undefined;
+            }
+            return this.#allocDefault(expression, natural);
+        }
+
+        if (!ts.isIdentifier(klass)) {
+            this.outer.error(
+                expression,
+                "GF0002",
+                "`alloc` takes a class and its constructor's arguments, or a type " +
+                "argument and nothing: `alloc(Rect, 6, 7)` or `alloc<i32>()`.",
+            );
+            return undefined;
+        }
+        const info = this.outer.classInfo(klass.text);
+        if (info === undefined) {
+            this.outer.unsupported(expression, `\`alloc(${klass.text}, …)\``);
+            return undefined;
+        }
+
+        const object: MachineType = {kind: "class", name: info.name};
+        const pointer: MachineType =
+            natural.kind === "pointer" ? natural : {kind: "pointer", pointee: object};
+        const ty = this.outer.tyOf(object, expression);
+
+        const size = this.temporaryTyped(expression, USIZE, {kind: "SizeOf", value: ty});
+        const align = this.temporaryTyped(expression, USIZE, {kind: "AlignOf", value: ty});
+        if (size === undefined || align === undefined) {
+            return undefined;
+        }
+
+        const raw = this.callRuntime(expression, RUNTIME.alloc, [size, align], pointer);
+        if (raw === undefined) {
+            return undefined;
+        }
+
+        // The storage is uninitialised, so this is the same two-step a stack object
+        // gets: `Default` zeroes it and installs the vtable — making it
+        // dispatchable, and therefore destructible, before the constructor runs a
+        // line — and then the constructor is an ordinary call.
+        const place = this.placeOfSubject(expression, raw);
+        if (place === undefined) {
+            return undefined;
+        }
+        const target: Place = {local: place.local, projection: [...place.projection, {kind: "Deref"}]};
+        this.push({kind: "Init", place: target, rvalue: {kind: "Default"}});
+
+        const marshalled = this.classCallArgs(
+            expression,
+            info,
+            info.constructorSymbol,
+            args,
+            {kind: "Copy", value: place},
+        );
+        if (marshalled === undefined) {
+            return undefined;
+        }
+        if (marshalled === null) {
+            if (args.length > 0) {
+                this.outer.error(
+                    expression,
+                    "GF0002",
+                    `\`${info.name}\` declares no constructor, so \`alloc\` takes no arguments after it.`,
+                );
+                return undefined;
+            }
+            return {operand: raw.operand, type: pointer};
+        }
+
+        const record = this.outer.fn(info.constructorSymbol!);
+        if (record === undefined || record.kind !== "defined") {
+            return undefined;
+        }
+        this.callDirect(record.id, marshalled, undefined);
+        return {operand: raw.operand, type: pointer};
+    }
+
+    /**
+     * `alloc<T>()` — storage for one `T`, default-initialised.
+     *
+     * The same `Default` a local gets, and for the same reason: there is no
+     * uninitialised form anywhere in this language, because a destructor releases
+     * what a slot holds and on uninitialised memory that is a garbage pointer.
+     * `alloc<string>()` followed by `free()` has to be well defined, and zeroing
+     * is what makes it so.
+     */
+    #allocDefault(expression: ts.CallExpression, natural: MachineType): Typed | undefined {
+        const pointee =
+            natural.kind === "pointer"
+                ? natural.pointee
+                : this.outer.erase(expression, this.outer.checker.getTypeAtLocation(expression));
+        if (pointee === undefined) {
+            return undefined;
+        }
+        if (pointee.kind === "pointer") {
+            // `erase` gave the whole `Pointer<T>` back rather than the pointee, which
+            // means tsc could not work out what `T` is.
+            this.outer.error(
+                expression,
+                "GF0002",
+                "`alloc` needs the type written out when there is no class: `alloc<i32>()`.",
+            );
+            return undefined;
+        }
+
+        // A class with a constructor reached this way would be allocated and never
+        // constructed, which is a trap rather than a shorthand.
+        if (pointee.kind === "class") {
+            const info = this.outer.classInfo(pointee.name);
+            if (info?.ctor !== undefined) {
+                this.outer.error(
+                    expression,
+                    "GF0002",
+                    `\`${pointee.name}\` has a constructor, so write \`alloc(${pointee.name}, …)\` ` +
+                    "— naming the type instead would allocate it without constructing it.",
+                );
+                return undefined;
+            }
+        }
+
+        const pointer: MachineType = {kind: "pointer", pointee};
+        const ty = this.outer.tyOf(pointee, expression);
+        const size = this.temporaryTyped(expression, USIZE, {kind: "SizeOf", value: ty});
+        const align = this.temporaryTyped(expression, USIZE, {kind: "AlignOf", value: ty});
+        if (size === undefined || align === undefined) {
+            return undefined;
+        }
+
+        const raw = this.callRuntime(expression, RUNTIME.alloc, [size, align], pointer);
+        if (raw === undefined) {
+            return undefined;
+        }
+
+        const place = this.placeOfSubject(expression, raw);
+        if (place === undefined) {
+            return undefined;
+        }
+        this.push({
+            kind: "Init",
+            place: {local: place.local, projection: [...place.projection, {kind: "Deref"}]},
+            rvalue: {kind: "Default"},
+        });
+        return {operand: raw.operand, type: pointer};
+    }
+
+    /**
+     * `p.free()` — run the destructor, then hand the storage back.
+     *
+     * C++'s `delete`, and just as unchecked. A **direct** destructor call rather
+     * than a virtual one would be wrong here in a way it is not for a stack
+     * object: `Drop` on the pointee dispatches through the vtable, so deleting
+     * through a `Pointer<Base>` runs the derived destructor.
+     */
+    #free(expression: ts.CallExpression, subject: Typed): Typed | undefined {
+        if (expression.arguments.length !== 0) {
+            this.outer.error(expression, "GF0002", "`free` takes no arguments.");
+            return undefined;
+        }
+        if (subject.type.kind !== "pointer") {
+            this.outer.error(
+                expression,
+                "GF0002",
+                `\`free\` releases a \`Pointer<T>\`; this is a \`${renderType(subject.type)}\`.`,
+            );
+            return undefined;
+        }
+
+        const place = this.placeOfSubject(expression, subject);
+        if (place === undefined) {
+            return undefined;
+        }
+        const pointee = subject.type.pointee;
+
+        // The value first, then its storage — a destructor is still reading live
+        // memory when it runs.
+        //
+        // For a class this is a **virtual** call to slot 0, which is C++'s virtual
+        // destructor and is the one place destruction has to dispatch. Everywhere
+        // else the compiler destroys a value whose storage was laid out for exactly
+        // its static type, so the dynamic type *is* the static one — but a
+        // `Pointer<Base>` may address a `Derived`, and a direct call to `Base$drop`
+        // would leave the derived class's own fields unreleased.
+        if (pointee.kind === "class") {
+            const info = this.outer.classInfo(pointee.name);
+            const destructor = info === undefined ? undefined : this.outer.fn(info.destructorSymbol);
+            if (info === undefined || destructor === undefined) {
+                this.outer.unsupported(expression, `\`free\` of a \`${renderType(pointee)}\``);
+                return undefined;
+            }
+            this.emitCall(
+                expression,
+                {kind: "Virtual", slot: 0, sig: destructor.sig},
+                [{kind: "Copy", value: place}],
+                VOID,
+            );
+        } else if (needsDrop(pointee)) {
+            this.push({
+                kind: "Drop",
+                place: {local: place.local, projection: [...place.projection, {kind: "Deref"}]},
+                flag: null,
+                unwind: NO_UNWIND,
+            });
+        }
+
+        return this.callRuntime(
+            expression,
+            RUNTIME.free,
+            [{operand: {kind: "Copy", value: place}, type: subject.type}],
+            VOID,
+        );
+    }
+
+    /** A runtime call's result, pinned into a local so it can be read twice. */
+    #pin(at: ts.Expression, value: Typed): Place | undefined {
+        const local = this.f.addLocal({
+            ty: this.outer.tyOf(value.type, at),
+            storage: "Owned",
+        });
+        this.push({kind: "StorageLive", value: local});
+        this.push({kind: "Init", place: placeOf(local), rvalue: {kind: "Use", value: value.operand}});
+        return placeOf(local);
+    }
+
+    /**
+     * `allocArray<T>(n)` — storage for `n` elements, every one initialised.
+     *
+     * C++'s `new T[n]`, and built from the same parts `alloc` is: the runtime
+     * hands out bytes and remembers how many elements were asked for, and the
+     * loop that constructs into them is emitted here, because only this side
+     * knows what constructing a `T` means.
+     *
+     * `Default` per element, exactly as `alloc<T>()` does for its one — there is
+     * no uninitialised form anywhere in this language, because a destructor
+     * releases what a slot holds and on uninitialised memory that is a garbage
+     * pointer. That also means the loop is not optional: `allocArray<string>(4)`
+     * followed by `freeArray()` has to be well defined.
+     */
+    protected allocArray(expression: ts.CallExpression, natural: MachineType): Typed | undefined {
+        const argument = expression.arguments[0];
+        if (expression.arguments.length !== 1 || argument === undefined) {
+            this.outer.error(expression, "GF0002", "`allocArray` takes exactly one element count.");
+            return undefined;
+        }
+        if (natural.kind !== "pointer") {
+            this.outer.error(
+                expression,
+                "GF0002",
+                "`allocArray` needs the element type written out: `allocArray<i32>(n)`.",
+            );
+            return undefined;
+        }
+        const element = natural.pointee;
+        if (!this.outer.requireKnownLayout(element, expression, "`allocArray`")) {
+            return undefined;
+        }
+
+        // The same trap `alloc<T>()` refuses, for the same reason: there is nowhere
+        // to put the constructor's arguments, so every element would be allocated
+        // and never constructed. C++ says the same thing — `new T[n]` needs a
+        // default constructor — it just says it about a constructor this language
+        // does not have.
+        if (element.kind === "class" && this.outer.classInfo(element.name)?.ctor !== undefined) {
+            this.outer.error(
+                expression,
+                "GF0002",
+                `\`${element.name}\` has a constructor, and \`allocArray\` has nowhere to ` +
+                "put its arguments. Allocate the elements one at a time with " +
+                `\`alloc(${element.name}, …)\`.`,
+            );
+            return undefined;
+        }
+
+        const count = this.expressionTyped(argument, USIZE);
+        if (count === undefined) {
+            return undefined;
+        }
+        const ty = this.outer.tyOf(element, expression);
+        const size = this.temporaryTyped(expression, USIZE, {kind: "SizeOf", value: ty});
+        const align = this.temporaryTyped(expression, USIZE, {kind: "AlignOf", value: ty});
+        if (size === undefined || align === undefined) {
+            return undefined;
+        }
+
+        // Pinned because it is read twice — once by the allocation and once as the
+        // loop's bound — and the second read must see the same number the first
+        // did, whatever the argument expression was.
+        const limit = this.#pin(expression, count);
+        if (limit === undefined) {
+            return undefined;
+        }
+
+        const raw = this.callRuntime(
+            expression,
+            RUNTIME.allocArray,
+            [{operand: {kind: "Copy", value: limit}, type: USIZE}, size, align],
+            natural,
+        );
+        if (raw === undefined) {
+            return undefined;
+        }
+        const place = this.placeOfSubject(expression, raw);
+        if (place === undefined) {
+            return undefined;
+        }
+
+        this.countedLoop(expression, {kind: "Copy", value: limit}, (counter) => {
+            this.push({
+                kind: "Init",
+                place: {
+                    local: place.local,
+                    projection: [...place.projection, {kind: "Index", value: counter}],
+                },
+                rvalue: {kind: "Default"},
+            });
+        });
+
+        return {operand: raw.operand, type: natural};
+    }
+
+    /**
+     * `p.freeArray()` — destroy every element, then release the run.
+     *
+     * C++'s `delete[]`, and distinct from `free` for exactly the reason C++ keeps
+     * them distinct: one destructor has to run per element, and only the cookie
+     * knows how many there are. Calling the wrong one is undefined behaviour here
+     * as it is there.
+     *
+     * The elements are destroyed with `Drop`, which is a **direct** call — the
+     * opposite of {@link #free}, which dispatches through the vtable. That is not
+     * an inconsistency: a run of `T` strides by `T`'s size, so a
+     * `Pointer<Base>` into an array of `Derived` is already addressing the wrong
+     * elements before anything is destroyed. C++ makes that undefined for the
+     * same reason, and a virtual call here would destroy the right objects at the
+     * wrong addresses, which is a worse answer than the wrong destructor.
+     */
+    #freeArray(expression: ts.CallExpression, subject: Typed): Typed | undefined {
+        if (expression.arguments.length !== 0) {
+            this.outer.error(expression, "GF0002", "`freeArray` takes no arguments.");
+            return undefined;
+        }
+        if (subject.type.kind !== "pointer") {
+            return undefined;
+        }
+        const element = subject.type.pointee;
+
+        const place = this.placeOfSubject(expression, subject);
+        if (place === undefined) {
+            return undefined;
+        }
+        const pointer: Typed = {operand: {kind: "Copy", value: place}, type: subject.type};
+
+        if (needsDrop(element)) {
+            const count = this.callRuntime(
+                expression,
+                RUNTIME.allocArrayCount,
+                [pointer],
+                USIZE,
+            );
+            if (count === undefined) {
+                return undefined;
+            }
+            const limit = this.#pin(expression, count);
+            if (limit === undefined) {
+                return undefined;
+            }
+
+            this.countedLoop(expression, {kind: "Copy", value: limit}, (counter) => {
+                this.push({
+                    kind: "Drop",
+                    place: {
+                        local: place.local,
+                        projection: [...place.projection, {kind: "Index", value: counter}],
+                    },
+                    flag: null,
+                    unwind: NO_UNWIND,
+                });
+            });
+        }
+
+        // The elements first, then the storage — a destructor is still reading live
+        // memory when it runs.
+        return this.callRuntime(expression, RUNTIME.freeArray, [pointer], VOID);
+    }
+
+    /**
+     * One of {@link POINTER_METHODS}, with the receiver already lowered.
+     *
+     * All six are implemented. The width pass sees the same call first and
+     * refuses through the same helpers, so anything arriving here has already
+     * passed the rules — which is also why a refusal is reported once rather
+     * than once per pass.
+     */
+    protected pointerMethod(
+        expression: ts.CallExpression,
+        access: ts.PropertyAccessExpression,
+        subject: Typed,
+    ): Typed | undefined {
+        // The two that only relabel the address, before the guard that the other
+        // four have to pass. See {@link #reinterpret} for the rule.
+        if (
+            subject.type.kind === "pointer" &&
+            (access.name.text === "erase" || access.name.text === "reify")
+        ) {
+            const target = this.reinterpret(expression, access, subject.type);
+            if (target === undefined) {
+                return undefined;
+            }
+            // A `Cast` rather than the operand relabelled, unlike the implicit
+            // erasure in `#coerce`: this one was written, and the MIR should show
+            // where. It costs nothing — `PtrToPtr` is the identity in the backend.
+            return this.temporaryTyped(expression, target, {
+                kind: "Cast",
+                op: "PtrToPtr",
+                operand: this.forRead(subject),
+                to: this.outer.tyOf(target, expression),
+            });
+        }
+
+        // Every one of these needs the pointee's layout — a stride to step by, a
+        // size and an alignment to return to the allocator, a shape to read
+        // through. `address` is the member that does not, which is why it is a
+        // property and not here.
+        if (
+            subject.type.kind === "pointer" &&
+            !this.outer.requireKnownLayout(
+                subject.type.pointee,
+                access,
+                `\`${access.name.text}\``,
+            )
+        ) {
+            return undefined;
+        }
+
+        switch (access.name.text) {
+            case "free":
+                return this.#free(expression, subject);
+            case "freeArray":
+                return this.#freeArray(expression, subject);
+            case "deref":
+                return this.#deref(expression, subject);
+            case "offset":
+                return this.#offset(expression, subject);
+            default:
+                this.outer.unsupported(access, `\`${access.name.text}\` on a pointer`);
+                return undefined;
+        }
+    }
+
+    /**
+     * `p.deref()` — the pointee, borrowed.
+     *
+     * A retype and nothing else at runtime: a `Pointer<T>` and a `Reference<T>`
+     * are the same machine word holding the same address. It is written out as
+     * `Ref` of the dereferenced place rather than handed back as the pointer's
+     * own operand so that the local really has the reference's type — the ABI
+     * classifies a call's arguments from the MIR types, and a pointer wearing a
+     * reference's label is exactly the kind of thing that agrees until it does
+     * not.
+     *
+     * Needed where the auto-dereference cannot reach: `draw(p)` is `GF0161`,
+     * because a pointer is not a reference, and `draw(p.deref())` is how you say
+     * you meant to borrow rather than to copy.
+     */
+    #deref(expression: ts.CallExpression, subject: Typed): Typed | undefined {
+        if (expression.arguments.length !== 0) {
+            this.outer.error(expression, "GF0002", "`deref` takes no arguments.");
+            return undefined;
+        }
+        if (subject.type.kind !== "pointer") {
+            return undefined;
+        }
+        const pointee = subject.type.pointee;
+
+        const place = this.placeOfSubject(expression, subject);
+        if (place === undefined) {
+            return undefined;
+        }
+        const target: Place = {
+            local: place.local,
+            projection: [...place.projection, {kind: "Deref"}],
+        };
+        return {
+            operand: this.refTo(expression, target, pointee),
+            type: {kind: "reference", referent: pointee},
+        };
+    }
+
+    /**
+     * `p.offset(n)` — `p + n`, in units of `T`.
+     *
+     * The address of `p[n]`, which is what C's pointer arithmetic means and is
+     * also literally how it is built: the same `Index` projection indexing emits,
+     * with `AddrOf` instead of a load. So the stride comes from the layout engine
+     * and this function does no arithmetic of its own.
+     *
+     * The count is an `isize` because it counts backwards too. On a 64-bit target
+     * that is already pointer width, so a negative offset scales and wraps to the
+     * right address without a widening step to get wrong.
+     */
+    #offset(expression: ts.CallExpression, subject: Typed): Typed | undefined {
+        const argument = expression.arguments[0];
+        if (expression.arguments.length !== 1 || argument === undefined) {
+            this.outer.error(expression, "GF0002", "`offset` takes exactly one element count.");
+            return undefined;
+        }
+        if (subject.type.kind !== "pointer") {
+            return undefined;
+        }
+
+        const count = this.expressionTyped(argument, ISIZE);
+        if (count === undefined) {
+            return undefined;
+        }
+        const base = this.placeOfSubject(expression, subject);
+        if (base === undefined) {
+            return undefined;
+        }
+
+        // Materialised into a local because `Projection::Index` names one — the
+        // same step `#elementPlace` takes, and for the same reason: a projection
+        // must not refer back to an operand.
+        const slot = this.f.addLocal({
+            ty: this.outer.tyOf(ISIZE, expression),
+            storage: "Temporary",
+        });
+        this.temporaries.push(slot);
+        this.push({kind: "StorageLive", value: slot});
+        this.push({
+            kind: "Init",
+            place: placeOf(slot),
+            rvalue: {kind: "Use", value: count.operand},
+        });
+
+        return this.temporaryTyped(expression, subject.type, {
+            kind: "AddrOf",
+            value: {
+                local: base.local,
+                projection: [...base.projection, {kind: "Index", value: slot}],
+            },
+        });
+    }
+
+    /**
+     * `xs.push(v)` — grow by one, then store the element into the new slot.
+     *
+     * Two steps because they belong to two halves of the compiler. Making room
+     * needs the element's stride and alignment, which only the backend knows, so
+     * it is `ArrayPushSlot`. Storing the element is an ordinary `Init` through the
+     * `Pointer<T>` that comes back — which means `push` copies or moves by exactly
+     * the same rules as every other write, and a `string[]` deep-copies its
+     * argument without this function knowing what a string is.
+     */
+    protected arrayPush(
+        expression: ts.CallExpression,
+        array: Typed,
+        element: MachineType,
+    ): Typed | undefined {
+        const argument = expression.arguments[0];
+        if (expression.arguments.length !== 1 || argument === undefined) {
+            this.outer.error(expression, "GF0002", "`push` takes exactly one element.");
+            return undefined;
+        }
+        const resolved = this.asArray(expression, array);
+        if (resolved === undefined) {
+            return undefined;
+        }
+        const place = resolved.place;
+
+        const value = this.expressionTyped(argument, element);
+        if (value === undefined) {
+            return undefined;
+        }
+
+        const pointer: MachineType = {kind: "pointer", pointee: element};
+        const slot = this.f.addLocal({
+            ty: this.outer.tyOf(pointer, expression),
+            storage: "Temporary",
+            span: this.outer.span(expression),
+        });
+        this.push({kind: "StorageLive", value: slot});
+        this.push({
+            kind: "Init",
+            place: placeOf(slot),
+            rvalue: {kind: "ArrayPushSlot", value: place},
+        });
+        // `Init`, not `Assign`: the slot is fresh storage the runtime just made
+        // room for, so there is no previous element in it to destroy.
+        this.push({
+            kind: "Init",
+            place: {local: slot, projection: [{kind: "Deref"}]},
+            rvalue: {kind: "Use", value: this.forStorage(value)},
+        });
+        this.push({kind: "StorageDead", value: slot});
+        return {operand: {kind: "Const", value: this.boolConst(true)}, type: VOID};
+    }
+
+    /**
+     * `xs.pop()` — take the last element out and shorten the array.
+     *
+     * A **move**, not a copy: the element is leaving the array, and there is
+     * exactly one of it afterwards. Copying instead would allocate for no reason
+     * and leave the array's own copy to be destroyed by the length change, which
+     * nothing would do.
+     *
+     * Needs no node of its own — the element is read through an ordinary `Index`
+     * projection, and shortening takes no stride, so it is a plain runtime call.
+     */
+    protected arrayPop(
+        expression: ts.CallExpression,
+        array: Typed,
+        element: MachineType,
+    ): Typed | undefined {
+        if (expression.arguments.length !== 0) {
+            this.outer.error(expression, "GF0002", "`pop` takes no arguments.");
+            return undefined;
+        }
+        const resolved = this.asArray(expression, array);
+        if (resolved === undefined) {
+            return undefined;
+        }
+        const place = resolved.place;
+
+        // `length - 1`, in a local, because a projection indexes by local.
+        const length = this.temporaryTyped(expression, USIZE, {kind: "Len", value: place});
+        if (length === undefined) {
+            return undefined;
+        }
+        const last = this.temporaryTyped(expression, USIZE, {
+            kind: "Binary",
+            op: "Sub",
+            lhs: length.operand,
+            rhs: {
+                kind: "Const",
+                value: {kind: "Int", bits: 1n, ty: this.outer.tyOf(USIZE, expression)},
+            },
+        });
+        if (last === undefined) {
+            return undefined;
+        }
+        const index = this.f.addLocal({
+            ty: this.outer.tyOf(USIZE, expression),
+            storage: "Temporary",
+            span: this.outer.span(expression),
+        });
+        this.push({kind: "StorageLive", value: index});
+        this.push({
+            kind: "Init",
+            place: placeOf(index),
+            rvalue: {kind: "Use", value: last.operand},
+        });
+
+        const slot = {local: place.local, projection: [...place.projection, {kind: "Index" as const, value: index}]};
+        const taken = this.temporaryTyped(expression, element, {
+            kind: "Use",
+            value: {kind: "Move", value: slot},
+        });
+        if (taken === undefined) {
+            return undefined;
+        }
+
+        // After the element has been taken, never before: shortening first would
+        // leave the last slot outside the array while it is still being read.
+        this.callRuntime(
+            expression,
+            RUNTIME.arrayPop,
+            [{operand: {kind: "Copy", value: place}, type: array.type}],
+            VOID,
+        );
+        this.push({kind: "StorageDead", value: index});
+        return taken;
+    }
+
+    /**
+     * `fixedArray(N, fill)` — `N` elements, inline, every one a copy of `fill`.
+     *
+     * Zeroed first, then filled. The zeroing is not belt-and-braces: an element of
+     * an owning type is constructed *into* the slot, and if the loop is cut short
+     * — or `N` is zero — the destructor at scope exit runs over whatever was
+     * there. On uninitialised stack that is a garbage pointer, which is exactly
+     * the trap REWRITE-PLAN §10 names.
+     *
+     * The fill is a loop rather than `N` statements so that a large array costs
+     * the same MIR as a small one.
+     */
+    protected fixedArray(expression: ts.CallExpression, natural: MachineType): Typed | undefined {
+        if (natural.kind !== "fixedArray") {
+            this.outer.error(
+                expression,
+                "GF0161",
+                `\`fixedArray\` builds a \`FixedArray<T, N>\`, not a ` +
+                `\`${renderType(natural)}\`.`,
+            );
+            return undefined;
+        }
+        const fillExpression = expression.arguments[1];
+        if (expression.arguments.length !== 2 || fillExpression === undefined) {
+            this.outer.error(
+                expression,
+                "GF0001",
+                "`fixedArray` takes a length and a fill value.",
+            );
+            return undefined;
+        }
+
+        const ty = this.outer.tyOf(natural, expression);
+        const array = this.f.addLocal({ty, storage: "Temporary"});
+        this.temporaries.push(array);
+        this.push({kind: "StorageLive", value: array});
+        this.push({kind: "Init", place: placeOf(array), rvalue: {kind: "Default"}});
+
+        if (natural.length > 0) {
+            const fill = this.expressionTyped(fillExpression, natural.element);
+            if (fill === undefined) {
+                return undefined;
+            }
+
+            const counter = this.f.addLocal({
+                ty: this.outer.tyOf(USIZE, expression),
+                storage: "Owned",
+            });
+            const test = this.f.addLocal({
+                ty: this.boolTy(),
+                storage: "Temporary",
+            });
+            const usizeTy = this.outer.tyOf(USIZE, expression);
+            const limit: Operand = {
+                kind: "Const",
+                value: {kind: "Int", bits: BigInt(natural.length), ty: usizeTy},
+            };
+            const one: Operand = {
+                kind: "Const",
+                value: {kind: "Int", bits: 1n, ty: usizeTy},
+            };
+            const zero: Operand = {
+                kind: "Const",
+                value: {kind: "Int", bits: 0n, ty: usizeTy},
+            };
+
+            const head = this.f.block();
+            const body = this.f.block();
+            const exit = this.f.block();
+
+            this.push({kind: "StorageLive", value: counter});
+            this.push({kind: "Init", place: placeOf(counter), rvalue: {kind: "Use", value: zero}});
+            this.seal({kind: "Goto", value: head});
+
+            this.current = head;
+            this.push({kind: "StorageLive", value: test});
+            this.push({
+                kind: "Init",
+                place: placeOf(test),
+                rvalue: {
+                    kind: "Binary",
+                    op: "Lt",
+                    lhs: {kind: "Copy", value: placeOf(counter)},
+                    rhs: limit,
+                },
+            });
+            this.seal({
+                kind: "Branch",
+                cond: {kind: "Copy", value: placeOf(test)},
+                thenBlock: body,
+                elseBlock: exit,
+            });
+
+            this.current = body;
+            // `Init`, not `Assign`: the slot was zeroed and holds nothing, so there
+            // is nothing to destroy first.
+            //
+            // And `Copy`, not the usual move-out-of-a-temporary: the loop runs `N`
+            // times and each element needs its own value. Moving would put the fill
+            // in the first element and leave every other one holding the empty value
+            // the move left behind.
+            this.push({
+                kind: "Init",
+                place: {local: array, projection: [{kind: "Index", value: counter}]},
+                rvalue: {kind: "Use", value: this.repeatable(fill)},
+            });
+            this.push({
+                kind: "Assign",
+                place: placeOf(counter),
+                rvalue: {
+                    kind: "Binary",
+                    op: "Add",
+                    lhs: {kind: "Copy", value: placeOf(counter)},
+                    rhs: one,
+                },
+            });
+            this.seal({kind: "Goto", value: head});
+
+            this.current = exit;
+            this.push({kind: "StorageDead", value: test});
+            this.push({kind: "StorageDead", value: counter});
+        }
+
+        return {
+            operand: {kind: "Borrow", value: placeOf(array)},
+            type: natural,
+            temporary: array,
+        };
+    }
+}
