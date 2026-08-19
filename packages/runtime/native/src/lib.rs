@@ -28,29 +28,60 @@
 //!   has no exceptions — which is what keeps ownership a property of the type
 //!   rather than of where the value came from.
 
+//! # Why this crate is `no_std`
+//!
+//! Not for the usual reason. Nothing here is freestanding — the runtime calls
+//! libc on every page, and is linked into a program that has a full C runtime
+//! under it. What `no_std` buys is the ability to write our own
+//! [`panic_handler`], which on stable Rust is the only way to stop linking
+//! std's.
+//!
+//! std's panic hook resolves a backtrace, which drags in the whole DWARF
+//! symbolizer — gimli, addr2line, rustc_demangle, miniz_oxide. That was 182 KB
+//! of the 259 KB of sized symbols in a program that computes a factorial and
+//! prints nothing, and every byte of it was unreachable: `main` is emitted by
+//! the compiler, not by Rust, so no Rust panic ever runs to print anything.
+//! `panic = "abort"` does not help — it removes the unwinder, not the hook.
+//!
+//! The cost is that the eleven places this crate wanted std are written against
+//! libc instead. They are all in this file, all marked, and none of them are
+//! subtle; see [`stdio`], [`env_is_set`], and [`Digits`].
+
+#![cfg_attr(not(test), no_std)]
 #![allow(clippy::missing_safety_doc)]
 
 use core::mem::align_of;
 use core::sync::atomic::{AtomicI64, AtomicBool, Ordering};
-use std::io::Write;
+use core::fmt::Write;
 
-use core::ffi::c_void;
+use core::ffi::{c_void, CStr};
 
 use libmimalloc_sys::{
     mi_calloc, mi_free, mi_malloc, mi_malloc_aligned, mi_malloc_aligned_at, mi_realloc,
     mi_realloc_aligned, mi_usable_size, mi_zalloc,
 };
 
-/// The runtime's *own* incidental Rust allocations — `to_string` in the number
-/// conversions, the buffering inside `std::io` — on the same heap as everything
-/// the program allocates.
+/// Terminate, the same way every other failure here terminates.
 ///
-/// Separate from, and much smaller than, the swap below it. `GlobalAlloc` is
-/// handed a `Layout` on the way out by the trait's own definition, so routing
-/// Rust's allocations here buys uniformity and nothing else; it is the *direct*
-/// `mi_malloc`/`mi_free` calls that let a free take one argument.
-#[global_allocator]
-static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+/// There is deliberately no message. A panic reachable from a compiled program
+/// is a broken *compiler* — the frontend was supposed to have rejected it — and
+/// the project treats that as an abort rather than a diagnostic, exactly as
+/// `CLAUDE.md` describes for the backend. Formatting the payload would relink
+/// the machinery this crate is `no_std` to avoid.
+#[cfg(not(test))]
+#[panic_handler]
+fn panic(_: &core::panic::PanicInfo) -> ! {
+    unsafe { libc::abort() }
+}
+
+/// `abort`, spelled once.
+///
+/// `libc::abort` rather than a trap instruction because that is precisely what
+/// `std::process::abort` called on the way to raising `SIGABRT`, and these are
+/// all out-of-memory paths whose observable behaviour should not shift.
+fn abort() -> ! {
+    unsafe { libc::abort() }
+}
 
 /// A `string`: a pointer to the first byte, with a [`Header`] behind it.
 pub type GfStr = *mut u8;
@@ -93,9 +124,83 @@ pub extern "C" fn gf_live_allocations() -> i64 {
 static TRACE_ALLOC: AtomicBool = AtomicBool::new(false);
 static TRACE_READ: AtomicBool = AtomicBool::new(false);
 
+/// Is an environment variable present, whatever its value?
+///
+/// `getenv` rather than `std::env::var_os`: both answer from the same
+/// `environ`, and this one does not need an owned `OsString` to throw away.
+/// Read once, before any Goblin code could have called `setenv`.
+fn env_is_set(name: &CStr) -> bool {
+    !unsafe { libc::getenv(name.as_ptr()) }.is_null()
+}
+
+/// stdout and stderr, as file descriptors.
+///
+/// Written out rather than taken from `libc`, whose `STDOUT_FILENO` is defined
+/// only on unix. The numbers are the same two on the Windows CRT, which is
+/// what `write` reaches there, so spelling them here is what makes this one
+/// function rather than a `cfg` pair.
+const STDOUT: i32 = 1;
+const STDERR: i32 = 2;
+
+/// Write bytes to a file descriptor, unbuffered.
+///
+/// Every caller here flushed after every line already, so nothing is buffered
+/// that was not before.
+///
+/// A `write` can come back having done less than it was asked: a partial write
+/// filling a pipe, or a signal that interrupted it before it moved anything.
+/// Both are retried. They are deliberately *not* told apart — `errno` has
+/// three different spellings across the platforms this crate is built for
+/// (`__errno_location`, `__error`, `_errno`) and no portable one, and the
+/// distinction would not change what can be done about it. So progress resets
+/// the budget and a fixed number of fruitless attempts ends it, which
+/// terminates on a genuinely broken descriptor instead of spinning on it.
+///
+/// A write that fails for real is dropped in silence, because a runtime that
+/// cannot write has nowhere to report that it could not write.
+fn stdio(fd: i32, bytes: &[u8]) {
+    let mut written = 0;
+    let mut fruitless = 0;
+    while written < bytes.len() && fruitless < 16 {
+        // `as _` on both the count and the result: they are `size_t`/`ssize_t`
+        // on unix and `c_uint`/`c_int` on the Windows CRT.
+        let n = unsafe {
+            libc::write(
+                fd,
+                bytes.as_ptr().add(written) as *const c_void,
+                (bytes.len() - written) as _,
+            )
+        };
+        if n > 0 {
+            written += n as usize;
+            fruitless = 0;
+        } else {
+            fruitless += 1;
+        }
+    }
+}
+
+/// A line, written in one `write` so that two of them cannot interleave.
+///
+/// `std::io::stdout` held a lock to get this; a single `write` of at most
+/// `PIPE_BUF` gets it from the kernel instead. Longer lines fall back to two
+/// writes rather than growing a buffer — a runtime cannot allocate on the way
+/// to reporting that allocation failed.
+fn stdio_line(fd: i32, bytes: &[u8]) {
+    let mut line = [0u8; 512];
+    if bytes.len() < line.len() {
+        line[..bytes.len()].copy_from_slice(bytes);
+        line[bytes.len()] = b'\n';
+        stdio(fd, &line[..bytes.len() + 1]);
+    } else {
+        stdio(fd, bytes);
+        stdio(fd, b"\n");
+    }
+}
+
 fn tracing() -> bool {
     if !TRACE_READ.swap(true, Ordering::SeqCst) {
-        TRACE_ALLOC.store(std::env::var_os("GOBLIN_TRACE_ALLOC").is_some(), Ordering::SeqCst);
+        TRACE_ALLOC.store(env_is_set(c"GOBLIN_TRACE_ALLOC"), Ordering::SeqCst);
     }
     TRACE_ALLOC.load(Ordering::SeqCst)
 }
@@ -104,10 +209,7 @@ fn trace(event: &str) {
     if !tracing() {
         return;
     }
-    let mut out = std::io::stdout();
-    let _ = out.write_all(event.as_bytes());
-    let _ = out.write_all(b"\n");
-    let _ = out.flush();
+    stdio_line(STDOUT, event.as_bytes());
 }
 
 static REPORTER_INSTALLED: AtomicBool = AtomicBool::new(false);
@@ -141,7 +243,7 @@ fn install_reporter() {
     if REPORTER_INSTALLED.swap(true, Ordering::SeqCst) {
         return;
     }
-    if std::env::var_os("GOBLIN_LEAK_CHECK").is_none() {
+    if !env_is_set(c"GOBLIN_LEAK_CHECK") {
         return;
     }
     unsafe { libc::atexit(report_leaks) };
@@ -151,9 +253,9 @@ extern "C" fn report_leaks() {
     let live = LIVE.load(Ordering::SeqCst);
     // A machine-readable line on stderr, distinct enough that a program
     // printing something similar by accident is not a plausible worry.
-    let mut err = std::io::stderr();
-    let _ = writeln!(err, "##goblin-live-allocations:{live}");
-    let _ = err.flush();
+    let mut digits = Digits::new();
+    let _ = write!(digits, "##goblin-live-allocations:{live}");
+    stdio_line(STDERR, digits.as_bytes());
 }
 
 // ---------------------------------------------------------------------------
@@ -215,7 +317,7 @@ unsafe fn allocate(len: usize) -> GfStr {
     // header + bytes + the NUL that makes this a C string.
     let raw = unsafe { raw_alloc(HEADER + len + 1, ALIGN) };
     if raw.is_null() {
-        std::process::abort();
+        abort();
     }
     unsafe {
         (raw as *mut Header).write(Header { len: len as u64, owned: 1 });
@@ -333,7 +435,7 @@ pub unsafe extern "C" fn gf_alloc(size: usize, align: usize) -> *mut u8 {
     // objects that exist are not the same object.
     let raw = unsafe { raw_alloc(size.max(1), align.max(1)) };
     if raw.is_null() {
-        std::process::abort();
+        abort();
     }
     LIVE.fetch_add(1, Ordering::SeqCst);
     trace("alloc");
@@ -483,7 +585,7 @@ pub unsafe extern "C" fn gf_alloc_array(count: usize, stride: usize, align: usiz
         .expect("array too large");
     let raw = unsafe { raw_alloc_at(bytes, align.max(1), RUN_HEADER) };
     if raw.is_null() {
-        std::process::abort();
+        abort();
     }
     unsafe { raw.cast::<usize>().write(count) };
     LIVE.fetch_add(1, Ordering::SeqCst);
@@ -626,7 +728,7 @@ pub unsafe extern "C" fn gf_array_new(len: u64, stride: u64, align: u64) -> GfAr
     let align = (align as usize).max(1);
     let raw = unsafe { raw_alloc_at(array_bytes(len, stride), align, ARRAY_HEADER) };
     if raw.is_null() {
-        std::process::abort();
+        abort();
     }
     unsafe {
         (raw as *mut ArrayHeader).write(ArrayHeader { len, cap: len });
@@ -672,7 +774,7 @@ pub unsafe extern "C" fn gf_array_push_slot(
             let align = (align as usize).max(1);
             let raw = raw_alloc_at(array_bytes(grown, stride), align, ARRAY_HEADER);
             if raw.is_null() {
-                std::process::abort();
+                abort();
             }
             (raw as *mut ArrayHeader).write(ArrayHeader { len, cap: grown });
             let elements = raw.add(ARRAY_HEADER);
@@ -830,14 +932,88 @@ pub unsafe extern "C" fn gf_string_code_point_at(s: GfStr, index: usize) -> u32 
 // Conversions, for interpolation
 // ---------------------------------------------------------------------------
 
+unsafe extern "C" {
+    /// `trunc`, from libm.
+    ///
+    /// `core` has the float *predicates* — `is_nan`, `is_infinite`, and since
+    /// recently `abs` — but not the rounding, which stayed in std because it
+    /// is a call into libm rather than an instruction. This crate already
+    /// links `-lm` (it is in `--print native-static-libs`), so the declaration
+    /// is all that was missing. Declared rather than reimplemented on purpose:
+    /// a hand-rolled `trunc` over the exponent field is four lines that are
+    /// wrong for subnormals and right for every value anyone would test it
+    /// with.
+    fn trunc(value: f64) -> f64;
+}
+
+/// Room for the widest thing [`Digits`] is ever asked to hold.
+///
+/// Set by `f64`, and larger than it looks like it needs to be, because
+/// `Display for f64` never switches to exponent notation: it writes the
+/// shortest round-tripping decimal *in full*. The widest is the smallest
+/// subnormal, `-5e-324`, which is 327 bytes of mostly zeroes — not the ~24 a
+/// reading of "shortest round-tripping" suggests.
+///
+/// This was originally 64, on exactly that misreading, and the result was that
+/// `${5e-324}` interpolated to `0.` — a truncation that is not obviously
+/// wrong at a glance, which is the kind this project goes out of its way not
+/// to ship.
+const DIGITS: usize = 384;
+
+/// A stack buffer that a `core::fmt` value can be written into.
+///
+/// What `to_string` was, without the heap.
+///
+/// The point of routing through `core::fmt` rather than dividing by ten by
+/// hand is [`gf_string_from_f64`]: `Display for f64` is the shortest
+/// round-tripping form, it lives in `core`, and reimplementing it is how a
+/// float starts printing differently from the TypeScript it was ported from.
+struct Digits {
+    buffer: [u8; DIGITS],
+    len: usize,
+}
+
+impl Digits {
+    fn new() -> Self {
+        Digits { buffer: [0; DIGITS], len: 0 }
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        &self.buffer[..self.len]
+    }
+}
+
+impl Write for Digits {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        let bytes = s.as_bytes();
+        // Aborts rather than returning `Err`, which `write!` would swallow into
+        // a short string. [`DIGITS`] is provably enough for every caller, so
+        // arriving here means that proof stopped holding — and a loud stop is
+        // worth more than a number that is quietly missing its tail.
+        if self.len + bytes.len() > DIGITS {
+            abort();
+        }
+        self.buffer[self.len..self.len + bytes.len()].copy_from_slice(bytes);
+        self.len += bytes.len();
+        Ok(())
+    }
+}
+
+/// `Display`, into a fresh `string`.
+fn from_display(value: impl core::fmt::Display) -> GfStr {
+    let mut digits = Digits::new();
+    let _ = write!(digits, "{value}");
+    unsafe { from_bytes(digits.as_bytes()) }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn gf_string_from_i64(value: i64) -> GfStr {
-    unsafe { from_bytes(value.to_string().as_bytes()) }
+    from_display(value)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gf_string_from_u64(value: u64) -> GfStr {
-    unsafe { from_bytes(value.to_string().as_bytes()) }
+    from_display(value)
 }
 
 /// Formatted the way JavaScript formats a number, so that a value printed by a
@@ -845,17 +1021,18 @@ pub extern "C" fn gf_string_from_u64(value: u64) -> GfStr {
 /// was written to resemble.
 #[unsafe(no_mangle)]
 pub extern "C" fn gf_string_from_f64(value: f64) -> GfStr {
-    let text = if value.is_nan() {
-        "NaN".to_owned()
-    } else if value.is_infinite() {
-        if value > 0.0 { "Infinity".to_owned() } else { "-Infinity".to_owned() }
-    } else if value == value.trunc() && value.abs() < 1e21 {
+    if value.is_nan() {
+        return unsafe { from_bytes(b"NaN") };
+    }
+    if value.is_infinite() {
+        let text: &[u8] = if value > 0.0 { b"Infinity" } else { b"-Infinity" };
+        return unsafe { from_bytes(text) };
+    }
+    if value == unsafe { trunc(value) } && value.abs() < 1e21 {
         // `1.0` prints as `1`, as it does in JavaScript.
-        format!("{}", value as i64)
-    } else {
-        format!("{value}")
-    };
-    unsafe { from_bytes(text.as_bytes()) }
+        return from_display(value as i64);
+    }
+    from_display(value)
 }
 
 #[unsafe(no_mangle)]
@@ -870,22 +1047,16 @@ pub extern "C" fn gf_string_from_bool(value: u8) -> GfStr {
 /// `console.log`, `console.info`, `console.debug` — one line to stdout.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gf_print(s: GfStr) {
-    let mut out = std::io::stdout();
-    let _ = out.write_all(unsafe { bytes_of(s) });
-    let _ = out.write_all(b"\n");
-    // Flushed every line: a program that aborts should still have printed what
-    // it printed, and a test that compares stdout exactly cannot be at the
-    // mercy of buffering.
-    let _ = out.flush();
+    // Unbuffered: a program that aborts should still have printed what it
+    // printed, and a test that compares stdout exactly cannot be at the mercy
+    // of buffering.
+    stdio_line(STDOUT, unsafe { bytes_of(s) });
 }
 
 /// `console.warn`, `console.error` — one line to stderr, matching Node.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gf_eprint(s: GfStr) {
-    let mut err = std::io::stderr();
-    let _ = err.write_all(unsafe { bytes_of(s) });
-    let _ = err.write_all(b"\n");
-    let _ = err.flush();
+    stdio_line(STDERR, unsafe { bytes_of(s) });
 }
 
 /// `strlen`, for a `CString`.
@@ -947,7 +1118,7 @@ pub unsafe extern "C" fn gf_cstr_len(s: *const u8) -> usize {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gf_find_itab(descriptor: *const u8, key: u64) -> *const u8 {
     if descriptor.is_null() {
-        return std::ptr::null();
+        return core::ptr::null();
     }
     let words = descriptor as *const usize;
     unsafe {
@@ -959,7 +1130,7 @@ pub unsafe extern "C" fn gf_find_itab(descriptor: *const u8, key: u64) -> *const
             }
         }
     }
-    std::ptr::null()
+    core::ptr::null()
 }
 
 /// Whether `descriptor`'s base chain reaches `target`. `1` for yes.

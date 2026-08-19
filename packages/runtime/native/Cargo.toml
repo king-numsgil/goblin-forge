@@ -22,9 +22,11 @@ name = "goblin_runtime"
 crate-type = ["staticlib", "cdylib"]
 
 [dependencies]
-libc = "0.2"
+# `default-features = false` drops libc's own `std` feature. The crate is
+# no_std, and a dependency that pulls std back in would relink the very
+# machinery this crate is arranged to leave out.
+libc = { version = "0.2", default-features = false }
 libmimalloc-sys = { version = "0.1.49", features = ["extended"] }
-mimalloc = "0.1.52"
 
 [profile.release]
 opt-level = 3
