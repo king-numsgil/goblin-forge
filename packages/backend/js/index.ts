@@ -17,10 +17,10 @@
  * costume.
  */
 
-import { Backend, outputExtension, schemaFingerprint } from "../binding.js";
+import { Backend, outputExtension, outputPrefix, schemaFingerprint } from "../binding.js";
 import { SCHEMA_FINGERPRINT_HEX } from "./mir.generated.ts";
 
-export { Backend, outputExtension, schemaFingerprint };
+export { Backend, outputExtension, outputPrefix, schemaFingerprint };
 export type {
     BackendDiagnostic,
     BackendOptions,

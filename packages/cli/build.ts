@@ -74,6 +74,7 @@ const addon = createRequire(import.meta.url)(addonPath);
 
 export const Backend = addon.Backend;
 export const outputExtension = addon.outputExtension;
+export const outputPrefix = addon.outputPrefix;
 export const schemaFingerprint = addon.schemaFingerprint;
 `,
     "utf8",

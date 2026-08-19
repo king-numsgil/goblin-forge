@@ -357,10 +357,22 @@ pub fn schema_fingerprint() -> String {
 /// The file extension a target of this kind gets on this platform.
 #[napi]
 pub fn output_extension(kind: String) -> String {
-    let kind = match kind.as_str() {
+    goblin_codegen::extension_for(output_kind(&kind), cfg!(windows)).to_owned()
+}
+
+/// The file name prefix a target of this kind gets on this platform.
+///
+/// The other half of the name, and the half that is easy to forget because
+/// Windows does not have one. See `prefix_for`.
+#[napi]
+pub fn output_prefix(kind: String) -> String {
+    goblin_codegen::prefix_for(output_kind(&kind), cfg!(windows)).to_owned()
+}
+
+fn output_kind(kind: &str) -> OutputKind {
+    match kind {
         "static-lib" => OutputKind::StaticLib,
         "shared-lib" => OutputKind::SharedLib,
         _ => OutputKind::Bin,
-    };
-    goblin_codegen::extension_for(kind, cfg!(windows)).to_owned()
+    }
 }

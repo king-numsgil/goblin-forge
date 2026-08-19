@@ -21,6 +21,7 @@ import {
     checkBindingsMatchAddon,
     encodeModule,
     outputExtension,
+    outputPrefix,
     printModule,
 } from "@goblin-forge/backend";
 
@@ -508,13 +509,31 @@ export class Compiler {
         };
     }
 
+    /**
+     * What the platform calls a target of this kind, given the name asked for.
+     *
+     * Both halves are the platform's to decide and neither is decoration: a
+     * Unix library that is not `lib`-something is one no consumer can name with
+     * `-l`, and the linker's answer — `cannot find -lapp` — is about a file
+     * sitting right there under a name it will not look for.
+     *
+     * Both halves are also skipped when the name already carries them, so that
+     * an explicit `--out bin/libapp.so` is honoured rather than turned into
+     * `liblibapp.so.so`.
+     */
     #outputPath(kind: OutputKind): string {
         const base = this.#resolve(this.#options.output);
-        const extension = outputExtension(kind);
-        if (extension === "") {
-            return base;
+        const dir = dirname(base);
+        let name = basename(base);
+        const prefix = outputPrefix(kind);
+        if (prefix !== "" && !name.startsWith(prefix)) {
+            name = prefix + name;
         }
-        return base.toLowerCase().endsWith(`.${extension}`) ? base : `${base}.${extension}`;
+        const extension = outputExtension(kind);
+        if (extension !== "" && !name.toLowerCase().endsWith(`.${extension}`)) {
+            name = `${name}.${extension}`;
+        }
+        return join(dir, name);
     }
 
     #resolve(path: string): string {

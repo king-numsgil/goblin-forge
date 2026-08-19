@@ -572,6 +572,11 @@ describe("library targets", () => {
             {type: "static-lib"},
         );
         expect(result.ok).toBe(true);
+        // An archive gets the platform's name for one too, for the same reason
+        // a shared object does — `-lapp` finds `libapp.a` and nothing else.
+        expect(basename(result.output!)).toBe(
+            result.output!.endsWith(".lib") ? "app.lib" : "libapp.a",
+        );
     });
 
     test("a `bin` without `main` is rejected with a file and a line", async () => {
@@ -593,6 +598,14 @@ describe("library targets", () => {
         );
         expect(result.ok).toBe(true);
         expect(result.output).toMatch(/\.(dll|so)$/);
+        // The name, not only the extension. A Unix shared object that is not
+        // `lib`-something cannot be named with `-l`, and every consumer below
+        // reaches it through a full path — which CMake quietly decomposes into
+        // `-L` and `-l` anyway, so the omission surfaced as `cannot find -lapp`
+        // rather than as anything about a name.
+        expect(basename(result.output!)).toBe(
+            result.output!.endsWith(".dll") ? "app.dll" : "libapp.so",
+        );
         if (result.output?.endsWith(".dll") === true) {
             // Windows cannot link against a DLL directly; the consumer links this
             // stub, which turns a call into a jump through the import address table.

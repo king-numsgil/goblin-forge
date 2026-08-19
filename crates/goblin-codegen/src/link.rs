@@ -259,6 +259,25 @@ fn unix_command(request: &LinkRequest<'_>) -> Command {
         // that. Windows is the platform that needs to be told (see the `.def`
         // file in `msvc_command`), and the asymmetry is the platforms', not
         // this compiler's.
+
+        // What a consumer records in `DT_NEEDED`. Without this the linker
+        // records the path it was *given*, so a consumer that links the library
+        // by absolute path bakes this build directory into its executable and
+        // the copy shipped beside it is never the one loaded. Naming the file
+        // instead leaves the search to the loader, which is what an rpath and a
+        // "put it next to the binary" instruction are both talking to.
+        if let Some(name) = request.output.file_name() {
+            let name = name.to_string_lossy();
+            // ld64 does not take `-soname`; `-install_name` is the same idea,
+            // and `@rpath` there means "wherever the consumer says to look"
+            // rather than a fixed directory.
+            let flag = if cfg!(target_os = "macos") {
+                format!("-Wl,-install_name,@rpath/{name}")
+            } else {
+                format!("-Wl,-soname,{name}")
+            };
+            command.arg(flag);
+        }
     }
     if request.rpath_origin {
         // Mach-O has no `$ORIGIN`; `@loader_path` is the same idea under a
@@ -301,6 +320,21 @@ fn render(command: &Command) -> String {
         }
     }
     out
+}
+
+/// The file name prefix a target of this kind gets on this platform.
+///
+/// Empty everywhere except a Unix library, where it is `lib` and where leaving
+/// it off is not cosmetic: `-lapp` searches for `libapp.so`, so a shared object
+/// called `app.so` is one no consumer can name. CMake reaches this the long way
+/// round — it decomposes a full path to a shared library into `-L` and `-l` —
+/// and the failure it produces is `cannot find -lapp` about a file the user is
+/// looking straight at.
+pub fn prefix_for(kind: OutputKind, target_is_windows: bool) -> &'static str {
+    match (kind, target_is_windows) {
+        (OutputKind::Bin, _) | (_, true) => "",
+        (OutputKind::StaticLib | OutputKind::SharedLib, false) => "lib",
+    }
 }
 
 /// The file extension a target of this kind gets on this platform.
@@ -358,6 +392,60 @@ mod tests {
         assert_eq!(extension_for(OutputKind::SharedLib, false), "so");
         assert_eq!(extension_for(OutputKind::Bin, true), "exe");
         assert_eq!(extension_for(OutputKind::Bin, false), "");
+    }
+
+    /// Half of a Unix library's name is the `lib` in front of it, and the half
+    /// that a linker asked for `-lapp` actually searches on.
+    #[test]
+    fn unix_libraries_are_named_lib_something() {
+        assert_eq!(prefix_for(OutputKind::StaticLib, false), "lib");
+        assert_eq!(prefix_for(OutputKind::SharedLib, false), "lib");
+        assert_eq!(prefix_for(OutputKind::Bin, false), "");
+        // MSVC names an import library `app.lib` and a DLL `app.dll`; a `lib`
+        // in front would be a file nothing looks for.
+        assert_eq!(prefix_for(OutputKind::StaticLib, true), "");
+        assert_eq!(prefix_for(OutputKind::SharedLib, true), "");
+        assert_eq!(prefix_for(OutputKind::Bin, true), "");
+    }
+
+    /// A shared object carries the name consumers should record, so that the
+    /// copy shipped beside a consumer is the copy it loads.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn unix_shared_libs_carry_a_soname() {
+        let objects = vec![PathBuf::from("lib.o")];
+        let request = LinkRequest {
+            kind: OutputKind::SharedLib,
+            objects: &objects,
+            archives: &[],
+            system_libs: &[],
+            output: Path::new("/build/out/libdemo.so"),
+            exports: &[],
+            rpath_origin: false,
+        };
+        let rendered = render(&unix_command(&request));
+        assert!(rendered.contains("-Wl,-soname,libdemo.so"), "{rendered}");
+        // The *name*, not the path it happened to be built at.
+        assert!(!rendered.contains("-Wl,-soname,/build"), "{rendered}");
+    }
+
+    /// An executable has no soname, and passing one is not harmless — it sets
+    /// `DT_SONAME` on a thing nothing links against.
+    #[test]
+    fn a_binary_gets_no_soname() {
+        let objects = vec![PathBuf::from("main.o")];
+        let request = LinkRequest {
+            kind: OutputKind::Bin,
+            objects: &objects,
+            archives: &[],
+            system_libs: &[],
+            output: Path::new("hello"),
+            exports: &[],
+            rpath_origin: false,
+        };
+        let rendered = render(&unix_command(&request));
+        assert!(!rendered.contains("soname"), "{rendered}");
+        assert!(!rendered.contains("install_name"), "{rendered}");
     }
 
     #[test]
