@@ -853,6 +853,259 @@ three different sentences, and a test that they are different.
 
 ---
 
+## §17 — The backend becomes LLVM *(settled 2026-08-18, not yet built)*
+
+**Answer: LLVM replaces Cranelift, and it happens before any vector work
+lands.** The requirement that forces it is f64 linear algebra at speed, for a
+space simulation whose world coordinates cannot be f32. The ordering is
+deliberate: every further feature built on Cranelift is another thing to port,
+so the swap goes first rather than after the pit is deeper.
+
+### The requirement is f64, and that is what makes it structural
+
+For f32 this decision would not be worth making. A `vec4<f32>` is one XMM
+register, a `mat4<f32>` is four, and GLM — the shape being copied — is an SSE2
+library with a thin AVX layer bolted on for exactly two types. Cranelift covers
+that case today.
+
+Doubles move every shape up one register class:
+
+| type | bits | AVX2 | SSE only |
+|---|---|---|---|
+| `dvec2` | 128 | 1 YMM, half wasted | 1 XMM |
+| `dvec3` | 192 | 1 YMM, one lane wasted | 1 XMM + scalar |
+| `dvec4` | 256 | 1 YMM | 2 XMM |
+| `dmat4` | 1024 | 4 YMM | 8 XMM |
+
+The 2× on `dvec4` arithmetic is the obvious cost and the smaller one. The last
+row is the argument: x86-64 has sixteen vector registers, so under SSE a single
+`dmat4` occupies half the register file and a matrix-times-matrix — two operands
+and an accumulator — has lost before it starts. Every one spills. That is not a
+constant factor, it is the abstraction failing to be zero-cost, which for a math
+library is the whole product.
+
+The target is **AVX2 + FMA**, not AVX-512: four doubles per YMM, near-universal
+since about 2014, and free of the downclocking and consumer-availability
+problems of 512-bit parts. FMA is wanted for its own sake as much as for speed —
+Kepler solvers and Newton–Raphson iteration round once instead of twice, and at
+f64 world scale that accuracy is a feature.
+
+### The premise, checked rather than assumed
+
+Cranelift 0.134's IR type system names `F64X8`, `I32X8` and friends, and
+`ir/types.rs` documents lane counts up to 256. This is a trap. In
+`isa/x64/inst/regs.rs`:
+
+```rust
+RegClass::Vector => unreachable!(),
+```
+
+The x86-64 backend has no vector register class beyond `Float`, which is XMM.
+The wide types exist in the IR and cannot be register-allocated on the target
+that matters. The failure mode for anyone who tries is not a diagnostic.
+
+The nuance worth recording, because it makes the gap narrower than it sounds:
+`isa/x64/mod.rs:174` gates on `has_avx() && has_fma()`, so Cranelift *does* emit
+AVX-encoded instructions and real FMA when the host has them. What is missing is
+lane width, not the instruction set.
+
+### What tipped it was not AVX
+
+Three reasons found while checking the first one, all of which outrank it.
+
+**SROA, not the inliner.** Cranelift 0.134 ships `src/inline.rs`, whose own
+header describes it as "inlining as a library" — `InlineCommand::{KeepCall,
+Inline}` plus an `Inline` trait, mechanics without heuristics. The mechanics are
+the hard part and they are done; a policy of "inline what is marked, or what is
+small" is an afternoon. So "Cranelift cannot inline" is false and should not be
+cited. What Cranelift cannot do is *clean up afterwards*: its egraph mid-end
+does GVN, LICM, constant folding and redundant-load elimination through alias
+analysis, but it does not promote aggregates to registers. Inlining a `dvec3`
+operator without scalar replacement yields the callee's body plus a stack slot
+for its result, so a four-operator chain is four slots and eight memory
+round-trips — roughly what the calls cost. mem2reg/SROA is the pass being
+bought, and for a value-semantics math library the cleanup *is* the
+optimization.
+
+**No auto-vectorizer at all.** Not a weak one; none. Cranelift emits a vector
+instruction only where one was written. Since the bulk numerical work here wants
+SoA (below), the consequence is that every SoA loop is hand-vectorized forever.
+This is the reason that compounds rather than the one that is largest today.
+
+**No debug information, and the knob is a lie.** `object.rs:25` declares
+`pub debug_info: bool` and `packages/backend/src/lib.rs:182` threads it through;
+nothing reads it. No DWARF, no PDB, no line tables — so no source-level
+debugger, no symbolized profile in perf or VTune or Superluminal, and no
+symbolicated crash dump from a player. For a compiler under construction that is
+acceptable. For one meant to ship a game it is not, and teaching Cranelift to
+emit real DWARF is work that would be done from scratch, against LLVM's
+DIBuilder being a worn path to both DWARF and CodeView.
+
+### What the port costs, and what it does not
+
+Cranelift is barely in this codebase, which is the reason this is a port rather
+than a rewrite:
+
+| file | lines | `cranelift` references |
+|---|---|---|
+| `translate.rs` | 2770 | 18 |
+| `abi.rs` | 755 | 7 |
+| `layout.rs` | 401 | 1 |
+| `link.rs` | 380 | 0 |
+| `object.rs` | 266 | 9 |
+
+The instruction set in use is about fifty opcodes — `iadd`, `load`, `brif`,
+`fcvt_to_sint_sat` — every one with a direct LLVM equivalent. `translate.rs` is
+mechanical.
+
+**`abi.rs` survives nearly intact, and that is the single most important fact
+here.** LLVM does not classify C ABIs either; clang does it in the *frontend*
+and hands LLVM types plus `byval`, `sret` and `inreg` attributes. The Win64 and
+System V eightbyte classification — the code REWRITE-PLAN §13 calls the newest
+and best-tested in the project, validated against GCC 15 on real hardware — is
+untouched in substance. It stops emitting a `cranelift::Signature` and starts
+emitting LLVM types and parameter attributes. `link.rs` is untouched outright.
+`object.rs` is replaced. `layout.rs` needs one reference removed.
+
+Getting `cranelift::ir::Type` out of `layout.rs` and `abi.rs` — one reference
+and seven — is worth doing as a separate step before the port, because it is
+what keeps the port a port, and it leaves the two-backend option (Cranelift for
+debug builds, LLVM for release, rustc's own arrangement) available without
+paying for it now.
+
+### Textual IR and a subprocess, not `llvm-sys`
+
+`llvm-sys` means every contributor and every CI runner needs a version-matched
+LLVM that MSVC agrees with, and there is no `rustup component add llvm`. It also
+means `goblin-backend.win32-x64-msvc.node` goes from 6.1 MB — small enough to
+commit, and committed — to something between 60 and 120 MB, which is not.
+
+The decisive argument is that this compiler **already** shells out: to
+`cargo rustc` for the runtime (`packages/runtime/src/build.ts:69`), to the
+system linker (`link.rs`), and to `cc`. "Requires an external toolchain at
+compile time" is the status quo, not a new class of dependency, which is what
+makes emitting IR text and invoking `llc` or `clang` cheap where it would be
+expensive elsewhere. The cost is a process spawn per module and no in-memory
+path. The benefit beyond distribution is that the output is diffable and can be
+pasted into Godbolt — which matters most for exactly the vector codegen this is
+all for.
+
+`llvm-sys` stays available as a later optimization if spawn cost ever shows up
+in a profile. It is not the starting point.
+
+### The invariant that gets harder, recorded as a risk
+
+CLAUDE.md's second rule is that the backend never reports a user error — it
+panics, so that a test cannot mistake a compiler crash for a correct rejection.
+Cranelift honours this by construction: bad IR hits the verifier or panics, and
+either way it is loud.
+
+**LLVM's failure mode for a whole class of mistakes is a silent miscompile.**
+Wrong `byval` alignment, `sret` on the wrong parameter, a GEP off by one field —
+the verifier checks structure, not intent, and the result is a program that
+links and runs and is wrong. The C++ oracle and `tests/struct-abi.test.ts` are
+the real defence and they are already built, which is the good news. The bad
+news is that the feedback loop goes from a stack trace to a diverged allocation
+trace, and that difference is not compressible by throwing more compute at it.
+The System V `__m256` classification is the specific place to expect trouble:
+Win64 passes 32-byte vectors by reference under the default convention (only
+`__vectorcall` puts them in registers) and System V's rules for them are
+AVX-conditional. Both must be *tested* against a C compiler rather than written
+from the psABI — §"System V is tested, not asserted" applies unchanged, and with
+more cases.
+
+Relatedly, LLVM has a UB surface Cranelift does not: poison, `nsw`/`nuw`,
+`noalias`, TBAA. The default is to emit none of them. That costs some
+performance and is correct; the hazard is asserting one *accidentally* and
+having it be true for two years.
+
+### Decided alongside, and independent of the backend
+
+Two things settled in the same discussion that hold whichever backend wins.
+
+**A `dvecN` gets a packed type and a spelled aligned type, not one type with
+hidden padding.** The tempting design — keep `dvec3` densely packed at 24 bytes
+so array stride and the C boundary stay exact, and widen to 32 only in registers
+— does not survive counting instructions. Getting 24 bytes into a YMM is either
+a 32-byte load that reads past the end of the last array element (a fault, in
+the case where mimalloc hands back page-aligned memory), a masked load whose
+throughput is poor and whose masked *store* carries a store-forwarding stall, or
+a three-instruction split. And the store can never be widened at all: the eight
+bytes past element *i* are element *i+1*'s `x`. Taking the split, an isolated
+packed `dvec3 + dvec3` is ten instructions under AVX2 against eight under SSE2 —
+the padding scheme makes single operations *slower*, and only pays across a
+chain of operators that stays in registers, which is the SROA dependency again.
+Stride 24 also means alignment cycles 0, 24, 16, 8 mod 32, so every load is
+unaligned and cache-line splits are constant.
+
+So both layouts are written down and the user picks, which is GLM's answer
+(`glm::vec3` versus `glm::aligned_vec3`) arrived at independently. The house
+rule decides it: a memory shape the type does not state is a property
+re-derived at every load, store and FFI boundary, and that is the exact failure
+pattern the ownership rule exists to prevent.
+
+**Bulk numerical work is SoA; AoS is for the C boundary and gameplay code.**
+The motivation for packing was memory bandwidth, and for the loops where
+bandwidth actually dominates — propagating ten thousand orbits, n-body
+integration — packed AoS is the wrong answer anyway. Three separate `f64[]`
+beat it outright: no padding, permanent alignment, four *objects* per YMM per
+component, no shuffles. Splitting the two cases is what releases AoS from having
+to carry the bandwidth argument, which was the thing forcing the 24-byte
+compromise.
+
+Worth noting for whoever revisits this: the vertex-buffer constraint that
+motivated packing belongs to `vec3<f32>` at 12 bytes, not to `dvec3`. GPUs run
+f64 attributes at 1/32 or 1/64 rate, so the pipeline is doubles on the CPU,
+subtract the floating origin, downcast, upload.
+
+### Floating-point contraction is a language question, not a backend one
+
+Neither backend fuses `a * b + c` into an FMA without permission, because it
+changes the result. So an explicit `fma` intrinsic or an opt-in contraction mode
+has to be designed either way, and it should be settled before the port rather
+than becoming a flag attached to whichever backend is underneath.
+
+### Two baseline-ISA faults found while checking this
+
+Both are live today, both are small, and neither depends on the outcome.
+
+`make_isa` in `object.rs` branches on whether a target was named. The host path
+uses `cranelift_native::builder()`, which detects and enables host features; the
+explicit-triple path uses `isa::lookup(parsed)`, which yields a **baseline** ISA
+with no AVX and no FMA. So `--target x86_64-pc-windows-msvc` and no `--target`
+silently produce different instruction sets on the same machine.
+
+`packages/runtime/src/build.ts:69` runs `cargo rustc --release --quiet` with no
+`-C target-cpu`, so the runtime — which already goes through LLVM — is compiled
+at baseline too.
+
+### The case against, and why it did not win
+
+Recorded because it is a good case and the decision should not look obvious in
+hindsight.
+
+The backend port is the *smaller* half of the work: MIR vector types, the
+packed/aligned pair, `__m256` classification, contraction semantics,
+target-feature plumbing and a CPU-dispatch story for machines without AVX2 are
+all required under either backend and are most of the calendar time. And the
+strongest argument for the port may never appear in a profile — the SROA case is
+about fine-grained per-object expression chains, while a space simulation's f64
+throughput lives in the bulk integration loop, which is SoA, where AoS register
+shape is irrelevant. The cheap path was: fix the two ISA faults above, write the
+bulk kernels SoA in Rust with `target_feature(enable = "avx2,fma")` at a
+granularity coarse enough that the call boundary rounds to zero, build the game,
+and profile before porting anything.
+
+The user's answer, and it is the deciding one: the implementation labour here is
+an agent's rather than a person's, so six months of human estimate is not the
+quantity being spent. What is being spent is money and validation wall-clock,
+and the wager is that porting now costs less than porting after several more
+milestones have been built on top of Cranelift. Which is the ordering argument
+at the head of this section, and the reason the swap precedes the vector work
+rather than following it.
+
+---
+
 ## Class decisions *(2026-08-12, milestone 8)*
 
 ### Every class has a vtable pointer, including one with no virtual methods
