@@ -1150,12 +1150,51 @@ near-free on AVX2-era parts when it does not cross a cache line, which weakens
 half the alignment argument for the aligned type above — the cache-line-split
 half stands, since a 24-byte stride still straddles lines constantly.
 
-`x86-64-v3` is the spelling: AVX2, FMA, BMI1/2, LZCNT, MOVBE. rustc, clang and
-LLVM all take it as `-C target-cpu=` / `-mcpu=`, so both ISA faults above become
-the same string. Cranelift has no microarchitecture presets — its generated x64
-settings expose `has_avx`, `has_avx2`, `has_fma`, `has_bmi1`, `has_bmi2`,
-`has_lzcnt` and `has_popcnt` individually — so fixing `make_isa` in the interim
-means enabling them one at a time, and the single flag arrives with the port.
+`x86-64-v3` is the spelling: AVX2, FMA, BMI1/2, LZCNT, MOVBE. The same value
+reaches each tool under a different flag, and getting this wrong is an error
+rather than a silent fallback — rustc takes `-C target-cpu=x86-64-v3`, clang
+takes `-march=x86-64-v3`, and `llc` takes `-mcpu=x86-64-v3`. Passing `-mcpu=` to
+clang on an x86 target is rejected outright ("unsupported option"), because on
+x86 clang follows GCC in reserving `-mcpu` for other architectures.
+
+Cranelift has no microarchitecture presets — its generated x64 settings expose
+`has_avx`, `has_avx2`, `has_fma`, `has_bmi1`, `has_bmi2`, `has_lzcnt` and
+`has_popcnt` individually — so fixing `make_isa` in the interim means enabling
+them one at a time, and the single flag arrives with the port.
+
+**The Win64 claim above is tested, not asserted.** A function declared
+`define <4 x double> @vadd(<4 x double>, <4 x double>)`, compiled by clang 22.1.8
+for `x86_64-pc-windows-msvc` at `-O2 -march=x86-64-v3`, is three instructions:
+
+```asm
+vmovapd (%rcx), %ymm0
+vaddpd  (%rdx), %ymm0, %ymm0
+retq
+```
+
+Both 32-byte arguments arrived as *addresses* in `rcx` and `rdx` — by reference,
+exactly as the convention says — while the arithmetic itself is VEX-encoded on
+YMM registers. Both halves of this section's argument, in one disassembly.
+
+### The toolchain this needs, and what a stock Windows LLVM provides
+
+Checked on the development machine, 2026-08-18: winget's `LLVM.LLVM` 22.1.8
+installs to `C:\Program Files\LLVM` and ships the *toolchain* — `clang`,
+`clang-cl`, `lld-link`, `llvm-ar`, `llvm-objdump` — but none of the developer
+tools. No `llc`, `opt`, `llvm-as`, `llvm-dis`, `llvm-mc` or `FileCheck`.
+
+That is sufficient, and it is worth writing down why so the missing `llc` does
+not read as a blocker later. `clang -c module.ll -o module.obj` compiles IR text
+to an object directly, which is the whole of the emit path chosen above, and
+`clang -O2` runs the pass pipeline that `opt` would have. Neither absent tool is
+on the critical path.
+
+What the stock install *does* foreclose is the `llvm-sys` fallback. There is no
+`llvm-config`, no `include/llvm-c`, and six `.lib` files where a development
+build has well over a hundred. Taking that route later means building LLVM from
+source rather than changing a dependency — so the note above that `llvm-sys`
+stays "available as a later optimization" is true of the design and not of any
+toolchain currently on disk.
 
 ---
 
