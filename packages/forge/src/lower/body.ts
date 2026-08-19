@@ -3594,7 +3594,7 @@ export class BodyLowerer extends BoundaryLowerer {
             return undefined;
         }
 
-        const lifted = this.outer.liftClosure(node, expected, this.scopes);
+        const lifted = this.outer.liftClosure(node, expected, this.scopes, this.self);
         if (lifted === undefined) {
             return undefined;
         }

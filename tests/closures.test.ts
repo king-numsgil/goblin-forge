@@ -277,6 +277,149 @@ describe("LocalFn", () => {
     });
 });
 
+/**
+ * `this` is a local of type `Reference<Self>` bound under that name
+ * (REWRITE-PLAN §4.6), so a closure captures it the way it captures any other
+ * local — one mechanism, not two. The environment holds a reference to the
+ * local holding the reference, which is one more indirection than strictly
+ * needed and one fewer shape of capture to keep in agreement.
+ */
+describe("LocalFn, capturing `this`", () => {
+    test("a field is read and written through the captured receiver", async () => {
+        const result = await run(
+            "closure-this-field",
+            `function apply(f: LocalFn<() => void>): void { f(); }
+
+       class Counter {
+         n: i32 = 0;
+
+         bump(by: i32): void {
+           this.n += by;
+         }
+
+         run(): void {
+           apply(() => {
+             this.n += 1;
+             this.bump(10);
+             console.log(\`\${this.n}\`);
+           });
+         }
+       }
+
+       export function main(): i32 {
+         const c: Counter = new Counter();
+         c.run();
+         console.log(\`\${c.n}\`);
+         return 0;
+       }\n`,
+        );
+        // The second line is the point: the writes landed on `c`, not on a copy
+        // the closure was holding.
+        expect(result.stdout).toBe("11\n11\n");
+        expect(result.stderr).toBe("");
+    });
+
+    test("`this` alongside parameters and locals", async () => {
+        const result = await run(
+            "closure-this-mixed",
+            `function apply(f: LocalFn<() => void>): void { f(); }
+
+       class Acc {
+         total: i32 = 0;
+
+         add(a: i32, b: i32): void {
+           const bonus: i32 = 100;
+           apply(() => { this.total += a + b + bonus; });
+         }
+       }
+
+       export function main(): i32 {
+         const acc: Acc = new Acc();
+         acc.add(1, 2);
+         console.log(\`\${acc.total}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("103\n");
+    });
+
+    test("a method call through the captured receiver still dispatches virtually", async () => {
+        const result = await run(
+            "closure-this-virtual",
+            `function apply(f: LocalFn<() => void>): void { f(); }
+
+       class Animal {
+         speak(): string { return "..."; }
+         announce(): void {
+           apply(() => { console.log(this.speak()); });
+         }
+       }
+
+       class Wolf extends Animal {
+         override speak(): string { return "howl"; }
+       }
+
+       export function main(): i32 {
+         const w: Wolf = new Wolf();
+         w.announce();
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("howl\n");
+    });
+
+    test("`super.m()` inside a closure is still a direct call to the base", async () => {
+        const result = await run(
+            "closure-this-super",
+            `function apply(f: LocalFn<() => void>): void { f(); }
+
+       class Animal {
+         speak(): string { return "..."; }
+       }
+
+       class Wolf extends Animal {
+         override speak(): string { return "howl"; }
+
+         both(): void {
+           apply(() => {
+             console.log(super.speak());
+             console.log(this.speak());
+           });
+         }
+       }
+
+       export function main(): i32 {
+         const w: Wolf = new Wolf();
+         w.both();
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("...\nhowl\n");
+    });
+
+    test("a closure inside a constructor captures the receiver being built", async () => {
+        const result = await run(
+            "closure-this-ctor",
+            `function apply(f: LocalFn<() => void>): void { f(); }
+
+       class Box {
+         v: i32 = 0;
+
+         constructor(start: i32) {
+           apply(() => { this.v = start; });
+         }
+       }
+
+       export function main(): i32 {
+         const b: Box = new Box(7);
+         console.log(\`\${b.v}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("7\n");
+    });
+});
+
 describe("LocalFn, refused", () => {
     test("returning one", async () => {
         await expectRejected(

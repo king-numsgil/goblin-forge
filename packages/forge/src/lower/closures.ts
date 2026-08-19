@@ -81,6 +81,61 @@ function namesAValue(node: ts.Identifier): boolean {
 }
 
 /**
+ * Whether a closure body reads the enclosing method's `this`.
+ *
+ * Separate from {@link capturedNames} because `this` is a keyword rather than an
+ * identifier, so no symbol lookup answers it — but it is otherwise an ordinary
+ * capture. It is already a `Reference<Self>` local (REWRITE-PLAN §4.6), which is
+ * what lets it travel through the environment with no second mechanism: the
+ * closure captures the local holding the reference, exactly as it captures any
+ * other local.
+ *
+ * **A `function` expression binds its own `this`**, so nothing inside one refers
+ * to the enclosing method's and this answers `false` for the whole node. Reading
+ * `this` in there is then the `GF0002` it already is in a free function, which
+ * is the right complaint. An arrow function does not rebind, which is the entire
+ * reason the two forms are distinguished here.
+ */
+export function usesThis(fn: ts.ArrowFunction | ts.FunctionExpression): boolean {
+    if (!ts.isArrowFunction(fn)) {
+        return false;
+    }
+
+    let found = false;
+    const visit = (node: ts.Node): void => {
+        if (found) {
+            return;
+        }
+        if (node.kind === ts.SyntaxKind.ThisKeyword) {
+            found = true;
+            return;
+        }
+        // Do not descend into anything that binds a `this` of its own: a `this`
+        // down there is a different one, and capturing on its behalf would put
+        // the wrong object in the environment.
+        if (rebindsThis(node)) {
+            return;
+        }
+        ts.forEachChild(node, visit);
+    };
+    visit(fn.body);
+    return found;
+}
+
+function rebindsThis(node: ts.Node): boolean {
+    return (
+        ts.isFunctionExpression(node) ||
+        ts.isFunctionDeclaration(node) ||
+        ts.isClassDeclaration(node) ||
+        ts.isClassExpression(node) ||
+        ts.isMethodDeclaration(node) ||
+        ts.isGetAccessorDeclaration(node) ||
+        ts.isSetAccessorDeclaration(node) ||
+        ts.isConstructorDeclaration(node)
+    );
+}
+
+/**
  * Whether a lambda is being written as an argument to a call.
  *
  * The one position where a `LocalFn`'s environment — a temporary of the

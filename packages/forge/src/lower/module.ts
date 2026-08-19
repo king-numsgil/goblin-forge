@@ -52,7 +52,7 @@ import {
 import { type Binding, isCapture, Scopes } from "./scopes.ts";
 import { describe, isStaticMember, moduleTag, needsDrop } from "./util.ts";
 import { BodyLowerer } from "./body.ts";
-import { capturedNames } from "./closures.ts";
+import { capturedNames, usesThis } from "./closures.ts";
 
 export class Lowerer {
     readonly #program: ts.Program;
@@ -509,6 +509,7 @@ export class Lowerer {
         node: ts.ArrowFunction | ts.FunctionExpression,
         type: Extract<MachineType, { kind: "localfn" }>,
         enclosing: Scopes,
+        self: ClassInfo | undefined,
     ): LiftedClosure | undefined {
         if (node.parameters.length !== type.params.length) {
             this.unsupported(node, "a closure whose arity tsc and the lowerer disagree on");
@@ -532,8 +533,16 @@ export class Lowerer {
         // top-level function, an enum member, an ambient declaration. They resolve
         // exactly as they would outside a closure, through the paths that already
         // handle them.
+        //
+        // `this` joins the list as an ordinary name, because that is what it is
+        // here: a local of type `Reference<Self>` bound under that name. Capturing
+        // it needs no second mechanism, and deliberately does not get one — the
+        // environment holds a reference to the local holding the reference, which
+        // is one more indirection than strictly required and one fewer shape of
+        // capture to keep in agreement.
+        const names = [...capturedNames(node, this.#checker), ...(usesThis(node) ? ["this"] : [])];
         const captures: { name: string; binding: Binding }[] = [];
-        for (const name of capturedNames(node, this.#checker)) {
+        for (const name of names) {
             const binding = enclosing.lookup(name);
             if (binding !== undefined) {
                 captures.push({name, binding});
@@ -609,6 +618,12 @@ export class Lowerer {
         });
 
         const lowerer = new BodyLowerer(this, builder, scopes, type.returns);
+        if (self !== undefined) {
+            // `inConstructor` is false even for a closure written inside one: the
+            // only thing it gates is `super(…)`, which is meaningless in a closure
+            // and which tsc rejects there anyway.
+            lowerer.setClassContext(self, false);
+        }
         lowerer.runClosure(
             node.body,
             typed === undefined || env === undefined

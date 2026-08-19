@@ -134,7 +134,6 @@ backend failure:
 | writing *through* a `Pointer<Pointer<T>>` for a primitive `T` — `cells[i] = p` | tsc, not the compiler. `Pointer<Pointer<u8>>` is `CorePointer<u8> & CorePointer<CorePointer<u8>>`, and the two index signatures merge to `u8 & CorePointer<u8>`, which nothing produces. Reading is fine, and `Pointer<CString>` is the spelling for a `char **` that has to be written | later |
 | static **fields** | `classes.ts`, the `isStatic` branch over property declarations — needs module-level storage the backend has never emitted; see below | later |
 | a closure **inside** a closure, over the outer one's capture | `lower/module.ts`, `liftClosure` — it would have to reach through two environments, one of which is not the frame it names | later |
-| `this` inside a closure | nothing binds one: `liftClosure` seeds a fresh `Scopes` with captures and parameters only | later |
 | **escaping closures — `HeapFn<F>`** | nothing declares the type. DECISIONS §18 step 2: captures by move into an owning environment, reusing `GF0235` for contention. Not started, and deliberately after `LocalFn` | later |
 | **`RefCount<T>`** | nothing declares the type. DECISIONS §18 step 3, and its own feature rather than part of closures — shared ownership does not exist anywhere in the value model yet | later |
 | generic functions, optional/rest/defaulted/destructured parameters | `lower.ts`, `#classFnParams` and `#signature` | later |
@@ -183,7 +182,7 @@ pieces are:
 | the type as written | `runtime/global.d.ts` — an *optional* brand |
 | erasure to `localfn` | `checker/src/types.ts`, beside `fnptr`; both read `eraseSignature` |
 | the value's MIR type | `lower/module.ts`, `#localFnTy` — a struct of `{code, env}` |
-| capture analysis | `lower/closures.ts`, `capturedNames` |
+| capture analysis | `lower/closures.ts`, `capturedNames` and `usesThis` |
 | lifting the arrow | `lower/module.ts`, `liftClosure` |
 | the closure value | `lower/body.ts`, `#closure` |
 | calling one | `lower/body.ts`, `#localFnCall` |
@@ -217,12 +216,22 @@ takes. A dedicated `TyKind` would read better in a MIR dump and costs a
 fingerprint bump plus codegen work; the rule that matters lives in the frontend
 either way.
 
+**`this` is captured as an ordinary name.** It is already a local of type
+`Reference<Self>` bound under that name, so nothing about the environment or the
+projection is special-cased for it; `usesThis` exists only because `this` is a
+keyword and so has no symbol for `capturedNames` to resolve. A method call
+through a captured receiver still dispatches virtually, and `super.m()` inside a
+closure is still a direct call to the base. An arrow does not rebind `this` and
+a `function` expression does, which is the one distinction `usesThis` has to
+draw — tsc rejects the latter first under `noImplicitThis`, and `usesThis`
+answers `false` for it rather than relying on that.
+
 What it does *not* do yet: a closure inside a closure over the outer one's
-capture (`GF0001` — it would have to reach through two environments), `this`
-inside a closure, and the escaping form. `tests/closures.test.ts` is the suite;
-`tests/oracle/cases/closure_capture*.{cpp,gf.ts}` are the two oracle cases, and
-the write-through one is the load-bearing half — a capture that copied would
-still balance, around the wrong object.
+capture (`GF0001` — it would have to reach through two environments), and the
+escaping form. `tests/closures.test.ts` is the suite;
+`tests/oracle/cases/closure_capture*.{cpp,gf.ts}` are the three oracle cases,
+and the two write-through ones are the load-bearing half — a capture that
+copied would still balance, around the wrong object.
 
 ## Diagnostic codes in use
 

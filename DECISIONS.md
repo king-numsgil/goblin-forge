@@ -1288,6 +1288,21 @@ Two rules were not in the design and are not optional:
   of nothing. `return name` inside a closure is therefore a copy, which is what
   it already is for a by-value parameter and for the same reason (§11.4).
 
+**`this` is captured as an ordinary name**, and deliberately gets no mechanism
+of its own. It is already a local of type `Reference<Self>` bound under that
+name (REWRITE-PLAN §4.6), so the environment holds a reference to the local
+holding the reference — one more indirection than strictly required, and one
+fewer shape of capture to keep in agreement. A method call through a captured
+receiver still dispatches virtually and `super.m()` inside a closure is still a
+direct call to the base, because neither ever looked at anything but the
+receiver's own value.
+
+The one distinction that has to be drawn is the source-level one: an arrow
+function does not rebind `this` and a `function` expression does, so `this`
+inside the latter is never the enclosing method's. tsc rejects it first under
+`noImplicitThis`, and the capture analysis answers `false` for that node anyway
+rather than relying on it.
+
 Capture analysis asks tsc which declaration a name refers to, rather than
 collecting the names declared inside the closure and treating the rest as
 captures. The flat version is wrong in one shape and silently:
@@ -1301,10 +1316,12 @@ a real capture and the write above disappears.
 
 Verified against the C++ oracle, which is the arbiter here because a
 non-escaping closure is exactly `[&]` on a template parameter — `std::function`
-is not the comparison, since it type-erases onto the heap. Two cases, and the
-second is the one that matters: assigning a `string` *through* a capture
-releases the enclosing frame's old buffer, on schedule, with a trace identical
-to C++'s. A capture that copied would still balance, around the wrong object.
+is not the comparison, since it type-erases onto the heap. Three cases, and the
+two that matter are the writes: assigning a `string` *through* a capture
+releases the enclosing frame's old buffer on schedule, and a captured `this`
+whose object has an owning field neither copies the object nor allocates a
+second buffer. A capture that copied would still balance, around the wrong
+object.
 
 ### What `LocalFn` buys, stated exactly
 
