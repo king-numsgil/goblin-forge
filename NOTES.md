@@ -133,7 +133,6 @@ backend failure:
 | an interface mixing methods and data | `checker/src/types.ts`, `contractOf` — a rule, not a gap | — |
 | writing *through* a `Pointer<Pointer<T>>` for a primitive `T` — `cells[i] = p` | tsc, not the compiler. `Pointer<Pointer<u8>>` is `CorePointer<u8> & CorePointer<CorePointer<u8>>`, and the two index signatures merge to `u8 & CorePointer<u8>`, which nothing produces. Reading is fine, and `Pointer<CString>` is the spelling for a `char **` that has to be written | later |
 | static **fields** | `classes.ts`, the `isStatic` branch over property declarations — needs module-level storage the backend has never emitted; see below | later |
-| a closure **inside** a closure, over the outer one's capture | `lower/module.ts`, `liftClosure` — it would have to reach through two environments, one of which is not the frame it names | later |
 | **escaping closures — `HeapFn<F>`** | nothing declares the type. DECISIONS §18 step 2: captures by move into an owning environment, reusing `GF0235` for contention. Not started, and deliberately after `LocalFn` | later |
 | **`RefCount<T>`** | nothing declares the type. DECISIONS §18 step 3, and its own feature rather than part of closures — shared ownership does not exist anywhere in the value model yet | later |
 | generic functions, optional/rest/defaulted/destructured parameters | `lower.ts`, `#classFnParams` and `#signature` | later |
@@ -226,12 +225,19 @@ a `function` expression does, which is the one distinction `usesThis` has to
 draw — tsc rejects the latter first under `noImplicitThis`, and `usesThis`
 answers `false` for it rather than relying on that.
 
-What it does *not* do yet: a closure inside a closure over the outer one's
-capture (`GF0001` — it would have to reach through two environments), and the
-escaping form. `tests/closures.test.ts` is the suite;
-`tests/oracle/cases/closure_capture*.{cpp,gf.ts}` are the three oracle cases,
-and the two write-through ones are the load-bearing half — a capture that
-copied would still balance, around the wrong object.
+**Closures nest, and needed nothing added.** This was refused for one commit on
+the theory that the inner environment would have to reach *through* the outer
+one. It does not: the field operand at a closure site is a `Ref` of the
+captured binding's place, a capture's place ends in a `Deref`, and taking the
+address of a dereferenced place hands back the address that was dereferenced.
+Each level collapses to the original frame's slot instead of chaining, so a
+capture three closures deep costs the same two loads as one. Removing the check
+was the whole change.
+
+What it does *not* do yet: the escaping form. `tests/closures.test.ts` is the
+suite; `tests/oracle/cases/closure_capture*.{cpp,gf.ts}` are the four oracle
+cases, and the three write-through ones are the load-bearing half — a capture
+that copied would still balance, around the wrong object.
 
 ## Diagnostic codes in use
 

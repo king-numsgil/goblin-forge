@@ -508,22 +508,124 @@ describe("LocalFn, refused", () => {
         );
     });
 
-    /**
-     * A closure capturing another closure's capture would have to reach through
-     * two environments, one of which is not the frame it names. Refused as a gap
-     * rather than lowered to something that reads the wrong environment.
-     */
-    test("a closure inside a closure, over the outer one's capture", async () => {
-        await expectRejected(
-            "closure-nested",
+});
+
+/**
+ * A closure inside a closure needs nothing added, and the reason is worth
+ * stating because the opposite is the intuitive answer.
+ *
+ * The inner environment does not reach *through* the outer one. Its field
+ * operand is a `Ref` of the captured binding's place, and a capture's place
+ * ends in a `Deref` — so taking its address hands back the address that was
+ * dereferenced, which is the original frame's slot. Each level collapses rather
+ * than chaining, so a capture three closures deep costs the same two loads as
+ * one, and every level writes to the same storage.
+ */
+describe("LocalFn, nested", () => {
+    test("the inner closure writes to the outermost frame's local", async () => {
+        const result = await run(
+            "closure-nested-write",
             `function apply(f: LocalFn<() => void>): void { f(); }
 
        export function main(): i32 {
          let n: i32 = 0;
          apply(() => { apply(() => { n += 1; }); });
+         console.log(\`\${n}\`);
          return 0;
        }\n`,
-            "GF0001",
         );
+        expect(result.stdout).toBe("1\n");
+        expect(result.stderr).toBe("");
+    });
+
+    test("three deep, every level writing the same local", async () => {
+        const result = await run(
+            "closure-nested-three",
+            `function apply(f: LocalFn<() => void>): void { f(); }
+
+       export function main(): i32 {
+         let n: i32 = 1;
+         const step: i32 = 10;
+         apply(() => {
+           n += step;
+           apply(() => {
+             n += step;
+             apply(() => { n += step; });
+           });
+         });
+         console.log(\`\${n}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("31\n");
+    });
+
+    test("the inner closure over the outer closure's own parameter", async () => {
+        // Not a capture-of-a-capture: `x` is an ordinary local of the outer
+        // closure's frame, which is alive for the whole of the inner call.
+        const result = await run(
+            "closure-nested-param",
+            `function apply(f: LocalFn<() => void>): void { f(); }
+
+       function each(n: i32, f: LocalFn<(x: i32) => void>): void {
+         for (let i: i32 = 0; i < n; i++) { f(i); }
+       }
+
+       export function main(): i32 {
+         let total: i32 = 0;
+         each(4, (x) => {
+           apply(() => { total += x; });
+         });
+         console.log(\`\${total}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("6\n");
+    });
+
+    test("`this` through two levels", async () => {
+        const result = await run(
+            "closure-nested-this",
+            `function apply(f: LocalFn<() => void>): void { f(); }
+
+       class Counter {
+         n: i32 = 0;
+
+         run(): void {
+           apply(() => {
+             this.n += 1;
+             apply(() => { this.n += 10; });
+           });
+         }
+       }
+
+       export function main(): i32 {
+         const c: Counter = new Counter();
+         c.run();
+         console.log(\`\${c.n}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("11\n");
+    });
+
+    test("an owning capture reassigned from the inner closure", async () => {
+        // The allocation check is the assertion: the release of the old buffer
+        // belongs to the frame that owns `s`, two levels up, and happens once.
+        const result = await run(
+            "closure-nested-owning",
+            `function apply(f: LocalFn<() => void>): void { f(); }
+
+       export function main(): i32 {
+         let s: string = "a" + "b";
+         apply(() => {
+           apply(() => { s = "c" + "d"; });
+         });
+         console.log(s);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("cd\n");
+        expect(result.stderr).toBe("");
     });
 });

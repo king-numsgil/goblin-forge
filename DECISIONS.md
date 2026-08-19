@@ -1288,6 +1288,24 @@ Two rules were not in the design and are not optional:
   of nothing. `return name` inside a closure is therefore a copy, which is what
   it already is for a by-value parameter and for the same reason (§11.4).
 
+**A closure inside a closure needs nothing added**, and this was refused for one
+release on a reason that turned out to be wrong. The intuition was that the
+inner environment would have to reach *through* the outer one, chaining an
+indirection per level and naming a slot in a frame that is not the one it means.
+
+It does not. The field operand at a closure site is a `Ref` of the captured
+binding's place, and a capture's place ends in a `Deref` — so taking its address
+hands back the address that *was* dereferenced, which is the original frame's
+slot rather than the enclosing environment's. Each level collapses instead of
+chaining. A capture three closures deep costs the same two loads as one, and
+every level writes to the same storage.
+
+The soundness argument is the borrow argument again, unchanged: the inner
+closure cannot escape its call, its call happens inside the outer closure's
+body, and the outer closure's frame is alive for the whole of that — so an
+environment in the outer frame holding references into the outermost frame is
+valid for exactly as long as anything can reach it.
+
 **`this` is captured as an ordinary name**, and deliberately gets no mechanism
 of its own. It is already a local of type `Reference<Self>` bound under that
 name (REWRITE-PLAN §4.6), so the environment holds a reference to the local
@@ -1316,12 +1334,13 @@ a real capture and the write above disappears.
 
 Verified against the C++ oracle, which is the arbiter here because a
 non-escaping closure is exactly `[&]` on a template parameter — `std::function`
-is not the comparison, since it type-erases onto the heap. Three cases, and the
-two that matter are the writes: assigning a `string` *through* a capture
-releases the enclosing frame's old buffer on schedule, and a captured `this`
-whose object has an owning field neither copies the object nor allocates a
-second buffer. A capture that copied would still balance, around the wrong
-object.
+is not the comparison, since it type-erases onto the heap. Four cases, and the
+three that matter are the writes: assigning a `string` *through* a capture
+releases the enclosing frame's old buffer on schedule; a captured `this` whose
+object has an owning field neither copies the object nor allocates a second
+buffer; and a nested closure reassigning a capture two levels up releases that
+buffer once, from the frame that owns it. A capture that copied would still
+balance, around the wrong object.
 
 ### What `LocalFn` buys, stated exactly
 

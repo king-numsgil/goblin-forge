@@ -49,7 +49,7 @@ import {
     type LowerResult,
     VOID,
 } from "./types.ts";
-import { type Binding, isCapture, Scopes } from "./scopes.ts";
+import { type Binding, Scopes } from "./scopes.ts";
 import { describe, isStaticMember, moduleTag, needsDrop } from "./util.ts";
 import { BodyLowerer } from "./body.ts";
 import { capturedNames, usesThis } from "./closures.ts";
@@ -548,16 +548,6 @@ export class Lowerer {
                 captures.push({name, binding});
             }
         }
-        // A closure inside a closure would have to reach through two environments,
-        // and one of them is not the frame it names — refused rather than lowered
-        // to something that reads a field of the wrong environment.
-        for (const capture of captures) {
-            if (isCapture(capture.binding)) {
-                this.unsupported(node, `a closure capturing \`${capture.name}\`, which is itself a capture`);
-                return undefined;
-            }
-        }
-
         const index = this.#liftedCount++;
         let env: { ty: TyId; pointer: TyId } | undefined;
         if (captures.length > 0) {
@@ -567,6 +557,14 @@ export class Lowerer {
                 // closure land on the enclosing frame's local rather than on a copy.
                 // Category `Borrow`, so the drop pass places nothing here: the frame
                 // that owns these values is still the frame that destroys them.
+                //
+                // `binding.ty` is the *value's* type even when the binding is itself a
+                // capture, which is what makes nesting cost nothing. The field operand
+                // at the closure site is a `Ref` of the binding's place, and a capture's
+                // place ends in a `Deref` — so taking its address hands back the address
+                // that was dereferenced, which is the original frame's slot rather than
+                // the enclosing environment's. Depth never accumulates indirections; a
+                // closure three deep reads its captures with the same two loads as one.
                 fields: captures.map((capture) => ({
                     name: capture.name,
                     ty: this.#mir.ty({kind: "Reference", value: capture.binding.ty}),
