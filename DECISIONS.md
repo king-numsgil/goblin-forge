@@ -1104,6 +1104,59 @@ milestones have been built on top of Cranelift. Which is the ordering argument
 at the head of this section, and the reason the swap precedes the vector work
 rather than following it.
 
+### Amendment: AVX2 is a baseline requirement *(2026-08-18)*
+
+**The compiler targets `x86-64-v3` and does not run on anything older.** The
+user's decision, with the precedent that Unreal Engine and others already
+require it. It removes one item above and simplifies a second; the third is
+untouched, and the third was the one flagged as risky.
+
+**Gone: the dispatch story.** No function multiversioning, no IFUNC, no
+`target_clones`, no runtime feature probe, no question about what a binary does
+on a 2012 machine. That was listed above as required work under either backend
+and it is now not work at all.
+
+**Unchanged: Win64.** An ABI is a property of the platform, not of the CPU
+underneath it. MSVC's default x64 convention passes *anything* larger than eight
+bytes by reference — `__m128`, `__m256` and `__m512` alike — and only
+`__vectorcall` puts a vector in a register. Guaranteeing AVX2 changes none of
+it. The consequence is a design fact worth stating plainly rather than
+discovering: **a `dvec4` crossing an `extern "C"` boundary on Windows travels
+through memory, always.** The fast path is intra-module and the C boundary is a
+serialization point. Which is workable, and makes the Win64 rule the simplest
+one available — but it was already simple, for reasons that predate this
+decision.
+
+**Simplified: System V.** The psABI classifies a 32-byte vector conditionally on
+AVX being enabled, which is why GCC warns that an AVX vector argument without
+AVX changes the ABI rather than silently choosing. With AVX2 fixed as a
+baseline the conditional collapses to one unconditional rule: SSE plus SSEUP, in
+a YMM register. One rule rather than a branch is materially less to get wrong.
+
+It is still *tested* rather than asserted, and the reason is not stubbornness.
+The baseline is set for this compiler, not for the C libraries it links against,
+and one built without `-mavx` classifies `__m256` differently. That exposure is
+close to zero in practice — approximately no C library passes a `__m256` by
+value across a public API — but "close to zero" is why the rule stays in the
+differential suite instead of in a comment.
+
+**The larger payoff is not about vectors at all.** An AVX2 baseline lets the
+whole backend assume VEX encoding: three-operand and non-destructive, so every
+scalar `f64` operation stops needing a `movapd` to preserve its operands. That
+is a win on all the double arithmetic in the language, including code that never
+names a vector type. FMA becomes unconditional, so contraction is a pure
+language question with no target check behind it. And unaligned `vmovupd` is
+near-free on AVX2-era parts when it does not cross a cache line, which weakens
+half the alignment argument for the aligned type above — the cache-line-split
+half stands, since a 24-byte stride still straddles lines constantly.
+
+`x86-64-v3` is the spelling: AVX2, FMA, BMI1/2, LZCNT, MOVBE. rustc, clang and
+LLVM all take it as `-C target-cpu=` / `-mcpu=`, so both ISA faults above become
+the same string. Cranelift has no microarchitecture presets — its generated x64
+settings expose `has_avx`, `has_avx2`, `has_fma`, `has_bmi1`, `has_bmi2`,
+`has_lzcnt` and `has_popcnt` individually — so fixing `make_isa` in the interim
+means enabling them one at a time, and the single flag arrives with the port.
+
 ---
 
 ## Class decisions *(2026-08-12, milestone 8)*
