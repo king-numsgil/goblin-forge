@@ -133,44 +133,96 @@ fn env_is_set(name: &CStr) -> bool {
     !unsafe { libc::getenv(name.as_ptr()) }.is_null()
 }
 
-/// stdout and stderr, as file descriptors.
+/// Which of the two standard streams a write is going to.
 ///
-/// Written out rather than taken from `libc`, whose `STDOUT_FILENO` is defined
-/// only on unix. The numbers are the same two on the Windows CRT, which is
-/// what `write` reaches there, so spelling them here is what makes this one
-/// function rather than a `cfg` pair.
+/// Not a file descriptor. It was one, and on unix it still is — but the
+/// Windows half of [`write_some`] does not go through the CRT at all, so this
+/// is a choice of stream that each platform spells its own way.
 const STDOUT: i32 = 1;
 const STDERR: i32 = 2;
 
-/// Write bytes to a file descriptor, unbuffered.
+/// One write, at the platform's own boundary, returning how many bytes moved.
+///
+/// Split because the two platforms disagree about what a standard stream *is*,
+/// and the Windows answer is emphatically not the CRT's — see the `cfg(windows)`
+/// arm.
+#[cfg(not(windows))]
+fn write_some(stream: i32, bytes: &[u8]) -> isize {
+    // `as _` on the count and the result: `size_t` and `ssize_t` here.
+    unsafe { libc::write(stream, bytes.as_ptr() as *const c_void, bytes.len() as _) as isize }
+}
+
+#[cfg(windows)]
+unsafe extern "system" {
+    fn GetStdHandle(which: u32) -> *mut c_void;
+
+    fn WriteFile(
+        handle: *mut c_void,
+        buffer: *const c_void,
+        len: u32,
+        written: *mut u32,
+        overlapped: *mut c_void,
+    ) -> i32;
+}
+
+/// `WriteFile` on the raw handle, and *not* the CRT's `write`.
+///
+/// This was `libc::write` on descriptor 1, on the reasoning that the Windows
+/// CRT numbers its descriptors the same way. It does — and it also opens them
+/// in text mode, where every `\n` on the way out becomes `\r\n`. That is
+/// invisible on unix, invisible in a terminal, and it broke every test that
+/// asserts on exact output, which is very nearly all of them.
+///
+/// `std::io::stdout` never had the problem because std does not use the CRT
+/// here either; it writes to the handle. Doing the same restores the bytes
+/// this runtime emitted before it went `no_std`, rather than approximating
+/// them.
+///
+/// The console case is the one deliberate departure: std reaches for
+/// `WriteConsoleW`, converting to UTF-16 so that a non-ASCII character
+/// survives a console whose code page is not UTF-8. `WriteFile` hands the
+/// console raw UTF-8 instead. It is the same choice every C program that calls
+/// `WriteFile` makes, it costs no conversion buffer, and it does not affect a
+/// redirected stream — which is what a test, a pipe, and a file all are.
+#[cfg(windows)]
+fn write_some(stream: i32, bytes: &[u8]) -> isize {
+    // `STD_OUTPUT_HANDLE` and `STD_ERROR_HANDLE`: -11 and -12, unsigned.
+    let which = if stream == STDOUT { -11i32 as u32 } else { -12i32 as u32 };
+    let len = if bytes.len() > u32::MAX as usize { u32::MAX } else { bytes.len() as u32 };
+    let mut moved: u32 = 0;
+    let ok = unsafe {
+        WriteFile(
+            GetStdHandle(which),
+            bytes.as_ptr() as *const c_void,
+            len,
+            &mut moved,
+            core::ptr::null_mut(),
+        )
+    };
+    if ok == 0 { 0 } else { moved as isize }
+}
+
+/// Write bytes to a standard stream, unbuffered.
 ///
 /// Every caller here flushed after every line already, so nothing is buffered
 /// that was not before.
 ///
-/// A `write` can come back having done less than it was asked: a partial write
-/// filling a pipe, or a signal that interrupted it before it moved anything.
-/// Both are retried. They are deliberately *not* told apart — `errno` has
-/// three different spellings across the platforms this crate is built for
-/// (`__errno_location`, `__error`, `_errno`) and no portable one, and the
-/// distinction would not change what can be done about it. So progress resets
-/// the budget and a fixed number of fruitless attempts ends it, which
-/// terminates on a genuinely broken descriptor instead of spinning on it.
+/// A write can come back having moved less than it was asked to: a partial
+/// write filling a pipe, or a signal that interrupted it before it moved
+/// anything. Both are retried. They are deliberately *not* told apart —
+/// `errno` has three different spellings across the platforms this crate is
+/// built for (`__errno_location`, `__error`, `_errno`) and no portable one,
+/// and the distinction would not change what can be done about it. So progress
+/// resets the budget and a fixed number of fruitless attempts ends it, which
+/// terminates on a genuinely broken stream instead of spinning on it.
 ///
 /// A write that fails for real is dropped in silence, because a runtime that
 /// cannot write has nowhere to report that it could not write.
-fn stdio(fd: i32, bytes: &[u8]) {
+fn stdio(stream: i32, bytes: &[u8]) {
     let mut written = 0;
     let mut fruitless = 0;
     while written < bytes.len() && fruitless < 16 {
-        // `as _` on both the count and the result: they are `size_t`/`ssize_t`
-        // on unix and `c_uint`/`c_int` on the Windows CRT.
-        let n = unsafe {
-            libc::write(
-                fd,
-                bytes.as_ptr().add(written) as *const c_void,
-                (bytes.len() - written) as _,
-            )
-        };
+        let n = write_some(stream, &bytes[written..]);
         if n > 0 {
             written += n as usize;
             fruitless = 0;
@@ -186,15 +238,15 @@ fn stdio(fd: i32, bytes: &[u8]) {
 /// `PIPE_BUF` gets it from the kernel instead. Longer lines fall back to two
 /// writes rather than growing a buffer — a runtime cannot allocate on the way
 /// to reporting that allocation failed.
-fn stdio_line(fd: i32, bytes: &[u8]) {
+fn stdio_line(stream: i32, bytes: &[u8]) {
     let mut line = [0u8; 512];
     if bytes.len() < line.len() {
         line[..bytes.len()].copy_from_slice(bytes);
         line[bytes.len()] = b'\n';
-        stdio(fd, &line[..bytes.len() + 1]);
+        stdio(stream, &line[..bytes.len() + 1]);
     } else {
-        stdio(fd, bytes);
-        stdio(fd, b"\n");
+        stdio(stream, bytes);
+        stdio(stream, b"\n");
     }
 }
 
