@@ -78,6 +78,24 @@ export type MachineType =
           readonly params: readonly MachineType[];
           readonly returns: MachineType;
       }
+    | {
+          /**
+           * `LocalFn<F>` — a code address *and* an environment, two words, where
+           * the environment lives in the frame that built the closure.
+           *
+           * Category `Borrow` (DECISIONS §18): it owns nothing, copies with a
+           * `memcpy`, and destroys nothing, because everything it captures is
+           * still owned by the frame it was captured from. That is sound for
+           * exactly one reason — the value may not outlive the call it was
+           * passed to — and enforcing that is the frontend's whole job here.
+           *
+           * The escaping form is a different type with a different
+           * representation, and it is not implemented.
+           */
+          readonly kind: "localfn";
+          readonly params: readonly MachineType[];
+          readonly returns: MachineType;
+      }
     | { readonly kind: "pointer"; readonly pointee: MachineType }
     | { readonly kind: "reference"; readonly referent: MachineType }
     | {
@@ -355,6 +373,14 @@ export function erase(checker: ts.TypeChecker, type: ts.Type): MachineType {
         return {kind: "array", element: erase(checker, element)};
     }
 
+    // `LocalFn<F>` — the same signature as a function pointer, plus a captured
+    // environment. Before the plain call-signature path below, which tests for
+    // *no* properties and would fail here: `LocalFn<F>` is `F & LocalFnCore<F>`,
+    // and the brand is a property.
+    if (brandedProperty(checker, type, "LocalFnBrand") !== null) {
+        return {kind: "localfn", ...eraseSignature(checker, type, "a `LocalFn`")};
+    }
+
     // `(a: i32) => i32` — a code address. Before `eraseObject`, which would see a
     // type with no properties and lay it out as an empty struct.
     //
@@ -363,43 +389,7 @@ export function erase(checker: ts.TypeChecker, type: ts.Type): MachineType {
     // therefore a closure rather than a function pointer.
     const calls = checker.getSignaturesOfType(type, ts.SignatureKind.Call);
     if (calls.length > 0 && checker.getPropertiesOfType(type).length === 0) {
-        if (calls.length > 1) {
-            throw new ErasureError(
-                "an overloaded function type has no single signature to point at. A " +
-                "function pointer is one code address and one calling convention.",
-                "GF0001",
-            );
-        }
-        const signature = calls[0]!;
-        if (signature.getTypeParameters()?.length) {
-            throw new ErasureError(
-                "a generic function type cannot be a function pointer: there is no one " +
-                "body to take the address of.",
-                "GF0001",
-            );
-        }
-        return {
-            kind: "fnptr",
-            params: signature.getParameters().map((parameter) => {
-                const declaration = parameter.valueDeclaration;
-                if (declaration === undefined || !ts.isParameter(declaration)) {
-                    throw new ErasureError(
-                        "a parameter of this function type has no declaration to read a " +
-                        "type from.",
-                        "GF0001",
-                    );
-                }
-                if (declaration.questionToken || declaration.dotDotDotToken) {
-                    throw new ErasureError(
-                        "an optional or rest parameter has no C spelling, so it cannot be " +
-                        "part of a function pointer's signature.",
-                        "GF0001",
-                    );
-                }
-                return erase(checker, checker.getTypeAtLocation(declaration));
-            }),
-            returns: erase(checker, checker.getReturnTypeOfSignature(signature)),
-        };
+        return {kind: "fnptr", ...eraseSignature(checker, type, "a function pointer")};
     }
 
     if (flags & ts.TypeFlags.Object) {
@@ -410,6 +400,65 @@ export function erase(checker: ts.TypeChecker, type: ts.Type): MachineType {
         `\`${checker.typeToString(type)}\` has no machine representation yet.`,
         "GF0001",
     );
+}
+
+/**
+ * The parameter and return types of a callable type's one call signature.
+ *
+ * Shared by `fnptr` and `localfn` so the two cannot drift apart. They differ in
+ * what they carry alongside the code address — nothing, and an environment —
+ * and not at all in how a signature is read, so a rule relaxed for one of them
+ * would otherwise have to be remembered for the other.
+ *
+ * `what` names the form in the diagnostics, because "a function pointer is one
+ * code address" is the right sentence for one of them and the wrong one for the
+ * other.
+ */
+function eraseSignature(
+    checker: ts.TypeChecker,
+    type: ts.Type,
+    what: string,
+): {readonly params: readonly MachineType[]; readonly returns: MachineType} {
+    const calls = checker.getSignaturesOfType(type, ts.SignatureKind.Call);
+    if (calls.length === 0) {
+        throw new ErasureError(`${what} needs a call signature, and this type has none.`, "GF0001");
+    }
+    if (calls.length > 1) {
+        throw new ErasureError(
+            `an overloaded function type has no single signature to point at. ${what} is ` +
+            "one code address and one calling convention.",
+            "GF0001",
+        );
+    }
+    const signature = calls[0]!;
+    if (signature.getTypeParameters()?.length) {
+        throw new ErasureError(
+            `a generic function type cannot be ${what}: there is no one body to take the ` +
+            "address of.",
+            "GF0001",
+        );
+    }
+    return {
+        params: signature.getParameters().map((parameter) => {
+            const declaration = parameter.valueDeclaration;
+            if (declaration === undefined || !ts.isParameter(declaration)) {
+                throw new ErasureError(
+                    "a parameter of this function type has no declaration to read a type " +
+                    "from.",
+                    "GF0001",
+                );
+            }
+            if (declaration.questionToken || declaration.dotDotDotToken) {
+                throw new ErasureError(
+                    "an optional or rest parameter has no C spelling, so it cannot be part " +
+                    "of this signature.",
+                    "GF0001",
+                );
+            }
+            return erase(checker, checker.getTypeAtLocation(declaration));
+        }),
+        returns: erase(checker, checker.getReturnTypeOfSignature(signature)),
+    };
 }
 
 /**
@@ -957,6 +1006,10 @@ export function renderType(type: MachineType): string {
             return `${renderType(type.element)}[]`;
         case "fnptr":
             return `(${type.params.map(renderType).join(", ")}) => ${renderType(type.returns)}`;
+        case "localfn":
+            return `LocalFn<(${type.params.map(renderType).join(", ")}) => ${renderType(
+                type.returns,
+            )}>`;
         case "pointer":
             // `Pointer<unknown>` is what a program writes; `void` is what it erases
             // to, and only the erasure reaches here. A diagnostic that said

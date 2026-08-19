@@ -7,13 +7,45 @@
  * depends on it cannot drift apart.
  */
 
-import { type BlockId, LocalId, type TyId } from "@goblin-forge/backend";
+import { type BlockId, LocalId, type Place, type Projection, type TyId } from "@goblin-forge/backend";
 import type { MachineType } from "@goblin-forge/checker";
 
 export interface Binding {
     readonly local: LocalId;
     readonly type: MachineType;
     readonly ty: TyId;
+    /**
+     * The path from {@link local} to the value, for a binding that is not the
+     * local itself.
+     *
+     * Empty for everything but a **capture**. A `LocalFn`'s body reaches an
+     * enclosing local through its environment — `env->slot`, which is
+     * `[Deref, Field(i), Deref]` from the environment parameter — and the
+     * alternative, copying captures into fresh locals on entry, is not a
+     * by-reference capture at all: a write to `total` inside the closure would
+     * update the copy and nothing outside would see it.
+     *
+     * Read it through {@link bindingPlace} rather than by hand, so that a site
+     * which forgets captures exist fails to compile instead of silently
+     * addressing the environment pointer as though it were the value.
+     */
+    readonly projection?: readonly Projection[];
+}
+
+/**
+ * The place a binding names.
+ *
+ * The one way to turn a {@link Binding} into a {@link Place}. `placeOf(binding.local)`
+ * is the bug this exists to prevent — it is correct for every ordinary local
+ * and silently wrong for a capture, whose local is the environment pointer.
+ */
+export function bindingPlace(binding: Binding): Place {
+    return {local: binding.local, projection: [...(binding.projection ?? [])]};
+}
+
+/** Whether a binding reaches its value through a closure environment. */
+export function isCapture(binding: Binding): boolean {
+    return binding.projection !== undefined && binding.projection.length > 0;
 }
 
 /**

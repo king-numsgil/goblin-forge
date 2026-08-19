@@ -11,10 +11,12 @@ import {
     type Module as MirModule,
     type Operand,
     type SigId,
+    type TyId,
 } from "@goblin-forge/backend";
 import type { Diagnostic, MachineType } from "@goblin-forge/checker";
 import ts from "typescript";
 import type { ClassInfo, MethodBody } from "../classes.ts";
+import type { Binding } from "./scopes.ts";
 
 export interface LowerResult {
     readonly module: MirModule | undefined;
@@ -70,6 +72,27 @@ export interface Typed {
 export interface FnSignature {
     readonly params: readonly { name: string; type: MachineType }[];
     readonly returns: MachineType;
+}
+
+/**
+ * An arrow function lifted into a function of its own, and what the frame that
+ * wrote it still has to do.
+ *
+ * `captures` is in **field order**, and that is the whole contract between the
+ * two halves: the lifted body reads its environment by field index, and the
+ * closure site builds the environment by taking a reference to each of these in
+ * turn. Both read this one list rather than recomputing it, because a capture
+ * set derived twice is a capture set that can differ once.
+ */
+export interface LiftedClosure {
+    readonly func: FuncId;
+    readonly captures: readonly Binding[];
+    /**
+     * The environment struct, and a pointer to it. Absent when the closure
+     * captures nothing, which then has no environment to build and passes a
+     * null one.
+     */
+    readonly env: { readonly ty: TyId; readonly pointer: TyId } | undefined;
 }
 
 /**

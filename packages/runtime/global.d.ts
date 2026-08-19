@@ -509,6 +509,62 @@ type GfPrimitive = number | string | boolean;
 type Reference<T> = [T] extends [GfPrimitive] ? ReferenceCore<T> : T & ReferenceCore<T>;
 
 // ---------------------------------------------------------------------------
+// Closures. DECISIONS §18: three function types, all written down.
+//
+// A bare `(a: i32) => i32` is one code address and nothing else, so a lambda
+// that captures cannot be one — that is an error at the lambda. `LocalFn<F>`
+// is the form that may capture, and it is a **borrow**: its environment lives
+// in the caller's frame, so it costs no allocation and may not outlive the
+// call it was passed to.
+//
+// The escaping form, `HeapFn<F>`, is §18 step 2 and does not exist yet.
+// ---------------------------------------------------------------------------
+
+declare const LocalFnBrand: unique symbol;
+
+interface LocalFnCore<F> {
+    /**
+     * **Optional**, and that is what lets a lambda be written at the call site:
+     * optional-and-absent is assignable, so `(x: i32) => x * 2` satisfies a
+     * `LocalFn` parameter with nothing to spell. The same property means
+     * TypeScript will *also* let a `LocalFn` be assigned to a plain `F`, which
+     * is the escape this type exists to forbid — so the escape rule is the
+     * compiler's, raised as a `GF02xx`, and not tsc's.
+     *
+     * A required brand, the way {@link FixedArray} does it, would close that
+     * direction and break every call site in exchange. It is the wrong trade
+     * here: the lambda is written far more often than the escape is attempted.
+     */
+    readonly [LocalFnBrand]?: F;
+}
+
+/**
+ * A function value that may capture, whose captures are **references into the
+ * frame that created it**, and which therefore may not escape the call.
+ *
+ *     function each(xs: i32[], f: LocalFn<(x: i32) => void>): void {
+ *         for (let i: usize = 0; i < xs.length; i++) f(xs[i]);
+ *     }
+ *
+ *     let total: i32 = 0;
+ *     each(xs, (x) => { total += x; });   // no allocation; total is the frame's
+ *
+ * The contract is escape, not storage: binding one to a name inside the callee
+ * is fine, and so is handing it to another `LocalFn` parameter, because neither
+ * outlives the call. Returning one, storing one in a struct field or an array,
+ * or capturing one inside a closure that escapes are the cases that are
+ * refused.
+ *
+ * It removes the allocation. It does not remove the call — that is one indirect
+ * call through a two-word value per invocation, and collapsing it into the
+ * caller needs monomorphisation (REWRITE-PLAN §11.7) and an inliner (§17).
+ *
+ * A non-capturing lambda is accepted here too, with a null environment, so a
+ * caller never has to know which kind it wrote.
+ */
+type LocalFn<F extends (...args: never[]) => unknown> = F & LocalFnCore<F>;
+
+// ---------------------------------------------------------------------------
 // Memory intrinsics. Manual, C++-style, unverified. There is no GC, no
 // refcount, and no borrow checker: `free()` on a pointer that is still
 // live is your bug, and the compiler will not find it for you.

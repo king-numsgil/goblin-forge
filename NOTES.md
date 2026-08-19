@@ -115,6 +115,12 @@ or a comment.
 class gets before its constructor runs. Refuses a class, because that would
 skip the constructor.
 
+**`LocalFn<F>`**: a capturing closure that may not outlive the call it was
+passed to. Its environment is references into the caller's frame, so it costs no
+allocation and destroys nothing, and captures are read *and written* through.
+Written as an argument — `each(xs, (x) => { total += x; })` — and nowhere else.
+DECISIONS §18, and the section under "What it does not have yet" for the rest.
+
 ## What it does not have yet
 
 Grep for these markers — each is a `GF0001` with a file and a line, never a
@@ -127,7 +133,10 @@ backend failure:
 | an interface mixing methods and data | `checker/src/types.ts`, `contractOf` — a rule, not a gap | — |
 | writing *through* a `Pointer<Pointer<T>>` for a primitive `T` — `cells[i] = p` | tsc, not the compiler. `Pointer<Pointer<u8>>` is `CorePointer<u8> & CorePointer<CorePointer<u8>>`, and the two index signatures merge to `u8 & CorePointer<u8>`, which nothing produces. Reading is fine, and `Pointer<CString>` is the spelling for a `char **` that has to be written | later |
 | static **fields** | `classes.ts`, the `isStatic` branch over property declarations — needs module-level storage the backend has never emitted; see below | later |
-| closures / arrow functions | `lower.ts` — Tier 0 (function pointers) shipped, capture did not | later |
+| a closure **inside** a closure, over the outer one's capture | `lower/module.ts`, `liftClosure` — it would have to reach through two environments, one of which is not the frame it names | later |
+| `this` inside a closure | nothing binds one: `liftClosure` seeds a fresh `Scopes` with captures and parameters only | later |
+| **escaping closures — `HeapFn<F>`** | nothing declares the type. DECISIONS §18 step 2: captures by move into an owning environment, reusing `GF0235` for contention. Not started, and deliberately after `LocalFn` | later |
+| **`RefCount<T>`** | nothing declares the type. DECISIONS §18 step 3, and its own feature rather than part of closures — shared ownership does not exist anywhere in the value model yet | later |
 | generic functions, optional/rest/defaulted/destructured parameters | `lower.ts`, `#classFnParams` and `#signature` | later |
 | two classes with the same name in two modules | `classes.ts`, `collectClasses` — a stated restriction, see DECISIONS §11.8 | later |
 | incremental builds | `CompileOptions.incremental` is reserved and unread | later |
@@ -165,6 +174,56 @@ MIR already has `Terminator::Call`'s `unwind` edge, `BlockKind::Cleanup` and
 rewrite of the drop pass (§11.5). Every action the frontend emits today is
 `Unreachable`.
 
+**`LocalFn<F>` is built** — DECISIONS §18 step 1, 2026-08-19. Capturing
+closures, non-escaping, with the environment in the caller's frame. Where the
+pieces are:
+
+| piece | where |
+|---|---|
+| the type as written | `runtime/global.d.ts` — an *optional* brand |
+| erasure to `localfn` | `checker/src/types.ts`, beside `fnptr`; both read `eraseSignature` |
+| the value's MIR type | `lower/module.ts`, `#localFnTy` — a struct of `{code, env}` |
+| capture analysis | `lower/closures.ts`, `capturedNames` |
+| lifting the arrow | `lower/module.ts`, `liftClosure` |
+| the closure value | `lower/body.ts`, `#closure` |
+| calling one | `lower/body.ts`, `#localFnCall` |
+| the escape rule | `lower/module.ts`, `refuseEscape` — `GF0239` |
+
+**The brand is optional deliberately.** Optional-and-absent is assignable both
+ways, so tsc lets a lambda be written at the call site *and* lets a `LocalFn` be
+assigned to a plain `F`. The first is what makes the type usable at all; the
+second is the escape this type forbids, so the escape rule is the compiler's and
+not tsc's. A required brand — the way `FixedArray` does it — closes the second
+direction and breaks every call site, which is the wrong trade here.
+
+**`Binding` carries a projection now**, and it is the load-bearing change.
+`lower/scopes.ts` grew an optional path, and a capture's is
+`[Deref, Field(i), Deref]` from the environment pointer — through the
+environment, to the `Reference<T>`, to the value the enclosing frame still owns.
+Read it through `bindingPlace(binding)`; `placeOf(binding.local)` is correct for
+every ordinary local and silently addresses the *environment pointer* for a
+capture. That is why the helper exists rather than the field being read by hand.
+
+Two rules came out of building it rather than out of the design, and both are in
+§18: a lambda may only be written **as a call argument** (its environment is a
+temporary, and only a binding could outlive one — `GF0234`'s rule by another
+route), and a capture **cannot be moved out of** (`GF0238`).
+
+**No MIR change was needed, and that was a choice.** A `LocalFn` is a struct of
+`{FnPtr, Pointer<unknown>}`, and a call through one is `Callee::Indirect` with
+the environment prepended to `args` — the same arrangement `Reference<I>` uses
+for `(itab, data)`, and the same erased receiver an interface method already
+takes. A dedicated `TyKind` would read better in a MIR dump and costs a
+fingerprint bump plus codegen work; the rule that matters lives in the frontend
+either way.
+
+What it does *not* do yet: a closure inside a closure over the outer one's
+capture (`GF0001` — it would have to reach through two environments), `this`
+inside a closure, and the escaping form. `tests/closures.test.ts` is the suite;
+`tests/oracle/cases/closure_capture*.{cpp,gf.ts}` are the two oracle cases, and
+the write-through one is the load-bearing half — a capture that copied would
+still balance, around the wrong object.
+
 ## Diagnostic codes in use
 
 `GF0001` not supported yet · `GF0002` not part of the language · `GF0003`
@@ -173,7 +232,8 @@ common type · `GF0162` integer-only operator on a float · `GF0163` `nativeCast
 cannot convert · `GF0164` literal out of range · `GF0165` unary minus on
 unsigned · `GF0227` pointer where a value is expected · `GF0234` reference
 borrowing a temporary · `GF0235` moved-from value read · `GF0236` moving out of
-a by-value parameter · `GF9001`–`GF9005` the compiler is broken, not your
+a by-value parameter · `GF0238` moving out of a capture · `GF0239` a `LocalFn`
+outliving its frame · `GF9001`–`GF9005` the compiler is broken, not your
 program.
 
 `GF0227` and `GF0234` are **registered but not yet raised** — they arrive when

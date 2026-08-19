@@ -246,6 +246,39 @@ export const CODES = {
             "and the check that comes before the use is a comparison against zero.",
     },
 
+    GF0238: {
+        title: "a capture cannot be moved out of",
+        explanation:
+            "A `LocalFn` captures by **reference**: its environment holds an address " +
+            "of the enclosing frame's local, and that frame still owns the value and " +
+            "still destroys it (DECISIONS §18). `move` empties its source, so moving " +
+            "out of a capture would leave the owner holding a value it never emptied " +
+            "and never expects to find gone.\n\n" +
+            "There is a second reason, and it survives even where the first would " +
+            "not: a closure is a value that can be called any number of times. The " +
+            "first call would move the value out and every call after it would move " +
+            "out of nothing.\n\n" +
+            "Assigning is a copy, and a copy is what this line means.",
+    },
+
+    GF0239: {
+        title: "a `LocalFn` cannot outlive the call it was passed to",
+        explanation:
+            "A `LocalFn`'s environment lives in the frame that wrote the closure, " +
+            "which is what makes it free — no allocation, and nothing to destroy. " +
+            "The price is that the value may not still be reachable when that frame " +
+            "is gone, so it cannot be returned, stored in a field, or put in an " +
+            "array (DECISIONS §18).\n\n" +
+            "What *is* allowed is everything that stays inside the call: binding one " +
+            "to a name in the callee, and handing it on to another parameter that is " +
+            "also a `LocalFn`. Neither outlives the frame the environment is in.\n\n" +
+            "The escaping form is `HeapFn<F>`, which owns its captures instead of " +
+            "borrowing them. It is not implemented yet. Where a callback has to be " +
+            "stored today, a plain function type — a bare code address — and a " +
+            "`Pointer<unknown>` for its state is the arrangement that works, and it " +
+            "is the one C uses.",
+    },
+
     // -- Layout and the C boundary -------------------------------------------
     GF0301: {
         title: "this type cannot cross the C boundary",

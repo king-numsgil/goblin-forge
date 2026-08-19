@@ -41,10 +41,18 @@ import {
     type StaticMethod,
 } from "../classes.ts";
 import { INT_TY, PRELUDE_EXTERNS } from "./tables.ts";
-import { type ClassBody, type FnRecord, type FnSignature, type LowerResult, VOID } from "./types.ts";
-import { Scopes } from "./scopes.ts";
+import {
+    type ClassBody,
+    type FnRecord,
+    type FnSignature,
+    type LiftedClosure,
+    type LowerResult,
+    VOID,
+} from "./types.ts";
+import { type Binding, isCapture, Scopes } from "./scopes.ts";
 import { describe, isStaticMember, moduleTag, needsDrop } from "./util.ts";
 import { BodyLowerer } from "./body.ts";
+import { capturedNames } from "./closures.ts";
 
 export class Lowerer {
     readonly #program: ts.Program;
@@ -56,6 +64,10 @@ export class Lowerer {
     readonly #root: string;
     readonly #entry: string;
     #classes = new Map<string, ClassInfo>();
+    /** Interned `LocalFn` value types, by the mangled name {@link #localFnTy} builds. */
+    #localFns = new Map<string, TyId>();
+    /** How many closures have been lifted, for naming the next one. */
+    #liftedCount = 0;
     readonly #classTys = new Map<string, TyId>();
     readonly #classIds = new Map<string, ClassId>();
     /**
@@ -407,6 +419,205 @@ export class Lowerer {
         });
     }
 
+    /**
+     * The signature a `LocalFn`'s code pointer has: the environment first, then
+     * the parameters as written.
+     *
+     * The environment is a `Pointer<unknown>` — C's `void *` — and not a pointer
+     * to the environment's real struct, because the type has to be the same for
+     * every closure a given `LocalFn<F>` parameter can receive, and each of those
+     * has an environment of its own shape. The lifted body attaches the type back
+     * with a `PtrToPtr` cast on entry, which is what `reify<T>()` does at the
+     * source level (DECISIONS §13) and what an interface method's receiver
+     * already does one file over.
+     *
+     * `Internal`, not `C`: a `LocalFn` never crosses a boundary — `#checkCBoundary`
+     * refuses one — so there is no second party whose classification has to be
+     * matched, and the C rules would only cost aggregate parameters a trip
+     * through memory.
+     */
+    localFnSig(type: Extract<MachineType, { kind: "localfn" }>, at: ts.Node): SigId {
+        return this.#mir.sig({
+            params: [
+                {ty: this.#mir.ty({kind: "Pointer", value: this.#mir.ty({kind: "Void"})}), name: null},
+                ...type.params.map((param) => ({ty: this.tyOf(param, at), name: null})),
+            ],
+            ret: this.tyOf(type.returns, at),
+            abi: "Internal",
+        });
+    }
+
+    /**
+     * The type of a `LocalFn`'s code field, for the constant that names the
+     * lifted function.
+     *
+     * A `FnPtr` constant carries its type because the signature it is classified
+     * by is not recoverable from the function alone, and the closure site is the
+     * one place that has to spell it.
+     */
+    localFnCodeTy(type: Extract<MachineType, { kind: "localfn" }>, at: ts.Node): TyId {
+        return this.#mir.ty({kind: "FnPtr", value: this.localFnSig(type, at)});
+    }
+
+    /**
+     * The MIR type of a `LocalFn` value: a code address and an environment.
+     *
+     * A struct of two words rather than a `TyKind` of its own. The rule that
+     * makes a `LocalFn` different from a pair of pointers — that it may not
+     * outlive the call — is a frontend rule, checked where `LocalFn<F>` is still
+     * spelled, so a dedicated MIR node would carry no information the backend
+     * acts on and would cost a wire-format fingerprint to add. `Reference<I>`
+     * travels as an `(itab, data)` pair for the same reason.
+     */
+    #localFnTy(type: Extract<MachineType, { kind: "localfn" }>, at: ts.Node): TyId {
+        const name = `LocalFn$${type.params.map(renderType).join("$")}$to$${renderType(type.returns)}`;
+        const existing = this.#localFns.get(name);
+        if (existing !== undefined) {
+            return existing;
+        }
+        const id = this.#mir.struct({
+            name,
+            fields: [
+                {name: "code", ty: this.#mir.ty({kind: "FnPtr", value: this.localFnSig(type, at)})},
+                {
+                    name: "env",
+                    ty: this.#mir.ty({kind: "Pointer", value: this.#mir.ty({kind: "Void"})}),
+                },
+            ],
+        });
+        const ty = this.#mir.ty({kind: "Struct", value: id});
+        this.#localFns.set(name, ty);
+        return ty;
+    }
+
+    /**
+     * Lift an arrow function into a function of its own, and say what its
+     * environment has to contain.
+     *
+     * The environment is built by the *caller*, at the closure site, because
+     * that is the frame the captures live in and the only place their addresses
+     * can be taken — so this returns the bindings it captured rather than
+     * emitting anything into the enclosing body. The two halves have to agree
+     * about field order, and they do by both reading this list.
+     *
+     * Runs while the enclosing function is mid-lowering, which is safe because a
+     * `FunctionBuilder` and a `BodyLowerer` own no shared mutable state: the
+     * only thing they share is the module's type and symbol tables, which are
+     * interned rather than positional.
+     */
+    liftClosure(
+        node: ts.ArrowFunction | ts.FunctionExpression,
+        type: Extract<MachineType, { kind: "localfn" }>,
+        enclosing: Scopes,
+    ): LiftedClosure | undefined {
+        if (node.parameters.length !== type.params.length) {
+            this.unsupported(node, "a closure whose arity tsc and the lowerer disagree on");
+            return undefined;
+        }
+
+        const params: { name: string; type: MachineType }[] = [];
+        for (const [index, parameter] of node.parameters.entries()) {
+            if (!ts.isIdentifier(parameter.name)) {
+                this.unsupported(parameter, "a destructured closure parameter");
+                return undefined;
+            }
+            if (parameter.questionToken || parameter.dotDotDotToken || parameter.initializer) {
+                this.unsupported(parameter, "an optional, rest, or defaulted closure parameter");
+                return undefined;
+            }
+            params.push({name: parameter.name.text, type: type.params[index]!});
+        }
+
+        // Names the enclosing scope stack does not know are not captures: a
+        // top-level function, an enum member, an ambient declaration. They resolve
+        // exactly as they would outside a closure, through the paths that already
+        // handle them.
+        const captures: { name: string; binding: Binding }[] = [];
+        for (const name of capturedNames(node, this.#checker)) {
+            const binding = enclosing.lookup(name);
+            if (binding !== undefined) {
+                captures.push({name, binding});
+            }
+        }
+        // A closure inside a closure would have to reach through two environments,
+        // and one of them is not the frame it names — refused rather than lowered
+        // to something that reads a field of the wrong environment.
+        for (const capture of captures) {
+            if (isCapture(capture.binding)) {
+                this.unsupported(node, `a closure capturing \`${capture.name}\`, which is itself a capture`);
+                return undefined;
+            }
+        }
+
+        const index = this.#liftedCount++;
+        let env: { ty: TyId; pointer: TyId } | undefined;
+        if (captures.length > 0) {
+            const envId = this.#mir.struct({
+                name: `LocalFnEnv$${index}`,
+                // A `Reference<T>` per capture, which is what makes a write inside the
+                // closure land on the enclosing frame's local rather than on a copy.
+                // Category `Borrow`, so the drop pass places nothing here: the frame
+                // that owns these values is still the frame that destroys them.
+                fields: captures.map((capture) => ({
+                    name: capture.name,
+                    ty: this.#mir.ty({kind: "Reference", value: capture.binding.ty}),
+                })),
+                span: this.span(node),
+            });
+            const ty = this.#mir.ty({kind: "Struct", value: envId});
+            env = {ty, pointer: this.#mir.ty({kind: "Pointer", value: ty})};
+        }
+
+        const builder = this.#mir.declareFunction({
+            name: `closure$${index}`,
+            sig: this.localFnSig(type, node),
+            span: this.span(node),
+        });
+
+        // The captures go in first, so that a parameter shadowing a captured name
+        // wins the lookup — which is what the source says, the parameter being the
+        // inner binding.
+        const scopes = new Scopes();
+        const typed =
+            env === undefined
+                ? undefined
+                : builder.addLocal({ty: env.pointer, storage: "Owned", name: "env"});
+        if (typed !== undefined) {
+            captures.forEach((capture, field) => {
+                scopes.declare(capture.name, {
+                    local: typed,
+                    type: capture.binding.type,
+                    ty: capture.binding.ty,
+                    // `*(*env).field` — through the environment, to the reference, to
+                    // the value the enclosing frame still owns.
+                    projection: [
+                        {kind: "Deref"},
+                        {kind: "Field", value: FieldId(field)},
+                        {kind: "Deref"},
+                    ],
+                });
+            });
+        }
+        // Local 0 is the return place and local 1 is the erased environment
+        // pointer, so the written parameters start at 2.
+        params.forEach((param, position) => {
+            scopes.declare(param.name, {
+                local: LocalId(2 + position),
+                type: param.type,
+                ty: this.tyOf(param.type, node),
+            });
+        });
+
+        const lowerer = new BodyLowerer(this, builder, scopes, type.returns);
+        lowerer.runClosure(
+            node.body,
+            typed === undefined || env === undefined
+                ? undefined
+                : {local: typed, parameter: LocalId(1), ty: env.pointer},
+        );
+        return {func: builder.id, captures: captures.map((capture) => capture.binding), env};
+    }
+
     /** The MIR type id for an erased machine type. */
     tyOf(type: MachineType, at: ts.Node): TyId {
         switch (type.kind) {
@@ -444,7 +655,10 @@ export class Lowerer {
             // a thing either can be made of. A `Pointer<FILE>[]` is fine and is what
             // anyone actually wants: the pointer has a size, whatever it points at.
             case "fixedArray":
-                if (!this.requireValueForm(type.element, at, "a `FixedArray` element")) {
+                if (
+                    !this.requireValueForm(type.element, at, "a `FixedArray` element") ||
+                    !this.refuseEscape(type.element, at, "a `FixedArray` element")
+                ) {
                     return this.#mir.ty({kind: "Void"});
                 }
                 return this.#mir.ty({
@@ -453,7 +667,10 @@ export class Lowerer {
                     length: BigInt(type.length),
                 });
             case "array":
-                if (!this.requireValueForm(type.element, at, "an array element")) {
+                if (
+                    !this.requireValueForm(type.element, at, "an array element") ||
+                    !this.refuseEscape(type.element, at, "an array element")
+                ) {
                     return this.#mir.ty({kind: "Void"});
                 }
                 return this.#mir.ty({kind: "Array", value: this.tyOf(type.element, at)});
@@ -464,6 +681,8 @@ export class Lowerer {
             // happens to work until the first aggregate parameter.
             case "fnptr":
                 return this.#mir.ty({kind: "FnPtr", value: this.sigOf(type, at)});
+            case "localfn":
+                return this.#localFnTy(type, at);
             case "scalar":
                 if (type.name === "f32" || type.name === "f64") {
                     return this.#mir.ty({
@@ -650,6 +869,32 @@ export class Lowerer {
             `fields and cannot hold one: ${what} needs a size, and there is none. ` +
             `Use \`Pointer<${type.name}>\`, which is an address and is exactly what ` +
             "the library hands out.",
+        );
+        return false;
+    }
+
+    /**
+     * Refuse a `LocalFn` where the value would outlive the frame its environment
+     * is in — DECISIONS §18's escape rule, at the type positions that outlive a
+     * call: a return type, a field, an element.
+     *
+     * A **parameter** is deliberately not one of them, and that is the point:
+     * passing a closure down is bounded by the call, so it is the one direction
+     * that is always safe. Binding one to a name inside the callee is safe for
+     * the same reason and is not checked here, because a local cannot outlive
+     * the frame it is declared in.
+     */
+    refuseEscape(type: MachineType, at: ts.Node, what: string): boolean {
+        if (type.kind !== "localfn") {
+            return true;
+        }
+        this.error(
+            at,
+            "GF0239",
+            `${what} is a \`${renderType(type)}\`, whose environment lives in the frame ` +
+            "that wrote the closure — so it stops being valid the moment that frame " +
+            "returns, and this outlives it. Call it where it was passed, or pass it " +
+            "on to another `LocalFn` parameter.",
         );
         return false;
     }
@@ -1427,7 +1672,13 @@ export class Lowerer {
         // its elements are laid out for this compiler and its header is a shape
         // nothing else knows.
         const reason =
-            type.kind === "array"
+            type.kind === "localfn"
+                ? "is a closure: a code address paired with a pointer into this build's " +
+                "own frame, passed by a convention no C caller knows. A plain " +
+                "function type is a bare code address and crosses — give the callback " +
+                "a `Pointer<unknown>` of its own if it needs state, which is the " +
+                "arrangement C already uses"
+                : type.kind === "array"
                 ? "owns a heap buffer whose elements are laid out for this compiler, and " +
                 "nothing outside this build knows that shape"
                 : type.kind === "class"
@@ -1490,6 +1741,9 @@ export class Lowerer {
             return undefined;
         }
         if (!this.requireValueForm(returns, node.type ?? node, "a return type")) {
+            return undefined;
+        }
+        if (!this.refuseEscape(returns, node.type ?? node, "a return type")) {
             return undefined;
         }
 
@@ -1717,6 +1971,9 @@ export class Lowerer {
         // with no field to point at. `Pointer<FILE>` is the field anyone means.
         for (const field of type.fields) {
             if (!this.requireValueForm(field.type, at, `the field \`${field.name}\``)) {
+                return this.#mir.ty({kind: "Void"});
+            }
+            if (!this.refuseEscape(field.type, at, `the field \`${field.name}\``)) {
                 return this.#mir.ty({kind: "Void"});
             }
         }

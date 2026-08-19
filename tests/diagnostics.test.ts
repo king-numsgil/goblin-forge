@@ -185,6 +185,34 @@ describe("codes raised by a program", () => {
         );
     });
 
+    test("GF0238 — moving out of a capture", async () => {
+        await expectRejected(
+            "diag-0238",
+            `function apply(f: LocalFn<() => void>): void { f(); }
+
+       export function main(): i32 {
+         const s: string = "a" + "b";
+         apply(() => { const t: string = move(s); });
+         return 0;
+       }\n`,
+            "GF0238",
+        );
+    });
+
+    test("GF0239 — a `LocalFn` that would outlive its frame", async () => {
+        await expectRejected(
+            "diag-0239",
+            `function make(): LocalFn<(x: i32) => i32> {
+         return (x) => x;
+       }
+
+       export function main(): i32 {
+         return 0;
+       }\n`,
+            "GF0239",
+        );
+    });
+
     test("GF0301 — a type that cannot cross the C boundary", async () => {
         await expectRejected(
             "diag-0301",
@@ -355,6 +383,8 @@ describe("the registry and the suite agree", () => {
             "GF0235",
             "GF0236",
             "GF0237",
+            "GF0238",
+            "GF0239",
             "GF0301",
             "GF0302",
             "GF0303",

@@ -20,6 +20,7 @@ import {
     type Operand,
     type Place,
     type Terminator,
+    type TyId,
 } from "@goblin-forge/backend";
 import {
     checkLiteral,
@@ -68,10 +69,11 @@ import {
     TRY_CAST,
 } from "./tables.ts";
 import { type FnRecord, STRING, type Typed, typed, USIZE, VOID } from "./types.ts";
-import { type Binding, type LoopFrame, type Scope, Scopes } from "./scopes.ts";
+import { type Binding, bindingPlace, isCapture, type LoopFrame, type Scope, Scopes } from "./scopes.ts";
 import { describe, elementTypeOf, hasNullValue, needsDrop, nullAdvice, placeOf } from "./util.ts";
 import type { Lowerer } from "./module.ts";
 import { BoundaryLowerer } from "./c-boundary.ts";
+import { isCallArgument } from "./closures.ts";
 
 export class BodyLowerer extends BoundaryLowerer {
     readonly #returns: MachineType;
@@ -91,6 +93,74 @@ export class BodyLowerer extends BoundaryLowerer {
     constructor(outer: Lowerer, f: FunctionBuilder, scopes: Scopes, returns: MachineType) {
         super(outer, f, scopes);
         this.#returns = returns;
+    }
+
+    /**
+     * A lifted closure body, which differs from {@link run} in two ways.
+     *
+     * It takes a **concise body**: `(x) => x * 2` has an expression where a
+     * function declaration has a block, and that expression is the return value
+     * rather than a statement. tsc allows it and it is the spelling every
+     * iterator callback is written in, so refusing it would make the feature
+     * unusable in the shape it exists for.
+     *
+     * And it gives the environment pointer its type back, in the entry block
+     * before the first statement. Parameter 1 is a `Pointer<unknown>`, because
+     * every closure reaching a given `LocalFn<F>` has an environment of a
+     * different shape and the parameter's type cannot depend on which one
+     * arrived; the cast here is the `reify<T>()` that makes its fields
+     * addressable, and it is emitted rather than assumed for the same reason
+     * REWRITE-PLAN §10 gives: nothing is ever retyped in place.
+     *
+     * `env` is absent for a closure that captures nothing, which then has no
+     * environment at all and never loads one.
+     */
+    runClosure(
+        body: ts.ConciseBody,
+        env: { local: LocalId; parameter: LocalId; ty: TyId } | undefined,
+    ): void {
+        this.current = this.f.block();
+        if (env !== undefined) {
+            this.push({kind: "StorageLive", value: env.local});
+            this.push({
+                kind: "Init",
+                place: placeOf(env.local),
+                rvalue: {
+                    kind: "Cast",
+                    op: "PtrToPtr",
+                    operand: {kind: "Copy", value: placeOf(env.parameter)},
+                    to: env.ty,
+                },
+            });
+        }
+
+        if (ts.isBlock(body)) {
+            this.#block(body);
+        } else if (this.#returns.kind === "void") {
+            // `(x) => push(x)` — tsc allows a concise body whose value is discarded
+            // when the closure returns `void`, and the value really is discarded.
+            // Not routed through `#expressionStatement`: there is no statement node
+            // here, and synthesising one would put a node with no position where
+            // every diagnostic reads one.
+            this.fullExpression(() => {
+                this.#expressionValue(body);
+            });
+        } else {
+            const mark = this.temporaries.length;
+            const value = this.#returnValue(body);
+            if (value !== undefined) {
+                this.push({kind: "Init", place: placeOf(LocalId(0)), rvalue: {kind: "Use", value}});
+            }
+            this.endTemporaries(mark);
+            for (const scope of this.scopes.all()) {
+                this.#endScope(scope);
+            }
+            this.seal({kind: "Return"});
+        }
+
+        if (this.current !== undefined) {
+            this.seal({kind: "Return"});
+        }
     }
 
     run(
@@ -218,7 +288,7 @@ export class BodyLowerer extends BoundaryLowerer {
             );
             return undefined;
         }
-        return {operand: {kind: "Borrow", value: placeOf(binding.local)}, type: binding.type};
+        return {operand: {kind: "Borrow", value: bindingPlace(binding)}, type: binding.type};
     }
 
     /**
@@ -398,7 +468,7 @@ export class BodyLowerer extends BoundaryLowerer {
                 continue;
             }
             const value: Typed = {
-                operand: {kind: "Copy", value: placeOf(binding.local)},
+                operand: {kind: "Copy", value: bindingPlace(binding)},
                 type: field.type,
             };
             this.push({
@@ -567,12 +637,20 @@ export class BodyLowerer extends BoundaryLowerer {
     #returnValue(expression: ts.Expression): Operand | undefined {
         if (ts.isIdentifier(expression) && sameType(this.#returns, this.widthType(expression))) {
             const binding = this.scopes.lookup(expression.text);
-            if (binding !== undefined && this.#owns(binding.type) && !this.#isOwningParameter(binding)) {
+            // A capture is excluded for the same reason a by-value parameter is:
+            // the value belongs to a frame that is still live and still going to
+            // destroy it. Falling through copies, which is what returning it means.
+            if (
+                binding !== undefined &&
+                this.#owns(binding.type) &&
+                !this.#isOwningParameter(binding) &&
+                !isCapture(binding)
+            ) {
                 if (this.#readMoved(expression, binding.local, expression.text)) {
                     return undefined;
                 }
                 this.#moved.set(binding.local, expression.text);
-                return {kind: "Move", value: placeOf(binding.local)};
+                return {kind: "Move", value: bindingPlace(binding)};
             }
         }
         const value = this.expressionTyped(expression, this.#returns);
@@ -1442,7 +1520,7 @@ export class BodyLowerer extends BoundaryLowerer {
             if (this.#readMoved(target, binding.local, target.text)) {
                 return undefined;
             }
-            return {place: placeOf(binding.local), type: binding.type};
+            return {place: bindingPlace(binding), type: binding.type};
         }
 
         if (ts.isElementAccessExpression(target)) {
@@ -1594,7 +1672,7 @@ export class BodyLowerer extends BoundaryLowerer {
         // owning type that value has to be destroyed before the new one lands.
         this.push({
             kind: "Assign",
-            place: placeOf(binding.local),
+            place: bindingPlace(binding),
             rvalue: {kind: "Use", value: this.forStorage(value)},
         });
         // The binding holds a value again, so a `move` before this one no longer
@@ -2132,6 +2210,15 @@ export class BodyLowerer extends BoundaryLowerer {
             return this.#null(expression, expected);
         }
 
+        // Also before the width pass, and for the same shape of reason: a lambda
+        // has no type of its own here. `(x) => x * 2` is a `LocalFn` or it is
+        // nothing, and which one it is comes from the parameter it is being passed
+        // to — so the expected type is the only thing that can answer, and asking
+        // the width pass first would report an expression it cannot type.
+        if (ts.isArrowFunction(expression) || ts.isFunctionExpression(expression)) {
+            return this.#closure(expression, expected);
+        }
+
         const width = this.width(expression);
         if (width.kind === "error") {
             return undefined;
@@ -2197,7 +2284,7 @@ export class BodyLowerer extends BoundaryLowerer {
             // For a trivial type copy and move lower identically, and the frontend
             // still says which one it means. `Copy` is right here: reading a binding
             // does not end it.
-            return {operand: {kind: "Copy", value: placeOf(binding.local)}, type: binding.type};
+            return {operand: {kind: "Copy", value: bindingPlace(binding)}, type: binding.type};
         }
 
         if (expression.kind === ts.SyntaxKind.ThisKeyword) {
@@ -3224,6 +3311,15 @@ export class BodyLowerer extends BoundaryLowerer {
         // expression at all while every path below recognises one shape — and
         // because a field holding a code address is *not* a method call, there
         // being nowhere in a `FnPtr` to put a receiver.
+        // A `LocalFn` value, called. Before `callableValue`, which recognises a
+        // bare code address and would call one with no environment at all — the
+        // lifted body's first parameter, silently missing, and every argument off
+        // by one.
+        const closure = this.#closureCallee(expression.expression);
+        if (closure !== undefined) {
+            return this.#localFnCall(expression, closure.place, closure.type);
+        }
+
         const callable = this.callableValue(expression.expression);
         if (callable !== undefined) {
             return this.#indirectCall(expression, callable.value, callable.type);
@@ -3371,6 +3467,218 @@ export class BodyLowerer extends BoundaryLowerer {
             return undefined;
         }
         return this.fromCall(destination, returns);
+    }
+
+    /**
+     * A callee that is a `LocalFn` value, and the place it lives in.
+     *
+     * A name, and only a name. That is not a restriction in practice: the escape
+     * rule refuses a `LocalFn` as a field, an element and a return type, so a
+     * parameter and a local are the only places one can be — and both are names.
+     */
+    #closureCallee(
+        expression: ts.Expression,
+    ): { place: Place; type: Extract<MachineType, { kind: "localfn" }> } | undefined {
+        if (!ts.isIdentifier(expression)) {
+            return undefined;
+        }
+        const binding = this.scopes.lookup(expression.text);
+        if (binding === undefined || binding.type.kind !== "localfn") {
+            return undefined;
+        }
+        return {place: bindingPlace(binding), type: binding.type};
+    }
+
+    /**
+     * `f(1)` where `f` is a `LocalFn`: the environment, then the arguments.
+     *
+     * The environment travels as argument 0 rather than in a register the ABI
+     * reserves, because there is no such register in any convention this
+     * compiler targets and inventing one would make the lifted body uncallable
+     * by anything else. It is the arrangement C uses for a `void *` userdata,
+     * moved to the front and made mandatory.
+     */
+    #localFnCall(
+        expression: ts.CallExpression,
+        place: Place,
+        type: Extract<MachineType, { kind: "localfn" }>,
+    ): Typed | undefined {
+        if (expression.arguments.length !== type.params.length) {
+            this.outer.unsupported(expression, "a call whose arity tsc and the lowerer disagree on");
+            return undefined;
+        }
+
+        const field = (index: number): Place => ({
+            local: place.local,
+            projection: [...place.projection, {kind: "Field", value: FieldId(index)}],
+        });
+
+        const args: Operand[] = [{kind: "Copy", value: field(1)}];
+        for (const [index, argument] of expression.arguments.entries()) {
+            const value = this.expressionTyped(argument, type.params[index]!);
+            if (value === undefined) {
+                return undefined;
+            }
+            args.push(this.forArgument(argument, value));
+        }
+
+        return this.emitCall(
+            expression,
+            {
+                kind: "Indirect",
+                operand: {kind: "Copy", value: field(0)},
+                sig: this.outer.localFnSig(type, expression),
+            },
+            args,
+            type.returns,
+        );
+    }
+
+    /**
+     * `(x) => x * 2` written where a `LocalFn` is wanted: the closure value.
+     *
+     * Two words, built here in the frame the captures live in — a code address
+     * for the lifted body, and a pointer to an environment of references to
+     * this frame's locals. Both are temporaries of the enclosing
+     * full-expression, which is exactly the lifetime the type promises: the call
+     * this is an argument to finishes before they die.
+     *
+     * The environment is a struct of `Reference<T>`, so its category is `Borrow`
+     * and the drop pass places nothing on it. Nothing here owns anything; the
+     * frame that declared the captured locals still owns them and still destroys
+     * them (DECISIONS §18).
+     */
+    #closure(
+        node: ts.ArrowFunction | ts.FunctionExpression,
+        expected: MachineType | undefined,
+    ): Typed | undefined {
+        if (expected === undefined || expected.kind !== "localfn") {
+            // A lambda has no type of its own, so there is nothing to report a
+            // mismatch against — the message has to be about the position instead.
+            this.outer.error(
+                node,
+                "GF0239",
+                expected === undefined
+                    ? "a lambda has no type of its own, and nothing here says what it " +
+                    "should be. It can only be written where a `LocalFn<F>` parameter " +
+                    "is expected."
+                    : `a lambda cannot be a \`${renderType(expected)}\`. A lambda that ` +
+                    "captures is a `LocalFn<F>`, and one that does not can still only be " +
+                    "written where a `LocalFn<F>` is expected — a plain function type is " +
+                    "a bare code address, which is what a named function is.",
+            );
+            return undefined;
+        }
+
+        // **An argument, and nowhere else.** The environment below is a temporary
+        // of the enclosing full-expression, so a call bounds it exactly: the call
+        // finishes before the temporary dies. A binding does not —
+        //
+        //     const g: LocalFn<(x: i32) => i32> = (x) => x + n;
+        //
+        // leaves `g` holding the address of a temporary from a statement that has
+        // ended. This is the same rule as `GF0234`'s and the same reasoning: only
+        // a binding can outlive a temporary, so only a binding has to be refused.
+        //
+        // Binding a `LocalFn` *parameter* to a name stays legal, and is a different
+        // thing entirely — that environment belongs to a caller whose frame is
+        // still live for the whole of this call.
+        if (!isCallArgument(node)) {
+            this.outer.error(
+                node,
+                "GF0239",
+                "a lambda's environment is a temporary of the statement that writes it, " +
+                "so binding one to a name would outlive it. Write the lambda at the " +
+                "call that takes it.",
+            );
+            return undefined;
+        }
+
+        const lifted = this.outer.liftClosure(node, expected, this.scopes);
+        if (lifted === undefined) {
+            return undefined;
+        }
+
+        const erasedType: MachineType = {kind: "pointer", pointee: {kind: "void"}};
+        const erasedTy = this.outer.tyOf(erasedType, node);
+        let environment: Operand;
+
+        if (lifted.env === undefined) {
+            // Nothing captured, so there is no environment: the lifted body takes the
+            // parameter and never loads it. Null rather than a zero-field struct,
+            // because a struct of nothing still needs an address and this does not.
+            environment = {kind: "Const", value: {kind: "Null", value: erasedTy}};
+        } else {
+            const slots = this.f.addLocal({
+                ty: lifted.env.ty,
+                storage: "Temporary",
+                span: this.outer.span(node),
+            });
+            this.push({kind: "StorageLive", value: slots});
+            this.push({
+                kind: "Init",
+                place: placeOf(slots),
+                rvalue: {
+                    kind: "Aggregate",
+                    ty: lifted.env.ty,
+                    // Field order is `lifted.captures`, which the lifted body indexed by
+                    // when it declared its bindings. One list, read twice.
+                    fields: lifted.captures.map((capture) =>
+                        this.refTo(node, bindingPlace(capture), capture.type),
+                    ),
+                },
+            });
+
+            const address = this.f.addLocal({ty: lifted.env.pointer, storage: "Temporary"});
+            this.push({kind: "StorageLive", value: address});
+            this.push({
+                kind: "Init",
+                place: placeOf(address),
+                rvalue: {kind: "AddrOf", value: placeOf(slots)},
+            });
+
+            // And then its type is thrown away, because the receiving parameter is
+            // one type for every closure that can reach it. Written as a cast rather
+            // than by storing a `Pointer<Env>` into a `Pointer<unknown>` slot: the
+            // erasure is the point, and it should be visible in a MIR dump.
+            const erased = this.f.addLocal({ty: erasedTy, storage: "Temporary"});
+            this.push({kind: "StorageLive", value: erased});
+            this.push({
+                kind: "Init",
+                place: placeOf(erased),
+                rvalue: {
+                    kind: "Cast",
+                    op: "PtrToPtr",
+                    operand: {kind: "Copy", value: placeOf(address)},
+                    to: erasedTy,
+                },
+            });
+            environment = {kind: "Copy", value: placeOf(erased)};
+        }
+
+        const ty = this.outer.tyOf(expected, node);
+        const local = this.f.addLocal({ty, storage: "Temporary", span: this.outer.span(node)});
+        this.push({kind: "StorageLive", value: local});
+        this.push({
+            kind: "Init",
+            place: placeOf(local),
+            rvalue: {
+                kind: "Aggregate",
+                ty,
+                fields: [
+                    {
+                        kind: "Const",
+                        value: {
+                            kind: "Func",
+                            func: {kind: "Local", value: lifted.func},
+                            ty: this.outer.localFnCodeTy(expected, node),
+                        },
+                    },
+                    environment,
+                ],
+            },
+        });
+        return {operand: {kind: "Copy", value: placeOf(local)}, type: expected};
     }
 
     /**
@@ -3831,7 +4139,7 @@ export class BodyLowerer extends BoundaryLowerer {
             base,
             method.symbol,
             expression.arguments,
-            {kind: "Copy", value: placeOf(binding.local)},
+            {kind: "Copy", value: bindingPlace(binding)},
         );
         if (args === undefined || args === null) {
             return undefined;
@@ -3896,7 +4204,7 @@ export class BodyLowerer extends BoundaryLowerer {
             base,
             base.constructorSymbol,
             expression.arguments,
-            {kind: "Copy", value: placeOf(binding.local)},
+            {kind: "Copy", value: bindingPlace(binding)},
         );
         if (args === undefined) {
             return undefined;
@@ -4019,8 +4327,23 @@ export class BodyLowerer extends BoundaryLowerer {
             return undefined;
         }
 
+        // A capture is a borrow of a local the enclosing frame still owns, and it
+        // is that frame which destroys it. Emptying it from in here leaves the
+        // owner holding a moved-from value it never wrote, and the closure may run
+        // any number of times — so the second call moves out of nothing.
+        if (isCapture(binding)) {
+            this.outer.error(
+                argument,
+                "GF0238",
+                `\`${argument.text}\` is captured from the enclosing function, which still ` +
+                "owns it — a capture is a borrow, so there is nothing here to move out " +
+                "of. Copy it instead (assigning it is a copy).",
+            );
+            return undefined;
+        }
+
         this.#moved.set(binding.local, argument.text);
-        return {operand: {kind: "Move", value: placeOf(binding.local)}, type: binding.type};
+        return {operand: {kind: "Move", value: bindingPlace(binding)}, type: binding.type};
     }
 
     /**

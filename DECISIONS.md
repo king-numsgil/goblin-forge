@@ -1198,6 +1198,228 @@ toolchain currently on disk.
 
 ---
 
+## §18 — Closures *(settled 2026-08-19; `LocalFn` built, `HeapFn` and `RefCount<T>` not)*
+
+**Answer: three function types, all written down, none inferred.** A bare
+`(a: i32) => i32` stays what it already is — one code address, no environment,
+capture is an error at the lambda. `LocalFn<F>` adds an environment that cannot
+escape the call. `HeapFn<F>` adds one that can, and pays for it by taking
+ownership of what it captures.
+
+The shape came from Swift's escaping/non-escaping split, reversed: Swift marks
+the *escaping* case and defaults to non-escaping. Here the default is neither —
+it is the no-environment case that exists today, and both closure forms are
+opted into by the type that receives them.
+
+### Why the split is not inferred from context
+
+The first sketch had one spelling, `() => i32`, meaning a bare function pointer
+when it flowed into an `extern` declaration and a heap closure when it did not.
+That is rejected for two reasons.
+
+The smaller one is that it re-opens a question this compiler answers everywhere
+else by writing it down. A type whose representation depends on where the value
+flows is a property of the program that has to be re-derived at every site, and
+REWRITE-PLAN's whole account of why v1 leaked is that exactly one site always
+gets missed.
+
+The larger one is the diagnostic. Under inference, `const cb = (x: i32) => x + n;`
+is fine where it is written, and the error arrives later at the `extern` call
+that could not accept an environment — pointing at a parameter, in a signature
+the programmer may not own, about a capture several lines up. Under three named
+types the error is at the lambda, on `n`, which is the thing that has to change.
+
+### `LocalFn<F>` is a borrow, and the rule is escape rather than storage
+
+Its representation is two words — a code address and a pointer to an
+environment that lives in the caller's frame. Category `Borrow`, storage class
+`Borrowed`: it owns nothing, copies trivially, and destroys nothing. Captures
+are references into the frame, which is sound for precisely the reason the type
+exists — the frame is alive for the whole of the call.
+
+The restriction was first written as "cannot be stored in a variable at all".
+That is the wrong rule in both directions. It forbids things that are safe:
+
+```ts
+function each(xs: i32[], f: LocalFn<(x: i32) => void>): void {
+    const g = f;        // same lexical extent, nothing escapes
+    inner(xs, g);       // inner also takes LocalFn, still bounded by this call
+}
+```
+
+and, taken literally, it says nothing about the cases that actually break —
+returning one, storing one in a struct field or an array, capturing one inside a
+`HeapFn`. The rule is **escape**, and it is the rule `Reference<T>` already
+lives under. `GF0234` ("a reference cannot borrow a temporary") is the local
+half of it; a `LocalFn` needs the same treatment extended to the ways a value
+leaves a frame.
+
+The name says where the environment lives rather than what the type forbids,
+which is a description of the consequence rather than the contract. Kept anyway:
+it is the name the design was discussed under, and `Local` reads correctly at
+every call site that matters.
+
+### What was built, and the two rules that came out of building it
+
+The value is a two-word struct — a code address and a `Pointer<unknown>` to an
+environment — and **not** a `TyKind` of its own. The rule that distinguishes a
+`LocalFn` from a pair of pointers is a frontend rule, checked where `LocalFn<F>`
+is still spelled, so a MIR node would carry nothing the backend acts on and
+would cost a wire-format fingerprint to add. `Reference<I>` travels as an
+`(itab, data)` pair for the same reason.
+
+The environment is a struct of `Reference<T>`, one per capture, built as a
+temporary at the closure site. Category `Borrow` throughout: nothing in a
+closure owns anything, and the drop pass places nothing on any of it.
+
+Two rules were not in the design and are not optional:
+
+- **A lambda may only be written as a call argument.** Its environment is a
+  temporary of the enclosing full-expression, which a call is bounded by and a
+  binding is not — `const g: LocalFn<F> = (x) => x + n;` leaves `g` holding the
+  address of a temporary from a statement that has ended. This is `GF0234`'s
+  rule arriving by another route: only a binding can outlive a temporary, so
+  only a binding has to be refused. Binding a `LocalFn` *parameter* to a name
+  stays legal, and is a different thing — that environment belongs to a caller
+  whose frame is live for the whole call.
+- **A capture cannot be moved out of** (`GF0238`). The enclosing frame still
+  owns the value and still destroys it, and a closure can be called any number
+  of times, so the first call would empty it and every later call would move out
+  of nothing. `return name` inside a closure is therefore a copy, which is what
+  it already is for a by-value parameter and for the same reason (§11.4).
+
+Capture analysis asks tsc which declaration a name refers to, rather than
+collecting the names declared inside the closure and treating the rest as
+captures. The flat version is wrong in one shape and silently:
+
+```ts
+(x) => { total += x; { const total = 0; } }
+```
+
+`total` is captured *and* shadowed, in a nested block, so a flat name set drops
+a real capture and the write above disappears.
+
+Verified against the C++ oracle, which is the arbiter here because a
+non-escaping closure is exactly `[&]` on a template parameter — `std::function`
+is not the comparison, since it type-erases onto the heap. Two cases, and the
+second is the one that matters: assigning a `string` *through* a capture
+releases the enclosing frame's old buffer, on schedule, with a trace identical
+to C++'s. A capture that copied would still balance, around the wrong object.
+
+### What `LocalFn` buys, stated exactly
+
+It removes the allocation. It does not remove the call.
+
+`xs.map(x => x * 2)` through a `LocalFn` parameter is an indirect call through a
+fat pointer, once per element, and it stays one until the callee is specialised
+per closure type. That is §11.7 (monomorphisation) plus an inliner, and the
+inliner arrives with §17 — Cranelift does no interprocedural inlining, LLVM
+does. Three separate things, and this section is only the first.
+
+Worth keeping the claims apart, because the second one is the one a space
+simulation's inner loops actually need, and it is not what this section
+delivers.
+
+### `HeapFn<F>` captures by move, and that needs nothing new
+
+The environment is on the heap so that it can outlive the frame. That single
+fact settles capture mode: a reference into a frame that is gone is a dangling
+pointer, and there is no region system here to check one — `GF0234` is a rule
+about a single full-expression, not a lifetime.
+
+So a `HeapFn` captures by value: trivial captures are copied into the
+environment, owning captures are **moved** into it. The environment is an owning
+aggregate, the closure is category `Owning`, and drop glue destroys the
+environment. Copy and move are already separate IR nodes chosen by the frontend,
+so none of this is new machinery.
+
+The contention diagnostic is not new either. `GF0235` ("a moved-from value was
+read") already fires, and is already deliberately not flow-sensitive — a move is
+seen for the rest of the function — so both failing cases report themselves:
+
+```ts
+const cb1 = () => use(buf);   // buf moved into cb1's environment
+const cb2 = () => use(buf);   // GF0235 — already moved
+print(buf.length);            // GF0235 — already moved
+```
+
+**A `HeapFn` cannot capture a borrow.** Moving a `Reference<T>` or a
+`Pointer<T>` into an environment moves the address, not what it addresses, so
+the capture outlives its referent exactly as often as the closure outlives the
+frame. This is a rule rather than a gap, and it is needed the day `HeapFn` lands
+— before `RefCount<T>` is anywhere near.
+
+### The design that was probed and rejected: boxing captured locals
+
+The alternative to move-capture is what Swift, C# and every Scheme actually do:
+a local captured by an escaping closure stops being a stack slot and becomes a
+heap cell, and *everything* — the closure and the enclosing frame alike — holds
+a reference to that cell. It is sound, it needs no lifetimes, and it reproduces
+TypeScript's own semantics, where two closures over the same `let` see each
+other's writes.
+
+It was rejected on cost, and the cost is the kind this project refuses
+specifically:
+
+- **The pessimisation is invisible at the site that causes it.** Boxing is
+  per-variable, not per-closure. One escaping closure over `n` boxes `n` for the
+  whole enclosing function, including a hot loop that never mentions the
+  closure.
+- **It requires reference counting to exist, unconditionally.** Two closures
+  over one variable, or a frame that outlives the closure, mean the cell has no
+  single owner. There is no refcount anywhere in the value model today, and
+  introducing one as an implementation detail of closures puts shared ownership
+  into the language without anybody writing it down.
+
+Move-capture inverts both: the common case costs nothing, and the case that
+needs sharing says so.
+
+### `RefCount<T>` is the opt-in, and it is its own feature
+
+When a capture genuinely has two consumers, the answer is to write it:
+`RefCount<T>`, wrapped by the programmer, with `GF0235`'s message extended to
+name it as the fix.
+
+This is the right shape because of how rarely it fires. Trivial captures are
+copied and never contend; only an owning capture with more than one consumer
+does. The marker's cost is proportional to how often it is needed.
+
+It is deferred, and deliberately not treated as part of closures, because it is
+`Rc<T>` and it forces four decisions that have nothing to do with closures:
+
+- **Copy is a refcount bump**, which is a third copy behaviour alongside trivial
+  and owning. Whether that is a new `Category` or an `Owning` type with special
+  copy glue is the real question, and it touches the most existing code.
+- **Cycles leak**, and there is no `Weak<T>` in the answer. What makes shipping
+  without one tolerable here and not in C++ is the harness: the live-allocation
+  check runs on every `run` test, so a cycle fails the suite rather than leaking
+  quietly. `Weak<T>` waits until a test catches one.
+- **Reading the `T` needs an explicit accessor**, because TypeScript cannot
+  overload dereference, and what comes back is `Reference<T>`-shaped. That opens
+  a hole `GF0234` does not cover — a reference outliving the last `RefCount` that
+  kept the cell alive — and therefore a new rule and a new code.
+- **Aliased mutation is unchecked.** Two closures sharing a
+  `RefCount<Counter>` both mutate it, with no `RefCell` and no borrow checker to
+  arbitrate. That is consistent with not being Rust, and it is recorded here so
+  it is a decision rather than a discovery.
+
+### The order this lands in
+
+Three independent pieces, shipped apart, each useful without the next:
+
+1. **`LocalFn<F>`** — borrow category, no ownership question at all. Covers
+   every stdlib iterator, which is what this was started for. *Built
+   2026-08-19.*
+2. **`HeapFn<F>` with move-capture only** — reuses `GF0235` as it stands, adds
+   no value-model machinery. Covers single-owner callbacks.
+3. **`RefCount<T>`** — on its own merits, when something needs sharing.
+
+One thing to avoid at step 2: do not put "wrap it in `RefCount<T>`" into the
+diagnostic before `RefCount<T>` exists. A message naming a type that cannot be
+written is worse than the plain move error.
+
+---
+
 ## Class decisions *(2026-08-12, milestone 8)*
 
 ### Every class has a vtable pointer, including one with no virtual methods

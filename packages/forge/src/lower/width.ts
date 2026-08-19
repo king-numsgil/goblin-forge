@@ -223,6 +223,22 @@ export abstract class WidthPass extends Emitter {
             return this.#binaryWidth(expression);
         }
 
+        // A lambda has no width of its own, so reaching here means it was written
+        // somewhere nothing supplies one — the value pass answers a lambda from the
+        // *expected* type and never asks this. `GF0001` would be the wrong verdict
+        // twice over: arrow functions do lower, and this position is a rule rather
+        // than a gap.
+        if (ts.isArrowFunction(expression) || ts.isFunctionExpression(expression)) {
+            this.outer.error(
+                expression,
+                "GF0239",
+                "a lambda has no type of its own, so it can only be written where one " +
+                "is expected — as an argument to a `LocalFn<F>` parameter. Nothing " +
+                "here says what this one should be.",
+            );
+            return ERROR;
+        }
+
         this.outer.unsupported(expression, describe(expression));
         return ERROR;
     }
@@ -746,8 +762,16 @@ export abstract class WidthPass extends Emitter {
         if (target === undefined) {
             // A value of function-pointer type, called. Its return type comes from
             // the type rather than from a declaration, because there may not be one.
+            //
+            // A `LocalFn` answers here too and for the same reason. The environment
+            // it also passes is invisible at this level: the width pass is about
+            // what the expression *is*, and a closure call produces its return type
+            // whatever the calling sequence underneath turns out to be.
             const width = this.width(expression.expression);
-            if (width.kind === "typed" && width.type.kind === "fnptr") {
+            if (
+                width.kind === "typed" &&
+                (width.type.kind === "fnptr" || width.type.kind === "localfn")
+            ) {
                 for (const argument of expression.arguments) {
                     if (this.width(argument).kind === "error") {
                         return ERROR;

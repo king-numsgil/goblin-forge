@@ -179,7 +179,13 @@ export function sameType(a: MachineType, b: MachineType): boolean {
         // Structural, and it has to be: a function pointer's identity is its
         // signature, because that is the only thing a caller and a definition on
         // the far side of a boundary can both know.
-        case "fnptr": {
+        //
+        // A `LocalFn` compares the same way and never compares *equal* to a bare
+        // function pointer, because the kinds are checked above — which is the
+        // answer that matters, since the two have different representations and
+        // only one of them may capture.
+        case "fnptr":
+        case "localfn": {
             const other = b as typeof a;
             return (
                 a.params.length === other.params.length &&
