@@ -1315,11 +1315,37 @@ receiver still dispatches virtually and `super.m()` inside a closure is still a
 direct call to the base, because neither ever looked at anything but the
 receiver's own value.
 
-The one distinction that has to be drawn is the source-level one: an arrow
-function does not rebind `this` and a `function` expression does, so `this`
-inside the latter is never the enclosing method's. tsc rejects it first under
-`noImplicitThis`, and the capture analysis answers `false` for that node anyway
-rather than relying on it.
+**A `function` expression may not use the enclosing `this`, and this is not a
+gap.** JavaScript gives an arrow the enclosing `this` lexically and gives a
+`function` expression one from the receiver at the call site. Goblin keeps the
+first and cannot keep the second: a `LocalFn` is a code address and an
+environment, there is nowhere in it to put a receiver, and no call sequence that
+supplies one. So `this` in a `function` expression is not a *different*
+receiver — it is one nothing can ever provide, and it is refused (`GF0002`)
+rather than quietly given the enclosing one.
+
+Quietly giving it the enclosing one was considered and rejected. It reads as the
+friendlier answer, and it is the one that makes the compiler disagree with the
+editor: tsc types `this` in a `function` expression by its own rule, so a
+program would mean one thing in the IDE and another when built. The lever that
+would silence tsc is `noImplicitThis: false`, which does not make `this` the
+enclosing receiver — it makes it `any`, so `this.typo` typechecks and every
+field access inside the closure stops being checked at all. Buying a spelling
+nobody needs with the loss of checking on the object it names is the wrong
+trade; an arrow is right there and already means it.
+
+The rule is the compiler's rather than tsc's, and has to be: the `strict` check
+in `checker/src/tsconfig.ts` accepts `strictNullChecks` and `noImplicitAny` in
+place of `strict`, which does not imply `noImplicitThis`. A project can reach
+the lowerer with tsc silent about it.
+
+Two things about the *declared* form, `function (this: Box) { … }`, are worth
+recording because both were found by testing rather than by reading. tsc accepts
+it — it is a promise about what a caller will supply, and this is the caller
+saying it cannot. And TypeScript models a declared `this` as `parameters[0]`
+rather than as a field of its own, while tsc's *signature* excludes it, so the
+arity check compared a signature without it against an AST with it and reported
+a user error as a compiler gap.
 
 Capture analysis asks tsc which declaration a name refers to, rather than
 collecting the names declared inside the closure and treating the rest as

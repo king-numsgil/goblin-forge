@@ -90,17 +90,13 @@ function namesAValue(node: ts.Identifier): boolean {
  * closure captures the local holding the reference, exactly as it captures any
  * other local.
  *
- * **A `function` expression binds its own `this`**, so nothing inside one refers
- * to the enclosing method's and this answers `false` for the whole node. Reading
- * `this` in there is then the `GF0002` it already is in a free function, which
- * is the right complaint. An arrow function does not rebind, which is the entire
- * reason the two forms are distinguished here.
+ * This reports what the body *reads*, and says nothing about whether reading it
+ * is allowed — a `function` expression binds its own `this` and so may not
+ * capture the enclosing one, but that is a rule for {@link liftClosure} to
+ * state, with a message about the form. Answering `false` here instead would
+ * hide the question and leave the reader with a complaint about scope.
  */
 export function usesThis(fn: ts.ArrowFunction | ts.FunctionExpression): boolean {
-    if (!ts.isArrowFunction(fn)) {
-        return false;
-    }
-
     let found = false;
     const visit = (node: ts.Node): void => {
         if (found) {
@@ -120,6 +116,28 @@ export function usesThis(fn: ts.ArrowFunction | ts.FunctionExpression): boolean 
     };
     visit(fn.body);
     return found;
+}
+
+/**
+ * The declared `this` parameter — `function (this: Box) { … }` — or `undefined`.
+ *
+ * TypeScript models a declared `this` as `parameters[0]` rather than as a field
+ * of its own, so anything reading `node.parameters` as the written parameters is
+ * off by one the moment somebody writes it. tsc's *signature* excludes it, which
+ * is where the two disagree: the arity check compared a signature without it
+ * against an AST with it and reported the disagreement as a compiler gap.
+ *
+ * `this` is a reserved word, so a parameter cannot be named it by accident and
+ * the name is a sound test.
+ */
+export function thisParameterOf(
+    fn: ts.ArrowFunction | ts.FunctionExpression,
+): ts.ParameterDeclaration | undefined {
+    const first = fn.parameters[0];
+    if (first !== undefined && ts.isIdentifier(first.name) && first.name.text === "this") {
+        return first;
+    }
+    return undefined;
 }
 
 function rebindsThis(node: ts.Node): boolean {

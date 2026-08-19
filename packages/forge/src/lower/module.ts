@@ -52,7 +52,7 @@ import {
 import { type Binding, Scopes } from "./scopes.ts";
 import { describe, isStaticMember, moduleTag, needsDrop } from "./util.ts";
 import { BodyLowerer } from "./body.ts";
-import { capturedNames, usesThis } from "./closures.ts";
+import { capturedNames, thisParameterOf, usesThis } from "./closures.ts";
 
 export class Lowerer {
     readonly #program: ts.Program;
@@ -511,13 +511,44 @@ export class Lowerer {
         enclosing: Scopes,
         self: ClassInfo | undefined,
     ): LiftedClosure | undefined {
-        if (node.parameters.length !== type.params.length) {
+        // Where `this` comes from, decided once and for the whole form.
+        //
+        // An arrow captures the enclosing method's `this` lexically, which is
+        // TypeScript's rule and the one Goblin can keep. A `function` expression
+        // binds its own, from the receiver at the call site — and a `LocalFn` is a
+        // code address and an environment, with nowhere to put a receiver and no
+        // call sequence that supplies one. So `this` in there is not a *different*
+        // `this`; it is one that nothing can ever provide.
+        //
+        // tsc refuses the bare spelling first, under `noImplicitThis`. The
+        // declared one, `function (this: Box) { … }`, it accepts — that is a
+        // promise about what a caller will supply, and this is the caller saying
+        // it cannot.
+        const declaredThis = thisParameterOf(node);
+        if (declaredThis !== undefined || (ts.isFunctionExpression(node) && usesThis(node))) {
+            this.error(
+                declaredThis ?? node,
+                "GF0002",
+                "a `function` expression takes its `this` from the receiver at the call " +
+                "site, and a `LocalFn` is a code address and an environment with no " +
+                "receiver in it — so nothing here can supply one. Write it as an arrow " +
+                "function, which captures the enclosing `this` instead of expecting to " +
+                "be given one.",
+            );
+            return undefined;
+        }
+
+        // The written parameters. A declared `this` is `parameters[0]` in the AST
+        // and absent from tsc's signature, which is refused above — so past here
+        // the two agree and a disagreement really is a compiler bug.
+        const written = node.parameters;
+        if (written.length !== type.params.length) {
             this.unsupported(node, "a closure whose arity tsc and the lowerer disagree on");
             return undefined;
         }
 
         const params: { name: string; type: MachineType }[] = [];
-        for (const [index, parameter] of node.parameters.entries()) {
+        for (const [index, parameter] of written.entries()) {
             if (!ts.isIdentifier(parameter.name)) {
                 this.unsupported(parameter, "a destructured closure parameter");
                 return undefined;

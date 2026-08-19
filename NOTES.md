@@ -220,10 +220,21 @@ either way.
 projection is special-cased for it; `usesThis` exists only because `this` is a
 keyword and so has no symbol for `capturedNames` to resolve. A method call
 through a captured receiver still dispatches virtually, and `super.m()` inside a
-closure is still a direct call to the base. An arrow does not rebind `this` and
-a `function` expression does, which is the one distinction `usesThis` has to
-draw — tsc rejects the latter first under `noImplicitThis`, and `usesThis`
-answers `false` for it rather than relying on that.
+closure is still a direct call to the base.
+
+A **`function` expression** may not use the enclosing `this` (`GF0002`): JS
+binds its `this` from the receiver at the call site, and a `LocalFn` has no
+receiver in it, so that `this` is one nothing can supply rather than a different
+one. The rule is the compiler's and not tsc's, deliberately — the `strict` check
+in `checker/src/tsconfig.ts` accepts `strictNullChecks` + `noImplicitAny`
+instead, which does not imply `noImplicitThis`, so a project can reach the
+lowerer with tsc silent. A `function` expression that does *not* use `this` is
+an ordinary closure and works.
+
+**A declared `this` parameter is `parameters[0]` in the AST and absent from
+tsc's signature.** That mismatch made the arity check report a user error as a
+compiler gap, which is why `thisParameterOf` exists and is checked before the
+arity comparison.
 
 **Closures nest, and needed nothing added.** This was refused for one commit on
 the theory that the inner environment would have to reach *through* the outer

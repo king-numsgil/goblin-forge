@@ -319,6 +319,34 @@ describe("LocalFn, capturing `this`", () => {
         expect(result.stderr).toBe("");
     });
 
+    /**
+     * `() => this.v += 2` — a concise body whose value is discarded, writing
+     * through a captured receiver. Three things that are each tested elsewhere
+     * and had not met: the void concise-body path, a compound assignment, and a
+     * field reached through the environment.
+     */
+    test("a concise body writes through the captured receiver", async () => {
+        const result = await run(
+            "closure-this-concise",
+            `function apply(f: LocalFn<() => void>): void { f(); }
+
+       class Box {
+         v: i32 = 0;
+         run(): void { apply(() => this.v += 2); }
+       }
+
+       export function main(): i32 {
+         const b: Box = new Box();
+         b.run();
+         b.run();
+         console.log(\`\${b.v}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("4\n");
+        expect(result.stderr).toBe("");
+    });
+
     test("`this` alongside parameters and locals", async () => {
         const result = await run(
             "closure-this-mixed",
@@ -395,6 +423,66 @@ describe("LocalFn, capturing `this`", () => {
        }\n`,
         );
         expect(result.stdout).toBe("...\nhowl\n");
+    });
+
+    /**
+     * A `function` expression is a closure over names but **not** over `this`:
+     * JavaScript binds its `this` from the receiver at the call site, and a
+     * `LocalFn` is a code address and an environment with no receiver in it. So
+     * `this` in there is not a *different* receiver, it is one nothing can
+     * supply — and it is refused rather than quietly given the enclosing one.
+     */
+    test("a `function` expression may not use the enclosing `this`", async () => {
+        // tsc refuses the bare spelling under `noImplicitThis`, so this is the
+        // one it lets through: a declared `this` parameter is a promise about
+        // what some caller will supply.
+        await expectRejected(
+            "closure-fn-this-param",
+            `function apply(f: LocalFn<() => void>): void { f(); }
+
+       class Box {
+         v: i32 = 0;
+         run(): void { apply(function (this: Box) { this.v = 1; }); }
+       }
+
+       export function main(): i32 { const b: Box = new Box(); b.run(); return 0; }\n`,
+            "GF0002",
+        );
+    });
+
+    test("and is refused by the compiler, not only by `noImplicitThis`", async () => {
+        // The `strict` guard in `checker/src/tsconfig.ts` accepts
+        // `strictNullChecks` + `noImplicitAny` in place of `strict`, which does
+        // not imply `noImplicitThis` — so a project really can reach here with
+        // tsc silent, and the rule cannot be tsc's alone.
+        await expectRejected(
+            "closure-fn-this-loose",
+            `function apply(f: LocalFn<() => void>): void { f(); }
+
+       class Box {
+         v: i32 = 0;
+         run(): void { apply(function () { this.v = 1; }); }
+       }
+
+       export function main(): i32 { const b: Box = new Box(); b.run(); return 0; }\n`,
+            "GF0002",
+            {compilerOptions: {noImplicitThis: false}},
+        );
+    });
+
+    test("a `function` expression that does not use `this` is an ordinary closure", async () => {
+        const result = await run(
+            "closure-fn-plain",
+            `function apply(f: LocalFn<() => void>): void { f(); }
+
+       export function main(): i32 {
+         let n: i32 = 0;
+         apply(function () { n += 1; });
+         console.log(\`\${n}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("1\n");
     });
 
     test("a closure inside a constructor captures the receiver being built", async () => {
