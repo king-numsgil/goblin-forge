@@ -571,6 +571,52 @@ type LocalFn<F extends (...args: never[]) => unknown> = F & LocalFnCore<F>;
 // ---------------------------------------------------------------------------
 
 /**
+ * Every field optional, at every depth — the initialiser {@link alloc} takes.
+ *
+ * A C API's create-info struct is mostly nesting and mostly zero:
+ * `SDL_GPUGraphicsPipelineCreateInfo` reaches three levels down to
+ * `depth_stencil_state.back_stencil_state.fail_op`, and a caller sets a handful
+ * of leaves. One level of `Partial` does not help, because overriding a nested
+ * field still demands that field *complete*.
+ *
+ * The four bails are the whole design, and each one is a type that must be
+ * supplied whole rather than picked apart:
+ *
+ *   * a **primitive** — `i32` is `number & __GfWidth<"i32">`, so it would
+ *     otherwise take the object branch and map to its own brand;
+ *   * a **function** — a C struct of callbacks holds `feed: () => void` as an
+ *     ordinary field, and mapping over a function type gives `{}`, which
+ *     accepts anything at all;
+ *   * a **pointer or reference** — `Pointer<T>` is `T & CorePointer<T>`, so
+ *     recursing would splice the *pointee's* fields into the initialiser and
+ *     let `{ shader: { fail: 1 } }` pass for an address. `FixedArray<T, N>`
+ *     extends `CorePointer<T>` and is caught here too, which is right: it is
+ *     the bytes, and `fixedArray(…)` is how you make one;
+ *   * an **array** — `T[]` owns its buffer, and half a buffer is not a thing.
+ *
+ * `[T] extends [X]` rather than `T extends X` throughout, for the same reason
+ * {@link Pointer} spells it that way: a bare conditional distributes over a
+ * union, and `Reference<T> | null` is a union.
+ *
+ * The type is deliberately looser than the language. It cannot tell a struct
+ * shape from a dispatched contract — that distinction is the compiler's, not
+ * tsc's — so the frontend still refuses what this admits, with a diagnostic
+ * that names the construct.
+ */
+type DeepPartial<T> =
+    [T] extends [GfPrimitive]
+        ? T
+        : [T] extends [(...args: never[]) => unknown]
+            ? T
+            : [T] extends [CorePointer<unknown>]
+                ? T
+                : [T] extends [ReferenceCore<unknown>]
+                    ? T
+                    : [T] extends [Array<unknown>]
+                        ? T
+                        : { [K in keyof T]?: DeepPartial<T[K]> };
+
+/**
  * Construct a `T` on the heap and hand back its address — C++ `new T(...)`.
  *
  *     const r = alloc(Rect, 6, 7);      // Pointer<Rect>, constructed
@@ -580,10 +626,22 @@ type LocalFn<F extends (...args: never[]) => unknown> = F & LocalFnCore<F>;
  *     const n = alloc<i32>();           // Pointer<i32>, zeroed
  *     n.free();
  *
- * Two spellings and **one operation**. Naming a class runs its constructor;
+ *     const p = alloc<SDL_GPUGraphicsPipelineCreateInfo>({
+ *         vertex_shader: vs,            // the rest stays zero
+ *         depth_stencil_state: { back_stencil_state: { fail_op: Keep } },
+ *     });
+ *     p.free();
+ *
+ * Three spellings and **one operation**. Naming a class runs its constructor;
  * naming a type does not, because there is no constructor to run — but the
  * storage is default-initialised either way, which is the part worth being
- * precise about.
+ * precise about, and is what makes the third spelling only a shorthand: the
+ * initialiser writes the fields it names into storage that is already zero,
+ * so `alloc<T>({})` and `alloc<T>()` are the same program.
+ *
+ * The initialiser is for C's aggregates. A class is refused, because its
+ * fields are reached past a constructor that never ran — `alloc(C, …)` is the
+ * spelling that runs it.
  *
  * There is deliberately no uninitialised form, for the same reason
  * {@link fixedArray} has none: a destructor releases what a slot holds, and on
@@ -600,6 +658,7 @@ declare function alloc<T extends object, A extends readonly unknown[]>(
     klass: new (...args: A) => T,
     ...args: A
 ): Pointer<T>;
+declare function alloc<T>(init: DeepPartial<T>): Pointer<T>;
 
 /**
  * Hand a value's ownership somewhere else, instead of copying it.

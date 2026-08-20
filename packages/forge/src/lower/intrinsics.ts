@@ -8,8 +8,8 @@
  * what is going in them.
  */
 
-import type { Operand, Place } from "@goblin-forge/backend";
-import { erase, type MachineType, renderType } from "@goblin-forge/checker";
+import { FieldId, type Operand, type Place } from "@goblin-forge/backend";
+import { type MachineType, renderType } from "@goblin-forge/checker";
 import ts from "typescript";
 import { NATIVE_ALIGN_OF, NATIVE_SIZE_OF, NATIVE_ZEROED, NO_UNWIND, RUNTIME } from "./tables.ts";
 import { ISIZE, type Typed, USIZE, VOID } from "./types.ts";
@@ -134,12 +134,34 @@ export abstract class IntrinsicLowerer extends WidthPass {
             return this.#allocDefault(expression, natural);
         }
 
+        // `alloc<T>({ … })` — the same zeroed storage, with the fields the
+        // initialiser names written into it afterwards. Discriminated on the
+        // syntax rather than on the type, because the class spelling's first
+        // argument is a name and this one's is a literal, so there is nothing to
+        // infer.
+        if (ts.isObjectLiteralExpression(klass)) {
+            if (args.length > 0) {
+                // The initialiser overload takes exactly one argument, so tsc rejects
+                // this first. Reaching it means the two disagree.
+                this.outer.unsupported(expression, "`alloc` with an initialiser and more arguments");
+                return undefined;
+            }
+            if (
+                natural.kind === "pointer" &&
+                !this.outer.requireKnownLayout(natural.pointee, expression, "`alloc`")
+            ) {
+                return undefined;
+            }
+            return this.#allocInit(expression, natural, klass);
+        }
+
         if (!ts.isIdentifier(klass)) {
             this.outer.error(
                 expression,
                 "GF0002",
-                "`alloc` takes a class and its constructor's arguments, or a type " +
-                "argument and nothing: `alloc(Rect, 6, 7)` or `alloc<i32>()`.",
+                "`alloc` takes a class and its constructor's arguments, a type " +
+                "argument and nothing, or a type argument and an initialiser: " +
+                "`alloc(Rect, 6, 7)`, `alloc<i32>()`, or `alloc<Rect>({ w: 6 })`.",
             );
             return undefined;
         }
@@ -272,6 +294,128 @@ export abstract class IntrinsicLowerer extends WidthPass {
             rvalue: {kind: "Default"},
         });
         return {operand: raw.operand, type: pointer};
+    }
+
+    /**
+     * `alloc<T>({ … })` — zeroed storage, then the fields the initialiser names.
+     *
+     * Sugar over the two operations that were already there, and emitted as
+     * exactly those two: `#allocDefault` for the storage, then one `Assign` per
+     * named leaf — the same statement `p.field = v` produces. Nothing new
+     * reaches the backend, which is why this is a frontend change and the wire
+     * format did not move.
+     *
+     * The `Assign` is what makes the shorthand safe rather than merely short. A
+     * field the initialiser names holds a *live* zero by the time it is written,
+     * so an owning field's old value is destroyed before the new one lands —
+     * and destroying a zeroed `string` is `gf_string_free`'s null check, which
+     * is the same well-definedness `alloc<string>()` followed by `free()` already
+     * rests on.
+     */
+    #allocInit(
+        expression: ts.CallExpression,
+        natural: MachineType,
+        literal: ts.ObjectLiteralExpression,
+    ): Typed | undefined {
+        const allocated = this.#allocDefault(expression, natural);
+        if (allocated === undefined || allocated.type.kind !== "pointer") {
+            return undefined;
+        }
+
+        // Nothing is emitted for `alloc<T>({})`, and that is the honest answer
+        // rather than a special case: the storage is already zero.
+        if (literal.properties.length === 0) {
+            return allocated;
+        }
+
+        const place = this.placeOfSubject(expression, allocated);
+        if (place === undefined) {
+            return undefined;
+        }
+        const target: Place = {local: place.local, projection: [...place.projection, {kind: "Deref"}]};
+        if (!this.#initFields(literal, allocated.type.pointee, target)) {
+            return undefined;
+        }
+        return allocated;
+    }
+
+    /**
+     * The initialiser's named fields, written into `target`.
+     *
+     * A nested literal recurses with a longer projection rather than building an
+     * aggregate and copying it in, so `{ a: { b: { c: 1 } } }` is one store to
+     * `(*p).a.b.c` and nothing else. The intermediate levels need no work
+     * precisely because they are already zero — which is the property the whole
+     * shorthand is built on.
+     */
+    #initFields(
+        literal: ts.ObjectLiteralExpression,
+        type: MachineType,
+        target: Place,
+    ): boolean {
+        if (type.kind !== "struct") {
+            // A class reaches here through `alloc<C>({…})`, whose fields sit past a
+            // constructor that never ran. Everything else is a shape an object
+            // literal was never going to describe.
+            const advice =
+                type.kind === "class"
+                    ? ` Write \`alloc(${type.name}, …)\`, which runs the constructor.`
+                    : "";
+            this.outer.error(
+                literal,
+                "GF0161",
+                `an object literal cannot initialise a \`${renderType(type)}\`.${advice}`,
+            );
+            return false;
+        }
+
+        for (const property of literal.properties) {
+            if (!ts.isPropertyAssignment(property)) {
+                this.outer.unsupported(property, "a shorthand or spread in an initialiser");
+                return false;
+            }
+            const name = property.name.getText();
+            const index = this.fieldIndex(type, name);
+            const field = type.fields[index];
+            if (field === undefined) {
+                // tsc rejects a field that is not there, so reaching this means the
+                // two disagree about the shape.
+                this.outer.unsupported(property, `the field \`${name}\``);
+                return false;
+            }
+
+            const slot: Place = {
+                local: target.local,
+                projection: [...target.projection, {kind: "Field", value: FieldId(index)}],
+            };
+            const initialiser = property.initializer;
+
+            // A union is the one nesting this must not walk into: its members share
+            // storage, so "the fields you named" is not a well-defined set. The
+            // ordinary object-literal path refuses it by name, with `GF0304`, so
+            // this falls through to say it there rather than saying it twice.
+            if (
+                ts.isObjectLiteralExpression(initialiser) &&
+                field.type.kind === "struct" &&
+                field.type.union !== true
+            ) {
+                if (!this.#initFields(initialiser, field.type, slot)) {
+                    return false;
+                }
+                continue;
+            }
+
+            const value = this.expressionTyped(initialiser, field.type);
+            if (value === undefined) {
+                return false;
+            }
+            this.push({
+                kind: "Assign",
+                place: slot,
+                rvalue: {kind: "Use", value: this.forStorage(value)},
+            });
+        }
+        return true;
     }
 
     /**

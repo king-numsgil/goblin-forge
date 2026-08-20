@@ -198,6 +198,209 @@ describe("alloc and free", () => {
     });
 });
 
+/**
+ * `alloc<T>({ … })` — the third spelling, and no third operation.
+ *
+ * A C create-info struct is mostly nesting and mostly zero, so the field-by-field
+ * spelling is a page of `p.a.b.c = …` for the handful of leaves that are not.
+ * The initialiser is sugar over what `alloc<T>()` already did: zero the storage,
+ * then assign the named leaves. What is worth testing is that it stays sugar —
+ * that the unnamed fields really are zero, that a named owning field does not
+ * leak the zero it replaced, and that nesting writes a leaf rather than
+ * rebuilding the level above it.
+ */
+describe("alloc with an initialiser", () => {
+    const NEST =
+        `interface Stencil { fail: i32; pass: i32; }\n` +
+        `interface Depth { compare: i32; back: Stencil; front: Stencil; }\n` +
+        `interface Pipe { flags: i32; depth: Depth; name: string; tags: i32[]; }\n`;
+
+    test("the named fields land and every other one stays zero", async () => {
+        const result = await run(
+            "alloc-init-partial",
+            `${NEST}
+       export function main(): i32 {
+         const p = alloc<Pipe>({ flags: 7 });
+         console.log(\`\${p.flags} \${p.depth.compare} \${p.depth.back.fail} \${p.tags.length}\`);
+         p.free();
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("7 0 0 0\n");
+    });
+
+    test("nesting reaches a leaf without naming the levels above it", async () => {
+        // The point of the whole feature: `depth.back.fail` is one store into
+        // storage that is already zero, not a `Stencil` and a `Depth` built and
+        // copied in. `front` and `back.pass` are the check that nothing was
+        // rebuilt on the way past.
+        const result = await run(
+            "alloc-init-nested",
+            `${NEST}
+       export function main(): i32 {
+         const p = alloc<Pipe>({ depth: { back: { fail: 3 } } });
+         console.log(\`\${p.depth.back.fail} \${p.depth.back.pass} \${p.depth.front.fail} \${p.depth.compare}\`);
+         p.free();
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("3 0 0 0\n");
+    });
+
+    test("an empty initialiser is `alloc<T>()`, and emits nothing extra", async () => {
+        const result = await run(
+            "alloc-init-empty",
+            `${NEST}
+       export function main(): i32 {
+         const p = alloc<Pipe>({});
+         console.log(\`\${p.flags} \${p.name.length}\`);
+         p.free();
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("0 0\n");
+    });
+
+    test("a named owning field replaces a zero, and does not leak it", async () => {
+        // The one place this could have gone wrong quietly. A named field holds a
+        // *live* zero by the time the initialiser writes it, so the write is
+        // `Assign` and destroys what was there — which for a zeroed `string` is
+        // `gf_string_free`'s null check. The loop is so the leak check has
+        // something to count if that reasoning is wrong.
+        const result = await run(
+            "alloc-init-owning",
+            `${NEST}
+       export function main(): i32 {
+         let i: i32 = 0;
+         while (i < 20) {
+           const p = alloc<Pipe>({ name: \`v\${i}\`, tags: [1, 2, 3] });
+           i = i + 1;
+           p.free();
+         }
+         console.log("done");
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("done\n");
+        expect(result.leaked).toBe(0);
+    });
+
+    test("an owning field reads back what the initialiser put in it", async () => {
+        const result = await run(
+            "alloc-init-owning-value",
+            `${NEST}
+       export function main(): i32 {
+         const p = alloc<Pipe>({ name: \`hi\`, tags: [4, 5, 6] });
+         console.log(\`\${p.name} \${p.tags.length} \${p.tags[2]}\`);
+         p.free();
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("hi 3 6\n");
+    });
+
+    test("the fields evaluate in the order they are written", async () => {
+        const result = await run(
+            "alloc-init-order",
+            `${NEST}
+       function step(label: string, value: i32): i32 { console.log(label); return value; }
+       export function main(): i32 {
+         const p = alloc<Pipe>({
+           depth: { compare: step(\`a\`, 1), back: { fail: step(\`b\`, 2) } },
+           flags: step(\`c\`, 3),
+         });
+         console.log(\`\${p.depth.compare} \${p.depth.back.fail} \${p.flags}\`);
+         p.free();
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("a\nb\nc\n1 2 3\n");
+    });
+
+    test("a pointer field takes an address, and the pointee is not copied in", async () => {
+        const result = await run(
+            "alloc-init-pointer-field",
+            `interface Inner { a: i32; }
+       interface Outer { who: Pointer<Inner>; tag: i32; }
+       export function main(): i32 {
+         const inner = alloc<Inner>({ a: 5 });
+         const outer = alloc<Outer>({ who: inner, tag: 2 });
+         inner.a = 7;
+         console.log(\`\${outer.who.a * outer.tag}\`);
+         outer.free();
+         inner.free();
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("14\n");
+    });
+
+    test("an object literal in a pointer field is refused by the type itself", async () => {
+        // `DeepPartial` stops at `Pointer<T>` rather than recursing into it, which
+        // matters because `Pointer<T>` is `T & CorePointer<T>` — recursing would
+        // splice the *pointee's* fields into the initialiser and let a struct
+        // literal pass for an address. tsc says so before the compiler runs.
+        await expectRejected(
+            "alloc-init-literal-pointer",
+            `interface Inner { a: i32; }
+       interface Outer { who: Pointer<Inner>; }
+       export function main(): i32 {
+         const p = alloc<Outer>({ who: { a: 1 } });
+         p.free();
+         return 0;
+       }\n`,
+            "TS2322",
+        );
+    });
+
+    test("a union member is refused, by the rule that already covers it", async () => {
+        // The initialiser does not walk into a union: its members share storage, so
+        // "the fields you named" has no well-defined answer. `GF0304` says it.
+        await expectRejected(
+            "alloc-init-union",
+            `interface U extends Union { a: i32; b: f32; }
+       interface Holder { u: U; }
+       export function main(): i32 {
+         const p = alloc<Holder>({ u: { a: 1 } });
+         p.free();
+         return 0;
+       }\n`,
+            "GF0304",
+        );
+    });
+
+    test("a class is refused: its fields sit past a constructor that never ran", async () => {
+        const rejection = await expectRejected(
+            "alloc-init-class",
+            `class C { x: i32; }
+       export function main(): i32 {
+         const p = alloc<C>({ x: 1 });
+         p.free();
+         return 0;
+       }\n`,
+            "GF0161",
+        );
+        expect(rejection.message).toContain("alloc(C, …)");
+    });
+
+    test("naming a class still takes the class overload, not the initialiser", async () => {
+        // `alloc(Dog)` has one argument and so does `alloc<T>({…})`. Declaration
+        // order is what separates them: with the initialiser overload first, `Dog`
+        // binds as an *initialiser* and `T` infers to the constructor object.
+        const result = await run(
+            "alloc-init-overload-order",
+            `class Dog { bark(): i32 { return 4; } }
+       export function main(): i32 {
+         const d = alloc(Dog);
+         console.log(\`\${d.bark()}\`);
+         d.free();
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("4\n");
+    });
+});
+
 describe("pointers and polymorphism", () => {
     test("a `Pointer<Derived>` is a `Pointer<Base>`, and costs nothing", async () => {
         // A base is a byte-for-byte layout prefix, so the object's address *is* the

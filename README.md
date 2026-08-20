@@ -355,11 +355,35 @@ q.speak();                     // the derived override
 q.free();                      // and the derived destructor
 ```
 
-Two spellings, **one operation**. Naming a class runs its constructor; naming a
+Three spellings, **one operation**. Naming a class runs its constructor; naming a
 type does not, because there is none to run — but the storage is
 default-initialised either way. There is deliberately no uninitialised form, for
 the same reason `fixedArray` has none: `free()` destroys what the storage holds,
 and on uninitialised memory that is a garbage pointer.
+
+The third spelling is that default-initialisation put to work. A C create-info
+struct is mostly nesting and mostly zero, so an initialiser names the leaves that
+are not — at any depth, in any order, and with everything it does not mention
+left zero:
+
+```ts
+const p = alloc<SDL_GPUGraphicsPipelineCreateInfo>({
+  vertex_shader: vs,
+  fragment_shader: fs,
+  depth_stencil_state: { enable_depth_test: true, back_stencil_state: { fail_op: Keep } },
+});
+p.free();
+```
+
+`{ … }` is an initialiser, not a value: it lowers to the zeroing that
+`alloc<T>()` already did, followed by one store per named leaf — the same store
+`p.depth_stencil_state.back_stencil_state.fail_op = Keep` emits. `alloc<T>({})`
+and `alloc<T>()` are the same program. A field that owns something is *assigned*
+rather than initialised, so a `string` put there releases the empty one it
+replaced, which is a null check and not a `free`.
+
+Only C's aggregates. A class is refused, because its fields sit past a
+constructor that never ran — `alloc(C, …)` is the spelling that runs it.
 
 `free` dispatches destruction through the vtable, so releasing a `Dog` through a
 `Pointer<Animal>` still releases what only a `Dog` has. That is the one place

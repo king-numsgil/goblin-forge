@@ -175,4 +175,31 @@ inline Str str(long long value) {
   return Str::owned(text.c_str(), text.size());
 }
 
+/// `alloc<T>()` — storage for one `T`, zeroed, and announced.
+///
+/// The Goblin runtime traces every `gf_alloc`, so a case that reaches the heap
+/// has a line the C++ side must produce too. Announced here rather than by
+/// overriding the global `operator new`, which would also catch `Str`'s own
+/// buffers and trace each of them twice.
+///
+/// `T{}` is value-initialisation: scalars zeroed, members default-constructed.
+/// That is what `Rvalue::Default` does, and a default `Str` is the static empty
+/// — no allocation on either side, which is what makes the traces line up.
+template <typename T>
+inline T* alloc() {
+  trace("alloc");
+  return new T{};
+}
+
+/// `p.free()` — the value first, then the storage.
+///
+/// The order is the whole point and it is not decorative: `delete` runs `~T`,
+/// which releases what the members own, *before* the storage line. Goblin emits
+/// `Drop` of the pointee and then the runtime call, in that order.
+template <typename T>
+inline void free(T* pointer) {
+  delete pointer;
+  trace("free");
+}
+
 }  // namespace oracle

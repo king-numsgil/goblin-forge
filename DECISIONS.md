@@ -1482,6 +1482,130 @@ written is worse than the plain move error.
 
 ---
 
+## §19 — `alloc<T>({ … })`, the struct initialiser *(settled and built, 2026-08-20)*
+
+A C create-info struct is mostly nesting and mostly zero.
+`SDL_GPUGraphicsPipelineCreateInfo` reaches three levels down to
+`depth_stencil_state.back_stencil_state.fail_op`, and a caller sets a handful of
+leaves. The only spelling the language had for that was `alloc<T>()` followed by
+a page of `p.a.b.c = …`, one statement per leaf, with the pointer named again on
+every line.
+
+`alloc<T>({ … })` is that page, written as one expression. It is **sugar and
+nothing else**: `#allocInit` calls the same `#allocDefault` that was already
+there, then emits one `Assign` per named leaf — the statement `p.a.b.c = v`
+already produced. No MIR node was added, the wire format did not move, and
+`crates/goblin-codegen` did not change.
+
+### One level of `Partial` is useless here, and that is the whole design
+
+The first attempt was `{ ...zeroed<T>(), field: v }`, which needs no new type
+machinery at all. It does not work, and the reason is structural rather than a
+detail: a spread makes the *outer* field set optional and leaves every nested
+field required, so overriding one leaf demands its whole level.
+
+```ts
+const p: Pipeline = { ...zeroed<Pipeline>(), depth_stencil: { back: { fail_op: Keep } } };
+//                                                            ^ TS2741: 'pass_op' is missing
+```
+
+Each level you reach into needs its own spread. `DeepPartial<T>` removes all of
+them, which is the only reason it is worth the mapped type — the prelude had
+none before this and the bar for the first one is high.
+
+### The four bails are the type, and each closes a real hole
+
+`type-fest`'s `PartialDeep` was the obvious thing to reach for and cannot be
+used, for a reason that is not about its quality: it is written against
+`Map`, `Set`, `ReadonlyMap`, `ReadonlySet`, `Array`, `Required`, `Parameters`,
+`ReturnType`, `Date` and `RegExp`, and under `noLib: true` with `types: []` and
+`typeRoots: []` **none of those names exist**. A user project's typecheck loads
+nothing ambient except what the compiler writes out, so the dependency could
+only ever be a vendored copy, and the parts worth vendoring are the parts that
+handle types this language does not have.
+
+What is worth taking from it is the shape of the answer: bail out of the
+recursion on anything that must be supplied whole. Four bails do it here, and
+each one was verified against the real prelude rather than reasoned about.
+
+* **Primitives.** `i32` is `number & __GfWidth<"i32">`, and an intersection
+  carrying an interface *does* satisfy `extends object` — so without this bail
+  every scalar field takes the object branch. It happens to survive anyway,
+  because a homomorphic mapped type over a primitive returns the primitive
+  unchanged, but resting a language's initialiser syntax on that is not a plan.
+* **Functions.** A C struct of callbacks holds `feed: () => void` as an ordinary
+  field. `keyof` a function type is `never`, so mapping over one gives `{}` —
+  which accepts anything at all, including `{}`. This is the bail that a naive
+  definition silently loses.
+* **Pointers and references.** `Pointer<T>` is `T & CorePointer<T>`. Recursing
+  splices the *pointee's* fields into the initialiser, and
+  `{ vertex_shader: { fail_op: Keep } }` would pass for an address.
+  `FixedArray<T, N>` extends `CorePointer<T>` and is caught by the same bail,
+  which is right: it is the bytes, and `fixedArray(…)` is how one is made.
+* **Arrays.** `T[]` owns its buffer, and half a buffer is not a thing.
+
+Written `[T] extends [X]` throughout, for the reason `Pointer<T>` is:
+a bare conditional distributes over a union and `Reference<T> | null` is one.
+
+The type is deliberately looser than the language — it cannot tell a struct
+shape from a dispatched contract, which is the compiler's distinction and not
+tsc's. What it admits and the language does not, the frontend refuses by name:
+`GF0161` for a class, whose fields sit past a constructor that never ran, and
+`GF0304` for a union, whose members share storage so that "the fields you named"
+has no answer.
+
+### No `| null`, and the reason is one line of the runtime
+
+The proposal arrived as `alloc<T>(init: DeepPartial<T>): Pointer<T> | null`. It
+went in without the `| null`, because `gf_alloc` aborts:
+
+```rust
+let raw = unsafe { raw_alloc(size.max(1), align.max(1)) };
+if raw.is_null() {
+    abort();
+}
+```
+
+Under `strictNullChecks` the union would put a check at every call site that can
+never fire, and it would contradict the `alloc<T>(): Pointer<T>` declared beside
+it. Whether allocation failure should be observable at all is a real question
+and a much larger one — it reaches `allocArray`, `new`, every string concat —
+and it gets answered once, for all of them, not smuggled in on one overload.
+
+### The overloads are ordered, and the order is load-bearing
+
+`alloc(Dog)` and `alloc<T>({ … })` both take one argument. With the initialiser
+overload declared first, `Dog` binds as an *initialiser* and `T` infers to the
+constructor object: `alloc(Dog)` resolves to `Pointer<{ prototype: Dog }>`
+rather than `Pointer<Dog>`, silently. Arity saves `alloc(Rect, 6, 7)` and
+nothing saves the zero-argument case. The class overload is declared first, and
+`heap.test.ts` pins it.
+
+### `Assign`, not `Init`, and the oracle is why that is checkable
+
+A named field holds a **live zero** by the time the initialiser writes it, so
+the write is `Assign` and destroys what was there. For a zeroed `string` that is
+`gf_string_free`'s null check — the same well-definedness `alloc<string>()`
+followed by `free()` already rested on — so the correct trace has no `free` line
+for it, and no second `alloc` from copying a temporary that moves.
+
+Neither claim is observable from output, which is what `alloc_initialiser` in
+the C++ oracle is for. It needed `oracle::alloc<T>()` and `oracle::free(p)` in
+`trace.hpp`, announced explicitly rather than by overriding the global
+`operator new` — which would also catch `Str`'s own buffers and trace every one
+of them twice.
+
+### Left for later
+
+A union is refused rather than initialised. One member and the rest zero is
+exactly what a union initialiser should mean, and `GF0304`'s own explanation
+already hands the reader `zeroed<SDL_Event>()` plus an assignment as the
+workaround. Relaxing the rule from "no literal" to "at most one member" is a
+small change and a separate one, and it should be made where `GF0304` lives
+rather than as a side effect of this.
+
+---
+
 ## Class decisions *(2026-08-12, milestone 8)*
 
 ### Every class has a vtable pointer, including one with no virtual methods
