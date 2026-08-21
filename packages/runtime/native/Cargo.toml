@@ -32,3 +32,14 @@ libmimalloc-sys = { version = "0.1.49", features = ["extended"] }
 opt-level = 3
 lto = true
 panic = "abort"
+
+# The same, for a debug build nobody ships but everybody types.
+#
+# The crate is `no_std`, so it cannot unwind at all — and `panic` defaults to
+# `"unwind"` per profile, not per crate. Without this, `cargo build` here fails
+# with "unwinding panics are not supported without std" while `cargo build
+# --release` succeeds, which reads as the crate being broken rather than as one
+# profile being unset. The compiler only ever builds this `--release`
+# (`packages/runtime/src/build.ts`), so nothing shipped changes.
+[profile.dev]
+panic = "abort"
