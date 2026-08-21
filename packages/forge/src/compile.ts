@@ -122,6 +122,15 @@ export interface CompileOptions {
     readonly checked?: boolean;
     readonly debugInfo?: boolean;
 
+    /**
+     * Which code generator to run: `"cranelift"` or `"llvm"`.
+     *
+     * A switch for the duration of the LLVM port, so the suite can be run under
+     * either one failure at a time. Omitted falls back to `GOBLIN_BACKEND` and
+     * then to Cranelift; it goes away at LLVM-PORT stage 6.
+     */
+    readonly backend?: "cranelift" | "llvm";
+
     /** Where objects and other intermediates go. */
     readonly outDir?: string;
     readonly emit?: {
@@ -238,6 +247,7 @@ export class Compiler {
             debugInfo: options.debugInfo ?? true,
             checked: options.checked ?? false,
             ...(options.target !== undefined ? {target: options.target} : {}),
+            ...(options.backend !== undefined ? {backend: options.backend} : {}),
             ...(options.strictInternalErrors !== undefined
                 ? {strictInternalErrors: options.strictInternalErrors}
                 : {}),

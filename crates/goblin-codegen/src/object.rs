@@ -129,10 +129,9 @@ pub fn compile_module(
 
 /// Compile a module through LLVM.
 ///
-/// Stage 1 of the port: the IR text is written and clang checks it, which
-/// exercises the type mapping and the signature writer against LLVM's own
-/// verifier. Nothing has a body yet, so the object defines no code — and rather
-/// than hand back an object that links and does nothing, this says so.
+/// The `.ll` is written before clang runs and kept afterwards, so a rejection
+/// names a file that is still on disk — half of why text IR and a subprocess
+/// were chosen over `llvm-sys` (DECISIONS §17).
 fn compile_with_llvm(
     module: &Module,
     options: &CodegenOptions,
@@ -142,14 +141,6 @@ fn compile_with_llvm(
     let conv = conv_of(options)?;
     let emitted = crate::llvm::emit_module(module, target, conv)?;
     crate::llvm::driver::compile(&emitted.text, options, object_path)?;
-
-    if module.funcs.iter().any(|func| !func.blocks.is_empty()) {
-        internal_error!(
-            "the LLVM backend cannot emit function bodies yet (LLVM-PORT stage 3). \
-             The IR it did produce is at {}.",
-            crate::llvm::driver::ir_path(object_path).display()
-        );
-    }
 
     Ok(ModuleArtifact {
         object_path: object_path.to_path_buf(),

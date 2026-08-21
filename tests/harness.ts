@@ -80,6 +80,8 @@ export interface ProjectOptions {
     readonly checked?: boolean;
     readonly optLevel?: "none" | "speed" | "size";
     readonly debugInfo?: boolean;
+    /** Which code generator to run. Defaults to `GOBLIN_BACKEND`, then Cranelift. */
+    readonly backend?: "cranelift" | "llvm";
     /** Write the MIR out, for the golden snapshots. */
     readonly emitIr?: boolean;
     /** Static libraries to link, for the struct-ABI suite. */
@@ -184,6 +186,7 @@ export async function compileSource(
         type: options.type ?? "bin",
         optLevel: options.optLevel ?? "none",
         debugInfo: options.debugInfo ?? false,
+        ...(options.backend !== undefined ? {backend: options.backend} : {}),
         checked: options.checked ?? false,
         emit: {ir: options.emitIr ?? false},
         ...(options.nativeLibs !== undefined ? {nativeLibs: [...options.nativeLibs]} : {}),

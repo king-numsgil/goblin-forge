@@ -111,7 +111,8 @@ once or twice. Every one has a one-line LLVM spelling.
 - [x] **Stage 1** — the emitter skeleton, the backend switch, and the ABI oracle
       *(done 2026-08-21)*
 - [x] **Stage 2** — types, globals, and the data half *(done 2026-08-21)*
-- [ ] **Stage 3** — function bodies
+- [x] **Stage 3a** — function bodies: the scalar core *(done 2026-08-21)*
+- [ ] **Stage 3b** — function bodies: owning types and dispatch
 - [ ] **Stage 4** — the C boundary
 - [ ] **Stage 5** — options, targets, and the `.ll` beside the object
 - [ ] **Stage 6** — delete Cranelift
@@ -355,6 +356,49 @@ stay unbuilt, and the port owes nothing new here.
 `operators`, `structs`, `classes`, `arrays`, `strings`, `heap`, `ownership` —
 are green under `GOBLIN_BACKEND=llvm`, including the automatic live-allocation
 check on every `run` test.
+
+### Split in two, because the work is
+
+Stage 3 turned out to be two jobs with different risk, so it is tracked as two.
+**3a is done**: real Goblin programs compile through LLVM and run.
+
+**3a — the scalar core.** `llvm/func.rs`. Locals, blocks, all eight terminators,
+statements, and the rvalues that do not touch ownership: `Use`, `Default`,
+`Binary`, `Unary`, `Cast`, `Ref`, `AddrOf`, `Aggregate`, `SizeOf`, `AlignOf`.
+Places with `Deref`, `Field`, `Index` and `ConstIndex`. Direct calls under the
+internal convention, and C calls whose every slot is a scalar — which is what
+`gf_print` and `gf_runtime_init` are, so the runtime is reachable.
+
+`tests/llvm-backend.test.ts` runs six real programs end to end: arithmetic,
+a loop with `if` and `%`, a struct by value, a struct returned through a hidden
+pointer, a literal printed through the runtime, and float arithmetic with a
+comparison. They select `backend: "llvm"` **per test** rather than reading
+`GOBLIN_BACKEND`, so a Cranelift regression cannot mask an LLVM one.
+
+**3b — owning types and dispatch.** Not started. `Drop` and assignment over a
+live value; `Copy` of an owning type; `string` and `T[]`; `Len` and
+`ArrayPushSlot`; `MakeInterface`, `TryInterface`, `TryClass`,
+`InterfaceIsNull`; virtual, interface and indirect calls; and the C boundary's
+aggregate slots — `Registers`, `ByAddress`, `OnStack`, `Sret`, which stage 4
+tests. Every one of these raises a named internal error pointing at 3b rather
+than emitting something plausible, so the remaining work is enumerable by
+running the suite and reading what fires.
+
+### What the shape confirmed
+
+**Every local is an `alloca` in the entry block and `mem2reg` builds the SSA.**
+`translate.rs`'s three-way `LocalSlot` collapses to one case, exactly as
+predicted, and the aggregate-parameter case is an `alloca` holding a pointer.
+The emitted `-O0` IR is all loads and stores, which is what `clang -O0` does and
+is why a debug build this way is slower than the Cranelift one.
+
+**No `nsw`, no `nuw`, no `noalias`, no TBAA, no fast-math.** `Emitter::binary`
+is the one place such a flag could be attached and it is empty, with the reason
+written beside it.
+
+A trap is `call void @llvm.trap()` then `unreachable`. `Abort`'s reason is
+dropped: Cranelift encodes it as a trap code, LLVM has no equivalent, and on x86
+both are `ud2` regardless.
 
 ## Stage 4 — The C boundary
 

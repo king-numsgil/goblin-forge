@@ -21,11 +21,12 @@
 
 pub mod data;
 pub mod driver;
+pub mod func;
 pub mod sig;
 pub mod ty;
 pub mod vtable;
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use goblin_mir::{Linkage, Module};
 
@@ -68,6 +69,16 @@ impl Literals {
     }
 }
 
+/// Every function's linker-visible name, by id.
+///
+/// Resolved once so a call site is an index rather than a search, and so the
+/// name a vtable slot holds and the name a direct call emits cannot disagree.
+#[derive(Default)]
+pub struct Symbols {
+    pub defined: Vec<String>,
+    pub imported: Vec<String>,
+}
+
 /// What one module's IR text declares.
 pub struct Emitted {
     pub text: String,
@@ -91,6 +102,8 @@ pub fn emit_module(module: &Module, target: TargetInfo, conv: Conv) -> Result<Em
     // Declarations are rendered before the header is written, because rendering
     // is what discovers which named types the module needs.
     let mut declarations = Vec::new();
+    let mut symbols = Symbols::default();
+    let mut signatures = Vec::with_capacity(module.funcs.len());
 
     for import in &module.externs {
         let Some(signature) = module.sig(import.sig) else {
@@ -105,6 +118,7 @@ pub fn emit_module(module: &Module, target: TargetInfo, conv: Conv) -> Result<Em
         let rendered = sig::render(&mut types, &mut layouts, signature, conv)
             .map_err(|error| error.in_function(symbol))?;
         declarations.push(declare(&rendered, symbol));
+        symbols.imported.push(symbol.to_owned());
         requires.push(symbol.to_owned());
     }
 
@@ -120,11 +134,14 @@ pub fn emit_module(module: &Module, target: TargetInfo, conv: Conv) -> Result<Em
         };
         let rendered = sig::render(&mut types, &mut layouts, signature, conv)
             .map_err(|error| error.in_function(symbol))?;
-        // Stage 3 turns this into a `define` with a body. Until then a
-        // defined function is declared like any other, which keeps the module
-        // well formed and lets clang check the signature — and means nothing
-        // links, which is the honest state of a backend with no bodies.
-        declarations.push(declare(&rendered, symbol));
+        // A function with no blocks is a declaration; one with blocks gets a
+        // body below, once every symbol is known — a call may name a function
+        // that has not been emitted yet.
+        if func.blocks.is_empty() {
+            declarations.push(declare(&rendered, symbol));
+        }
+        signatures.push(rendered);
+        symbols.defined.push(symbol.to_owned());
         if func.linkage == Linkage::Export {
             defines.push(symbol.to_owned());
         }
@@ -135,6 +152,33 @@ pub fn emit_module(module: &Module, target: TargetInfo, conv: Conv) -> Result<Em
     // is what discovers the names they refer to.
     let mut globals = Globals::new();
     let classes = crate::llvm::vtable::emit(module, &mut globals, target)?;
+
+    // Bodies last: emitting one can discover a string literal, a named type or
+    // an intrinsic, and all three are written above it in the file.
+    let mut literals = Literals::new();
+    let mut intrinsics = BTreeSet::new();
+    let mut bodies = Vec::new();
+    for (index, function) in module.funcs.iter().enumerate() {
+        if function.blocks.is_empty() {
+            continue;
+        }
+        let symbol = symbols.defined[index].clone();
+        let emitter = func::Emitter::new(
+            module,
+            &mut layouts,
+            &mut types,
+            &mut globals,
+            &mut literals,
+            &symbols,
+            &mut intrinsics,
+            conv,
+        );
+        bodies.push(
+            emitter
+                .function(function, &signatures[index], &symbol)
+                .map_err(|error| error.in_function(symbol))?,
+        );
+    }
 
     let mut text = String::with_capacity(4096);
     text.push_str(&format!("; goblin-forge module `{name}`\n"));
@@ -165,6 +209,15 @@ pub fn emit_module(module: &Module, target: TargetInfo, conv: Conv) -> Result<Em
     for declaration in &declarations {
         text.push_str(declaration);
         text.push('\n');
+    }
+    for declaration in &intrinsics {
+        text.push_str(declaration);
+        text.push('\n');
+    }
+
+    for body in &bodies {
+        text.push('\n');
+        text.push_str(body);
     }
 
     defines.sort_unstable();
