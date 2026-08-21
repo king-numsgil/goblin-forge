@@ -10,17 +10,14 @@
 //! so that a test cannot mistake a backend failure for a clean rejection.
 
 pub mod abi;
-pub mod clif;
 pub mod error;
 pub mod layout;
 pub mod link;
 pub mod llvm;
 pub mod object;
 pub mod runtime;
-pub mod translate;
-pub mod vtable;
 
 pub use error::{InternalError, Result};
 pub use layout::{Layout, Layouts, Repr, Scalar, TargetInfo, render_type};
 pub use link::{LinkReport, LinkRequest, OutputKind, extension_for, link, prefix_for};
-pub use object::{Backend, CodegenOptions, ModuleArtifact, OptLevel, compile_module, target_info};
+pub use object::{CodegenOptions, ModuleArtifact, OptLevel, compile_module, target_info};

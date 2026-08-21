@@ -44,7 +44,6 @@ use crate::llvm::ty::{Types, ident, scalar};
 use crate::llvm::vtable::ClassSymbols;
 use crate::llvm::{Literals, Symbols};
 use crate::runtime::{RuntimeFn, STRING_HEADER_BYTES};
-use crate::vtable::ClassData;
 
 /// A value and the type it is of, so a use site can spell both.
 #[derive(Debug, Clone)]
@@ -269,7 +268,7 @@ impl<'a, 'm> Emitter<'a, 'm> {
         self.line(format!(
             "{out} = getelementptr inbounds i8, ptr @{}, i64 {}",
             ident(&symbols.vtable),
-            ClassData::vtable_bias(self.target)
+            crate::llvm::vtable::vtable_bias(self.target)
         ));
         Ok(Val::new("ptr", out))
     }
@@ -1262,7 +1261,7 @@ impl<'a, 'm> Emitter<'a, 'm> {
         self.line(format!(
             "{biased} = getelementptr inbounds i8, ptr @{}, i64 {}",
             ident(&itab),
-            ClassData::vtable_bias(self.target)
+            crate::llvm::vtable::vtable_bias(self.target)
         ));
         let object = self.address(source)?;
         self.store(dest, &Val::new("ptr", biased), self.pointer_bytes());
@@ -1284,7 +1283,7 @@ impl<'a, 'm> Emitter<'a, 'm> {
             .interface(interface)
             .and_then(|def| self.module.sym(def.name))
             .ok_or_else(|| InternalError::new(format!("interface {} is missing", interface.0)))?;
-        let key = crate::vtable::interface_key(name);
+        let key = crate::llvm::vtable::interface_key(name);
 
         let object = self.address(source)?;
         let descriptor = self.descriptor_of(&object)?;

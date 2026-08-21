@@ -22,7 +22,7 @@ use goblin_codegen::abi::Conv;
 use goblin_codegen::layout::TargetInfo;
 use goblin_codegen::link::{LinkRequest, OutputKind, link};
 use goblin_codegen::llvm::{self, driver};
-use goblin_codegen::object::{Backend, CodegenOptions, OptLevel};
+use goblin_codegen::object::{CodegenOptions, OptLevel};
 use goblin_mir::{
     Abi, Category, ExternFunc, FieldDef, FloatTy, IntTy, Module, Param, Signature, Span, StructDef,
     StructId, SymId, TyDef, TyId, TyKind,
@@ -61,8 +61,6 @@ fn options() -> CodegenOptions {
         opt_level: OptLevel::None,
         debug_info: false,
         checked: false,
-        verify_ir: true,
-        backend: Backend::Llvm,
     }
 }
 
@@ -331,4 +329,61 @@ fn ir_text_becomes_a_program_that_runs() {
         "llvm speaking",
         "the runtime call did not produce what it should have"
     );
+}
+
+/// The `x86-64-v3` baseline reaches the compiler that acts on it.
+///
+/// DECISIONS §17's amendment fixes AVX2 as a requirement, and the guarantee is
+/// only worth what the object file says. Cranelift's half of this was enabling
+/// six feature flags and reading them back off the ISA; clang's half is one
+/// `-march`, and the way to check it is the same — look at what came out.
+///
+/// A 256-bit `fadd` is the probe because it cannot be encoded without AVX: at
+/// the baseline LLVM splits it into two SSE `addpd`s, and with AVX2 it is one
+/// VEX-encoded `vaddpd` on a YMM register.
+#[test]
+fn the_avx2_baseline_reaches_the_object() {
+    const WIDE: &str = r#"
+define <4 x double> @vadd(<4 x double> %a, <4 x double> %b) {
+  %r = fadd <4 x double> %a, %b
+  ret <4 x double> %r
+}
+"#;
+    let dir = scratch();
+    let object = dir.join("wide.obj");
+    let mut options = options();
+    options.opt_level = OptLevel::Speed;
+    driver::compile(WIDE, &options, &object).expect("clang compiles the probe");
+
+    let objdump = which_objdump().expect(
+        "the baseline check needs `llvm-objdump`, which ships beside the clang \
+         the LLVM backend already requires",
+    );
+    let output = Command::new(objdump)
+        .arg("-d")
+        .arg(&object)
+        .output()
+        .expect("running llvm-objdump");
+    let text = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        text.contains("vaddpd") && text.contains("ymm"),
+        "no VEX-encoded 256-bit add in the object — `{}` did not take effect:\n{text}",
+        driver::MARCH
+    );
+}
+
+/// `llvm-objdump`, beside whichever clang the driver uses.
+fn which_objdump() -> Option<std::ffi::OsString> {
+    if let Ok(clang) = std::env::var("GOBLIN_CLANG") {
+        let beside = Path::new(&clang).with_file_name(if cfg!(windows) {
+            "llvm-objdump.exe"
+        } else {
+            "llvm-objdump"
+        });
+        if beside.exists() {
+            return Some(beside.into_os_string());
+        }
+    }
+    Some(std::ffi::OsString::from("llvm-objdump"))
 }

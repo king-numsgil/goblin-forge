@@ -300,9 +300,9 @@ pub fn classify_param(layouts: &mut Layouts<'_>, ty: TyId, conv: Conv) -> Result
     // frontend answers it — `GF0301`, with a file and a line.
     match layouts.repr(ty)? {
         Repr::Void => return Ok(Slot::None),
-        Repr::Register(clif) => {
+        Repr::Register(value) => {
             let signed = signedness(layouts.module(), ty);
-            return Ok(Slot::Plain { ty: clif, signed });
+            return Ok(Slot::Plain { ty: value, signed });
         }
         Repr::Aggregate => {}
     }
@@ -350,9 +350,9 @@ pub fn classify_return(layouts: &mut Layouts<'_>, ty: TyId, conv: Conv) -> Resul
     // Aggregates only, for the same reason as `classify_param`.
     match layouts.repr(ty)? {
         Repr::Void => return Ok(Slot::None),
-        Repr::Register(clif) => {
+        Repr::Register(value) => {
             let signed = signedness(layouts.module(), ty);
-            return Ok(Slot::Plain { ty: clif, signed });
+            return Ok(Slot::Plain { ty: value, signed });
         }
         Repr::Aggregate => {}
     }
@@ -693,8 +693,8 @@ mod tests {
 
     #[test]
     fn sub_register_widths_carry_their_extension() {
-        // The *rule*. How a code generator spells it is `clif.rs`'s problem,
-        // and has its own test there.
+        // The *rule*. How the code generator spells it is `llvm/sig.rs`'s
+        // problem, and the two sides of the type live in a test there.
         let target = TargetInfo::from_pointer_bits(64);
         assert_eq!(extension(Scalar::I8, true, target), Ext::Sext);
         assert_eq!(extension(Scalar::I8, false, target), Ext::Zext);

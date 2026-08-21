@@ -8,14 +8,6 @@
 //! Declared lazily, on first use, so a program that touches no strings does not
 //! carry an undefined reference to the string runtime.
 
-use std::collections::HashMap;
-
-use cranelift_codegen::ir::{AbiParam, types};
-use cranelift_module::{FuncId as ClifFuncId, Linkage as ClifLinkage, Module as ClifModule};
-
-use crate::error::{InternalError, Result};
-use crate::layout::TargetInfo;
-
 /// The header sitting behind every `string` pointer: `len: u64`, `owned: u64`.
 ///
 /// A string literal is emitted as static data in exactly this shape with
@@ -100,72 +92,6 @@ impl RuntimeFn {
             RuntimeFn::ArrayPop => "gf_array_pop",
             RuntimeFn::ArrayFree => "gf_array_free",
         }
-    }
-
-    /// Parameter and return types, in Cranelift terms.
-    fn signature(self, target: TargetInfo) -> (Vec<types::Type>, Option<types::Type>) {
-        let pointer = target.pointer_type();
-        match self {
-            RuntimeFn::StringClone => (vec![pointer], Some(pointer)),
-            RuntimeFn::StringFree => (vec![pointer], None),
-            RuntimeFn::StringLen | RuntimeFn::CStrLen => (vec![pointer], Some(pointer)),
-            RuntimeFn::StringConcat => (vec![pointer, pointer], Some(pointer)),
-            RuntimeFn::StringEq => (vec![pointer, pointer], Some(types::I8)),
-            RuntimeFn::StringFromI64 => (vec![types::I64], Some(pointer)),
-            RuntimeFn::StringFromU64 => (vec![types::I64], Some(pointer)),
-            RuntimeFn::StringFromF64 => (vec![types::F64], Some(pointer)),
-            RuntimeFn::StringFromBool => (vec![types::I8], Some(pointer)),
-            RuntimeFn::Print | RuntimeFn::EPrint => (vec![pointer], None),
-            // The key is always 64 bits, so a 32-bit target agrees with the
-            // runtime about the interface name's hash rather than truncating it.
-            RuntimeFn::FindItab => (vec![pointer, types::I64], Some(pointer)),
-            RuntimeFn::IsA => (vec![pointer, pointer], Some(types::I8)),
-            // Lengths, strides and alignments are 64 bits on every target, so
-            // a 32-bit build agrees with the runtime about an array bigger than
-            // 4GB rather than truncating the count on the way in.
-            RuntimeFn::ArrayNew => (vec![types::I64, types::I64, types::I64], Some(pointer)),
-            RuntimeFn::ArrayEmpty => (Vec::new(), Some(pointer)),
-            RuntimeFn::ArrayLen => (vec![pointer], Some(pointer)),
-            RuntimeFn::ArrayPushSlot => (vec![pointer, types::I64, types::I64], Some(pointer)),
-            RuntimeFn::ArrayPop => (vec![pointer], None),
-            RuntimeFn::ArrayFree => (vec![pointer], None),
-        }
-    }
-}
-
-/// Runtime functions declared so far, so each is declared exactly once.
-#[derive(Default)]
-pub struct RuntimeRefs {
-    declared: HashMap<RuntimeFn, ClifFuncId>,
-}
-
-impl RuntimeRefs {
-    pub fn get<M: ClifModule>(
-        &mut self,
-        module: &mut M,
-        target: TargetInfo,
-        which: RuntimeFn,
-    ) -> Result<ClifFuncId> {
-        if let Some(id) = self.declared.get(&which) {
-            return Ok(*id);
-        }
-
-        let (params, ret) = which.signature(target);
-        let mut signature = module.make_signature();
-        for param in params {
-            signature.params.push(AbiParam::new(param));
-        }
-        if let Some(ret) = ret {
-            signature.returns.push(AbiParam::new(ret));
-        }
-
-        let id = module
-            .declare_function(which.symbol(), ClifLinkage::Import, &signature)
-            .map_err(|error| {
-                InternalError::new(format!("declaring `{}`: {error}", which.symbol()))
-            })?;
-        self.declared.insert(which, id);
-        Ok(id)
     }
 }
 

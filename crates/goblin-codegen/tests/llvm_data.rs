@@ -21,9 +21,9 @@ use goblin_codegen::abi::Conv;
 use goblin_codegen::layout::TargetInfo;
 use goblin_codegen::link::{LinkRequest, OutputKind, link};
 use goblin_codegen::llvm::data::Globals;
+use goblin_codegen::llvm::vtable::interface_key;
 use goblin_codegen::llvm::{self, Literals, driver};
-use goblin_codegen::object::{Backend, CodegenOptions, OptLevel};
-use goblin_codegen::vtable::interface_key;
+use goblin_codegen::object::{CodegenOptions, OptLevel};
 use goblin_mir::{
     Abi, Category, ClassDef, ClassId, FuncId, Function, Impl, InterfaceDef, InterfaceId,
     InterfaceMethod, Linkage, Module, SigId, Signature, Span, SymId, TyDef, TyId, TyKind,
@@ -37,8 +37,6 @@ fn options() -> CodegenOptions {
         opt_level: OptLevel::None,
         debug_info: false,
         checked: false,
-        verify_ir: true,
-        backend: Backend::Llvm,
     }
 }
 

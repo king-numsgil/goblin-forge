@@ -30,11 +30,6 @@ napi = { version = "3", default-features = false, features = ["napi9"] }
 napi-derive = "3"
 napi-build = "2"
 
-cranelift-codegen = "0.134"
-cranelift-frontend = "0.134"
-cranelift-module = "0.134"
-cranelift-native = "0.134"
-cranelift-object = "0.134"
 
 object = "0.37"
 cc = "1"

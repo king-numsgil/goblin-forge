@@ -1,14 +1,8 @@
 //! The LLVM backend: MIR to IR text to an object file.
 //!
-//! DECISIONS §17 is the decision and [`LLVM-PORT.md`] is the plan. Built so
-//! far: the type mapping, the signature writer and the clang driver (stage 1),
-//! and the static data — class descriptors, vtables, itabs and string literals
-//! (stage 2).
-//!
-//! **Function bodies arrive at stage 3**, so what a module renders to today is
-//! its types, its data and its declarations. That is enough for clang to check
-//! all three, and not enough to link, which is the honest state of a backend
-//! that cannot yet emit code.
+//! DECISIONS §17 is the decision and [`LLVM-PORT.md`] is how it was built.
+//! This is now the only backend: Cranelift was removed once the whole suite
+//! passed under both.
 //!
 //! The one rule this backend adds to the house rules: **no `nsw`, no `nuw`, no
 //! `noalias`, no TBAA, no fast-math flags, ever, until something deliberately
@@ -41,8 +35,7 @@ use crate::llvm::vtable::ClassSymbols;
 /// String literals already emitted, so identical text is emitted once.
 ///
 /// The symbol is content-addressed — `gf_str_` plus the FNV-1a of the bytes —
-/// which is the same spelling the Cranelift path uses, so a module compiled
-/// either way names its literals identically.
+/// so identical text anywhere in a module is one object.
 #[derive(Default)]
 pub struct Literals {
     seen: HashMap<String, String>,
@@ -57,12 +50,12 @@ impl Literals {
     ///
     /// What a program *carries* is this symbol's address plus
     /// [`crate::runtime::STRING_HEADER_BYTES`]; the symbol itself addresses the
-    /// header. Stage 3 is what adds the `getelementptr` at each use site.
+    /// header; the `getelementptr` at each use site is what skips it.
     pub fn symbol(&mut self, globals: &mut Globals, text: &str) -> String {
         if let Some(symbol) = self.seen.get(text) {
             return symbol.clone();
         }
-        let symbol = format!("gf_str_{:016x}", crate::vtable::interface_key(text));
+        let symbol = format!("gf_str_{:016x}", crate::llvm::vtable::interface_key(text));
         globals.literal(&symbol, text);
         self.seen.insert(text.to_owned(), symbol.clone());
         symbol
@@ -86,8 +79,8 @@ pub struct Emitted {
     pub defines: Vec<String>,
     /// Symbols it needs from somewhere else.
     pub requires: Vec<String>,
-    /// Where each class's static data ended up, by `ClassId`. Stage 3 needs it
-    /// — a constructor installs a vtable pointer.
+    /// Where each class's static data ended up, by `ClassId`. A constructor
+    /// needs it, because it installs a vtable pointer.
     pub classes: Vec<ClassSymbols>,
 }
 

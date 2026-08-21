@@ -1,11 +1,7 @@
 //! Per-class static data, as LLVM constants.
 //!
-//! The layout is `crate::vtable`'s and is not restated here — read that file
-//! for why the descriptor sits at `[vptr - 1]` and why an itab has a vtable's
-//! shape. This is the same objects, spelled for a different backend, and the
-//! *only* thing it is allowed to decide is spelling.
-//!
-//! One shape is worth repeating because it is where an off-by-one hides:
+//! Itanium's arrangement, and the shape is worth stating because it is where
+//! an off-by-one hides:
 //!
 //! ```text
 //!   __gf_vt$Dog:   [ descriptor ][ slot 0 ][ slot 1 ] …
@@ -24,13 +20,41 @@ use goblin_mir::Module;
 use crate::error::{InternalError, Result};
 use crate::layout::TargetInfo;
 use crate::llvm::data::{Globals, Word};
-use crate::vtable::{ClassData, interface_key};
+
+/// How far into the vtable object an object's vtable pointer aims.
+///
+/// The pointer stored in an object addresses the *first method slot*, so a
+/// virtual call is `load [vptr + slot * 8]` with no bias and the descriptor is
+/// at `[vptr - 8]`. Putting the descriptor first and biasing every call instead
+/// would pay for the rarer operation on every one of the common ones.
+pub const fn vtable_bias(target: TargetInfo) -> i64 {
+    target.pointer_bytes as i64
+}
+
+/// A stable key for an interface, from its **name**.
+///
+/// FNV-1a, 64-bit. Deliberately not the `InterfaceId`: ids are numbered per
+/// compilation, so two modules would disagree about them the moment a library
+/// boundary exists — which is precisely the closed-world mistake REWRITE-PLAN
+/// §3 says to design out rather than fix later.
+///
+/// A collision would make a dynamic cast answer yes to the wrong interface. Two
+/// names colliding in 64 bits is not something to plan around, but it is
+/// something to *notice* if a cast ever comes back inexplicably true.
+pub fn interface_key(name: &str) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in name.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
 
 /// The symbols belonging to one class.
 #[derive(Debug, Clone)]
 pub struct ClassSymbols {
     /// The vtable object — which addresses the *descriptor* word. An object's
-    /// vtable pointer is this plus [`ClassData::vtable_bias`].
+    /// vtable pointer is this plus [`vtable_bias`].
     pub vtable: String,
     pub descriptor: String,
     /// One itab per interface this class is convertible to, by `InterfaceId`.
@@ -43,7 +67,7 @@ pub fn emit(
     globals: &mut Globals,
     target: TargetInfo,
 ) -> Result<Vec<ClassSymbols>> {
-    let bias = ClassData::vtable_bias(target);
+    let bias = vtable_bias(target);
 
     // Names first, for every class, because a descriptor points at its base's
     // descriptor and a base may be declared after the class deriving from it.

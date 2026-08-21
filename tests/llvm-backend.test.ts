@@ -1,23 +1,17 @@
 /**
- * What the LLVM backend can compile and run.
+ * The backend, end to end, on the shapes the rest of the suite reaches only
+ * incidentally.
  *
- * LLVM-PORT stage 3. These select `backend: "llvm"` explicitly rather than
- * reading the environment, so the checkpoint holds whatever `GOBLIN_BACKEND`
- * says and a Cranelift regression cannot mask an LLVM one.
- *
- * The scope is the scalar core: locals, control flow, structs by value and by
- * hidden return pointer, direct calls, and a literal through the runtime.
- * Owning types — `string`, `T[]`, classes with destructors — and virtual and
- * interface dispatch are stage 3b, and each raises a named internal error
- * rather than emitting something plausible.
+ * Written during the LLVM port (LLVM-PORT stage 3) as the checkpoint that real
+ * programs compiled and ran, and kept because the cases are worth having named:
+ * arithmetic, a loop, a struct by value, a struct returned through a hidden
+ * pointer, a literal through the runtime, and float comparison. Every other
+ * suite exercises these too; this one says so out loud.
  */
 
 import {describe, expect, test} from "bun:test";
 
-import {type ProjectOptions, run} from "./harness.ts";
-
-/** Selected per test, so the environment cannot decide what is being checked. */
-const LLVM: ProjectOptions = {backend: "llvm"};
+import {run} from "./harness.ts";
 
 describe("the scalar core", () => {
     test("arithmetic and an exit code", async () => {
@@ -29,7 +23,6 @@ describe("the scalar core", () => {
     return a * b;
 }
 `,
-            LLVM,
         );
         expect(result.exitCode).toBe(42);
     });
@@ -47,7 +40,6 @@ describe("the scalar core", () => {
     return total;
 }
 `,
-            LLVM,
         );
         expect(result.exitCode).toBe(20);
     });
@@ -66,7 +58,6 @@ export function main(): i32 {
     return sum(p);
 }
 `,
-            LLVM,
         );
         expect(result.exitCode).toBe(25);
     });
@@ -85,7 +76,6 @@ export function main(): i32 {
     return p.x + p.y;
 }
 `,
-            LLVM,
         );
         expect(result.exitCode).toBe(41);
     });
@@ -98,7 +88,6 @@ export function main(): i32 {
     return 0;
 }
 `,
-            LLVM,
         );
         expect(result.stdout.trim()).toBe("llvm runs");
     });
@@ -116,7 +105,6 @@ export function main(): i32 {
     return 1;
 }
 `,
-            LLVM,
         );
         expect(result.exitCode).toBe(7);
     });

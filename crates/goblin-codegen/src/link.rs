@@ -255,7 +255,7 @@ fn unix_command(request: &LinkRequest<'_>) -> Command {
         // linked -fPIC fails at load with a relocation error rather than here.
         command.arg("-fPIC");
         // No export list: an ELF shared object publishes every symbol with
-        // default visibility, and Cranelift gives `Linkage::Export` exactly
+        // default visibility, and an exported function gets exactly
         // that. Windows is the platform that needs to be told (see the `.def`
         // file in `msvc_command`), and the asymmetry is the platforms', not
         // this compiler's.

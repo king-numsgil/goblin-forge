@@ -114,8 +114,8 @@ once or twice. Every one has a one-line LLVM spelling.
 - [x] **Stage 3a** — function bodies: the scalar core *(done 2026-08-21)*
 - [x] **Stage 3b** — function bodies: owning types and dispatch *(done 2026-08-21)*
 - [x] **Stage 4** — the C boundary *(done 2026-08-21, with 3b)*
-- [ ] **Stage 5** — options, targets, and the `.ll` beside the object
-- [ ] **Stage 6** — delete Cranelift
+- [x] **Stage 5** — options, targets, and the `.ll` beside the object *(done 2026-08-21, with 6)*
+- [x] **Stage 6** — delete Cranelift *(done 2026-08-21)*
 - [ ] **Stage 7** — debug information
 
 Decided along the way, so it does not get re-litigated:

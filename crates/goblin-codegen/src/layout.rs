@@ -13,10 +13,10 @@
 //! Nothing has one function that answers both, and no function on this page
 //! returns a number that could plausibly be mistaken for the other.
 //!
-//! Neither answer is spelled in any code generator's types. [`Scalar`] is this
-//! compiler's own, and the backend translates it — `clif.rs` today, LLVM next
-//! (DECISIONS §17, LLVM-PORT stage 0). That indirection is what lets the
-//! classification in `abi.rs` outlive the code generator underneath it.
+//! Neither answer is spelled in the code generator's types. [`Scalar`] is this
+//! compiler's own and `llvm/ty.rs` translates it, which is what let the
+//! classification in `abi.rs` outlive the code generator it was written
+//! against (DECISIONS §17).
 
 use goblin_mir::{FloatTy, IntTy, Module, TyId, TyKind};
 

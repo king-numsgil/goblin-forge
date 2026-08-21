@@ -24,7 +24,7 @@ use crate::layout::{Layouts, Repr, Scalar};
 ///
 /// [`Scalar::Ptr`] is `ptr` and nothing else. LLVM's pointers have been opaque
 /// since 15, so an address is not an `i64` that happens to be wide enough —
-/// which is exactly the distinction `layout.rs` records and Cranelift cannot.
+/// which is exactly the distinction `layout.rs` exists to record.
 pub fn scalar(value: Scalar) -> &'static str {
     match value {
         Scalar::I8 => "i8",

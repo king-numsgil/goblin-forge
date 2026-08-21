@@ -15,10 +15,7 @@ use std::path::PathBuf;
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
-// Renamed on import: the napi class exposed to JS is also called `Backend`, and
-// it is a different thing — the addon's handle, not the choice of code
-// generator.
-use goblin_codegen::{Backend as CodegenBackend, CodegenOptions, OptLevel, OutputKind};
+use goblin_codegen::{CodegenOptions, OptLevel, OutputKind};
 
 mod summary;
 
@@ -26,10 +23,10 @@ use summary::summarise;
 
 /// The same allocator a compiled program gets, for the compiler itself.
 ///
-/// Cranelift's IR is a great many small, short-lived allocations, and this addon
-/// is where all of them happen — the frontend's are V8's and no business of
-/// ours. Windows' default is the weakest of the three platforms', which is what
-/// makes one line worth writing.
+/// Rendering a module is a great many small, short-lived allocations, and this
+/// addon is where all of them happen — the frontend's are V8's and no business
+/// of ours. Windows' default is the weakest of the three platforms', which is
+/// what makes one line worth writing.
 ///
 /// Scoped to this dynamic library: it changes where *Rust* asks for memory
 /// inside the addon, and Node's own heap is untouched.
@@ -53,13 +50,6 @@ pub struct BackendOptions {
     /// reads as a passing test. The test harness sets this; a release build of
     /// a shipped compiler leaves it off.
     pub strict_internal_errors: Option<bool>,
-    /// `"cranelift" | "llvm"`. Omitted falls back to `GOBLIN_BACKEND`, then to
-    /// Cranelift.
-    ///
-    /// A switch for the duration of the LLVM port, so the whole suite can be
-    /// run under either code generator one failure at a time. It goes away at
-    /// LLVM-PORT stage 6.
-    pub backend: Option<String>,
 }
 
 /// A structured diagnostic.
@@ -180,21 +170,9 @@ impl Backend {
             ))
         })?;
 
-        let strict_internal_errors = options.strict_internal_errors.unwrap_or(false);
         if let Some(strict) = options.strict_internal_errors {
             goblin_codegen::error::set_panic_on_internal_errors(strict);
         }
-
-        let backend = CodegenBackend::resolve(options.backend.as_deref()).ok_or_else(|| {
-            Error::from_reason(format!(
-                "`{}` is not a backend; expected \"cranelift\" or \"llvm\"",
-                options
-                    .backend
-                    .clone()
-                    .or_else(|| std::env::var("GOBLIN_BACKEND").ok())
-                    .unwrap_or_default()
-            ))
-        })?;
 
         Ok(Backend {
             codegen: CodegenOptions {
@@ -202,12 +180,6 @@ impl Backend {
                 opt_level,
                 debug_info: options.debug_info,
                 checked: options.checked,
-                // The same signal, because it answers the same question: this
-                // is a build where a compiler bug should be loud. The harness
-                // sets it, so every test compiles with the verifier on and a
-                // shipped compiler does not pay for it.
-                verify_ir: strict_internal_errors,
-                backend,
             },
         })
     }
