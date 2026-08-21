@@ -196,12 +196,12 @@ fn a_descriptor_names_its_base_its_interfaces_and_their_itabs() {
 #[test]
 fn class_data_compiles() {
     let module = zoo();
-    for (conv, triple) in [
-        (Conv::Win64, "x86_64-pc-windows-msvc"),
-        (Conv::SysV, "x86_64-unknown-linux-gnu"),
+    for (conv, windows, triple) in [
+        (Conv::Win64, true, "x86_64-pc-windows-msvc"),
+        (Conv::SysV, false, "x86_64-unknown-linux-gnu"),
     ] {
         let emitted =
-            llvm::emit_module(&module, TARGET, conv, false, true).expect("the zoo renders");
+            llvm::emit_module(&module, TARGET, conv, false, windows).expect("the zoo renders");
         let mut options = options();
         options.target = Some(triple.to_owned());
         let object = scratch().join(format!("zoo-{triple}.obj"));
@@ -251,8 +251,15 @@ fn the_vtable_bias_is_right_at_run_time() {
     module.classes[0].vtable.clear();
     module.classes[1].implements.clear();
 
+    // This one links and runs, so it is built for **the host** rather than for
+    // a named triple — and therefore has to describe the host, not Windows.
+    let (conv, windows) = if cfg!(windows) {
+        (Conv::Win64, true)
+    } else {
+        (Conv::SysV, false)
+    };
     let mut emitted =
-        llvm::emit_module(&module, TARGET, Conv::Win64, false, true).expect("the zoo renders");
+        llvm::emit_module(&module, TARGET, conv, false, windows).expect("the zoo renders");
 
     let mut globals = Globals::new();
     let mut literals = Literals::new();

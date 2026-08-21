@@ -255,12 +255,15 @@ fn every_type_shape_parses() {
     let module = shapes();
     let target = TargetInfo::from_pointer_bits(64);
 
-    for (conv, triple) in [
-        (Conv::Win64, "x86_64-pc-windows-msvc"),
-        (Conv::SysV, "x86_64-unknown-linux-gnu"),
+    for (conv, windows, triple) in [
+        (Conv::Win64, true, "x86_64-pc-windows-msvc"),
+        (Conv::SysV, false, "x86_64-unknown-linux-gnu"),
     ] {
+        // `windows` only decides the debug format and debug is off here, so it
+        // is inert — and passed honestly anyway, because the one time it was
+        // hardcoded it hid the fact that DWARF had never been exercised.
         let emitted =
-            llvm::emit_module(&module, target, conv, false, true).expect("the shapes render");
+            llvm::emit_module(&module, target, conv, false, windows).expect("the shapes render");
         let mut options = options();
         options.target = Some(triple.to_owned());
 
@@ -374,19 +377,40 @@ define <4 x double> @vadd(<4 x double> %a, <4 x double> %b) {
     );
 }
 
-/// `llvm-objdump`, beside whichever clang the driver uses.
+/// An object dumper: `llvm-objdump` for preference, GNU `objdump` otherwise.
+///
+/// Beside `GOBLIN_CLANG` first, because that is the toolchain the driver is
+/// actually using. Then by name — and a distribution that packages LLVM by
+/// version leaves `llvm-objdump-20` on `PATH` and no unsuffixed alias, which is
+/// exactly the shape of thing that turns a portable test into a Windows-only
+/// one. GNU `objdump` is the last resort and is enough for both callers: its
+/// `-h` names the same sections and its `-d` prints the same mnemonics.
 fn which_objdump() -> Option<std::ffi::OsString> {
-    if let Ok(clang) = std::env::var("GOBLIN_CLANG") {
-        let beside = Path::new(&clang).with_file_name(if cfg!(windows) {
-            "llvm-objdump.exe"
+    let exe = |name: &str| {
+        if cfg!(windows) {
+            format!("{name}.exe")
         } else {
-            "llvm-objdump"
-        });
+            name.to_owned()
+        }
+    };
+
+    if let Ok(clang) = std::env::var("GOBLIN_CLANG") {
+        let beside = Path::new(&clang).with_file_name(exe("llvm-objdump"));
         if beside.exists() {
             return Some(beside.into_os_string());
         }
     }
-    Some(std::ffi::OsString::from("llvm-objdump"))
+
+    for name in ["llvm-objdump", "objdump"] {
+        if Command::new(name)
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success())
+        {
+            return Some(std::ffi::OsString::from(name));
+        }
+    }
+    None
 }
 
 /// `debug_info` stops being a lie.
@@ -398,39 +422,52 @@ fn which_objdump() -> Option<std::ffi::OsString> {
 ///
 /// The check is the object file rather than the IR, because metadata that does
 /// not survive to a debug section is the same lie in a longer form.
+/// **Both formats, from whichever host is running**, like the ABI oracle next
+/// door and for the same reason.
+///
+/// One module flag decides CodeView or DWARF, and a check that only exercised
+/// the host's format leaves the other unverified. This test did exactly that
+/// once: it hardcoded CodeView while compiling for the *host*, so it passed on
+/// Windows, never exercised DWARF anywhere, and on Linux asked for CodeView on
+/// an ELF target — which produces no debug sections at all, and is how it was
+/// found.
 #[test]
 fn debug_info_reaches_the_object_when_asked_for_and_not_otherwise() {
     let module = shapes_with_a_body();
     let target = TargetInfo::from_pointer_bits(64);
     let dir = scratch();
 
-    for (wanted, label) in [(true, "on"), (false, "off")] {
-        let emitted = llvm::emit_module(&module, target, Conv::Win64, wanted, true)
-            .expect("the module renders");
-        let mut options = options();
-        options.debug_info = wanted;
-        let object = dir.join(format!("debug-{label}.obj"));
-        driver::compile(&emitted.text, &options, &object).unwrap_or_else(|error| {
-            panic!(
-                "clang rejected the module with debug {label}:\n{error}\n\n{}",
-                emitted.text
-            )
-        });
+    for (windows, conv, triple, section) in [
+        (true, Conv::Win64, "x86_64-pc-windows-msvc", ".debug$S"),
+        (false, Conv::SysV, "x86_64-unknown-linux-gnu", ".debug_info"),
+    ] {
+        for wanted in [true, false] {
+            let emitted = llvm::emit_module(&module, target, conv, wanted, windows)
+                .expect("the module renders");
+            let mut options = options();
+            options.debug_info = wanted;
+            options.target = Some(triple.to_owned());
+            let object = dir.join(format!("debug-{triple}-{wanted}.o"));
+            driver::compile(&emitted.text, &options, &object).unwrap_or_else(|error| {
+                panic!(
+                    "clang rejected the module for {triple} with debug {wanted}:\n{error}\n\n{}",
+                    emitted.text
+                )
+            });
 
-        let objdump = which_objdump().expect("llvm-objdump");
-        let output = Command::new(objdump)
-            .arg("-h")
-            .arg(&object)
-            .output()
-            .expect("running llvm-objdump");
-        let sections = String::from_utf8_lossy(&output.stdout);
-        // CodeView, because the target is MSVC. The same metadata produces
-        // DWARF on ELF, decided by one module flag.
-        let has_debug = sections.contains(".debug$S");
-        assert_eq!(
-            has_debug, wanted,
-            "debug {label}: expected debug sections {wanted}, got {has_debug}\n{sections}"
-        );
+            let objdump = which_objdump().expect("llvm-objdump");
+            let output = Command::new(objdump)
+                .arg("-h")
+                .arg(&object)
+                .output()
+                .expect("running llvm-objdump");
+            let sections = String::from_utf8_lossy(&output.stdout);
+            let present = sections.contains(section);
+            assert_eq!(
+                present, wanted,
+                "{triple} with debug {wanted}: expected `{section}` {wanted}, got {present}\n{sections}"
+            );
+        }
     }
 }
 
