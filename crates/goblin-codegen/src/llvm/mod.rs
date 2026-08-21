@@ -1,10 +1,14 @@
 //! The LLVM backend: MIR to IR text to an object file.
 //!
-//! DECISIONS §17 is the decision and [`LLVM-PORT.md`] is the plan. This is
-//! stage 1 — the type mapping, the signature writer, and the clang driver.
+//! DECISIONS §17 is the decision and [`LLVM-PORT.md`] is the plan. Built so
+//! far: the type mapping, the signature writer and the clang driver (stage 1),
+//! and the static data — class descriptors, vtables, itabs and string literals
+//! (stage 2).
+//!
 //! **Function bodies arrive at stage 3**, so what a module renders to today is
-//! its types and its declarations, which is exactly enough for clang to check
-//! that both of those are well formed.
+//! its types, its data and its declarations. That is enough for clang to check
+//! all three, and not enough to link, which is the honest state of a backend
+//! that cannot yet emit code.
 //!
 //! The one rule this backend adds to the house rules: **no `nsw`, no `nuw`, no
 //! `noalias`, no TBAA, no fast-math flags, ever, until something deliberately
@@ -15,17 +19,54 @@
 //!
 //! [`LLVM-PORT.md`]: ../../../../LLVM-PORT.md
 
+pub mod data;
 pub mod driver;
 pub mod sig;
 pub mod ty;
+pub mod vtable;
+
+use std::collections::HashMap;
 
 use goblin_mir::{Linkage, Module};
 
 use crate::abi::Conv;
 use crate::error::{InternalError, Result};
 use crate::layout::{Layouts, TargetInfo};
+use crate::llvm::data::Globals;
 use crate::llvm::sig::Rendered;
 use crate::llvm::ty::{Types, ident};
+use crate::llvm::vtable::ClassSymbols;
+
+/// String literals already emitted, so identical text is emitted once.
+///
+/// The symbol is content-addressed — `gf_str_` plus the FNV-1a of the bytes —
+/// which is the same spelling the Cranelift path uses, so a module compiled
+/// either way names its literals identically.
+#[derive(Default)]
+pub struct Literals {
+    seen: HashMap<String, String>,
+}
+
+impl Literals {
+    pub fn new() -> Literals {
+        Literals::default()
+    }
+
+    /// The symbol for `text`, emitting the data the first time it is asked for.
+    ///
+    /// What a program *carries* is this symbol's address plus
+    /// [`crate::runtime::STRING_HEADER_BYTES`]; the symbol itself addresses the
+    /// header. Stage 3 is what adds the `getelementptr` at each use site.
+    pub fn symbol(&mut self, globals: &mut Globals, text: &str) -> String {
+        if let Some(symbol) = self.seen.get(text) {
+            return symbol.clone();
+        }
+        let symbol = format!("gf_str_{:016x}", crate::vtable::interface_key(text));
+        globals.literal(&symbol, text);
+        self.seen.insert(text.to_owned(), symbol.clone());
+        symbol
+    }
+}
 
 /// What one module's IR text declares.
 pub struct Emitted {
@@ -34,6 +75,9 @@ pub struct Emitted {
     pub defines: Vec<String>,
     /// Symbols it needs from somewhere else.
     pub requires: Vec<String>,
+    /// Where each class's static data ended up, by `ClassId`. Stage 3 needs it
+    /// — a constructor installs a vtable pointer.
+    pub classes: Vec<ClassSymbols>,
 }
 
 /// Render a whole module as LLVM IR text.
@@ -86,6 +130,12 @@ pub fn emit_module(module: &Module, target: TargetInfo, conv: Conv) -> Result<Em
         }
     }
 
+    // After the functions are named, because a vtable slot holds a function
+    // address — and before the text is assembled, because emitting the tables
+    // is what discovers the names they refer to.
+    let mut globals = Globals::new();
+    let classes = crate::llvm::vtable::emit(module, &mut globals, target)?;
+
     let mut text = String::with_capacity(4096);
     text.push_str(&format!("; goblin-forge module `{name}`\n"));
     text.push_str(
@@ -99,6 +149,14 @@ pub fn emit_module(module: &Module, target: TargetInfo, conv: Conv) -> Result<Em
     if !types.definitions().is_empty() {
         for definition in types.definitions() {
             text.push_str(definition);
+            text.push('\n');
+        }
+        text.push('\n');
+    }
+
+    if !globals.lines().is_empty() {
+        for line in globals.lines() {
+            text.push_str(line);
             text.push('\n');
         }
         text.push('\n');
@@ -118,6 +176,7 @@ pub fn emit_module(module: &Module, target: TargetInfo, conv: Conv) -> Result<Em
         text,
         defines,
         requires,
+        classes,
     })
 }
 

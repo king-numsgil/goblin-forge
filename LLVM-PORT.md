@@ -110,7 +110,7 @@ once or twice. Every one has a one-line LLVM spelling.
 - [x] **Stage 0** — Cranelift out of the type vocabulary *(done 2026-08-21)*
 - [x] **Stage 1** — the emitter skeleton, the backend switch, and the ABI oracle
       *(done 2026-08-21)*
-- [ ] **Stage 2** — types, globals, and the data half
+- [x] **Stage 2** — types, globals, and the data half *(done 2026-08-21)*
 - [ ] **Stage 3** — function bodies
 - [ ] **Stage 4** — the C boundary
 - [ ] **Stage 5** — options, targets, and the `.ll` beside the object
@@ -279,6 +279,46 @@ Data is a good second stage because it is verifiable without running anything:
 **Done when:** a module of nothing but classes and literals compiles, links, and
 `llvm-objdump` shows the same relocations and the same bytes the Cranelift path
 produces.
+
+### What landed
+
+`llvm/data.rs` (the `Word`/`Globals` constant writer), `llvm/vtable.rs` (the
+class tables), and `Literals` on the module emitter. Every object is `internal
+constant <{ … }>` with an explicit `align` — packed for the same reason `ty.rs`
+is packed, and aligned because a packed struct is align-1 to LLVM while a string
+literal's header is two `u64` loads the runtime performs at a negative offset.
+
+**The comparison method changed, and the replacement is better.** Diffing
+`llvm-objdump` output against the Cranelift path was the stated checkpoint;
+section naming and ordering differ enough between the two that the diff would
+have tested the differences rather than the data. What replaced it:
+
+- The descriptor, vtable, itab and name constants are asserted **as text**, for
+  a class with a base, an interface and two methods. Word *order* is the
+  contract and the itab address carries a one-pointer bias; both are
+  off-by-one-shaped, and an off-by-one here is a wrong answer from `instanceof`
+  rather than a crash. The interface key is recomputed in the test rather than
+  copied.
+- The bias is checked **at run time**, by a linked program that does what a
+  compiled object does: hold a vtable pointer aimed at slot 0, reach the
+  descriptor at `[-1]`, read its first word, and exit non-zero if it is not the
+  name. Verified to fail when the emitted vtable is perturbed. It also prints an
+  emitted literal, which proves the sixteen-byte header sits in front of the
+  text rather than in it.
+
+That pair covers what the objdump diff was for — that the bytes and the
+relocations are right — and the second half covers something the diff could not
+have: that the arrangement is right *when a program depends on it*.
+
+**`module.globals` is untouched, and so is the Cranelift path.** Module-level
+constants and statics are unimplemented on both backends; the port owes nothing
+here that was not already owed.
+
+Real programs now emit real data. Under `GOBLIN_BACKEND=llvm` a class program
+renders its `__gf_name$`, `__gf_desc$` and `__gf_vt$` objects — `$` needs no
+quoting, being in LLVM's bare identifier set — and then stops at stage 3.
+
+47 Rust tests, 881 TS tests, `tsc --build` and `cargo clippy -D warnings` clean.
 
 ## Stage 3 — Function bodies
 
