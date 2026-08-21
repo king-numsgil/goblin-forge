@@ -27,11 +27,10 @@
 //! 'looks right' is worth nothing" — so it is exercised by the same differential
 //! suite on a Linux CI job.
 
-use cranelift_codegen::ir::{AbiParam, ArgumentPurpose, Type as ClifType, types};
 use goblin_mir::{Module, TyId, TyKind};
 
 use crate::error::{InternalError, Result};
-use crate::layout::{Layouts, Repr};
+use crate::layout::{Layouts, Repr, Scalar};
 
 /// Which platform convention a signature follows.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -59,15 +58,6 @@ impl Conv {
             _ => None,
         }
     }
-
-    /// The convention Cranelift's own call-conv name implies.
-    pub fn of_call_conv(call_conv: cranelift_codegen::isa::CallConv) -> Conv {
-        use cranelift_codegen::isa::CallConv;
-        match call_conv {
-            CallConv::WindowsFastcall => Conv::Win64,
-            _ => Conv::SysV,
-        }
-    }
 }
 
 /// How one parameter or return value crosses the boundary.
@@ -75,22 +65,44 @@ impl Conv {
 pub enum Slot {
     /// A register value, exactly as it travels internally. `signed` decides
     /// which extension a sub-register-width integer carries.
-    Plain { ty: ClifType, signed: bool },
+    Plain { ty: Scalar, signed: bool },
     /// A struct packed into these registers, low bytes first.
     ///
     /// The carrier types are chosen for their *width* and their register file:
     /// what matters is whether the bits land in a general register or an SSE
     /// one, and `F64` carries an SSE eightbyte whatever is actually inside it.
+    ///
+    /// **This is deliberately coarser than what clang declares, and the two
+    /// agree in the registers.** Checked against clang 22.1.8 for System V:
+    /// clang runs `GetINTEGERTypeAtOffset`, which names the carrier after the
+    /// field actually sitting at that offset — `{i64,char}` is `(i64, i8)`,
+    /// `{i64,short}` is `(i64, i16)`, `{int,int,int}` is `(i64, i32)` — and
+    /// falls back to `i64` when no single field covers the eightbyte, which is
+    /// why an 11-byte `{i64,char,char,char}` is `(i64, i64)`: a carrier three
+    /// bytes *wider* than the struct. Its float half is finer still, spelling
+    /// an all-float eightbyte `<2 x float>` and a lone trailing one `float`.
+    ///
+    /// Reproducing that would be real work buying nothing, because none of it
+    /// changes which bytes land in which register — clang's own caller relies
+    /// on the padding of the storage it copies out of, exactly as
+    /// `scatter_carriers` relies on its scratch slot. So the divergence is
+    /// written down here rather than chased, and stage 4's differential suite
+    /// is what holds the claim up.
     Registers {
-        carriers: Vec<ClifType>,
+        carriers: Vec<Scalar>,
         size: u32,
         align: u32,
     },
     /// A struct passed as the address of a copy the caller allocated. Win64's
     /// rule for every struct that is not 1, 2, 4 or 8 bytes.
+    ///
+    /// Distinct from [`Slot::OnStack`], and the distinction is load-bearing:
+    /// clang lowers this to a plain pointer parameter with the *caller* doing
+    /// the `memcpy`, and lowers `OnStack` to `byval`. Swapping them is silent
+    /// stack corruption rather than a crash.
     ByAddress { size: u32, align: u32 },
     /// A struct copied onto the outgoing stack area — System V's MEMORY class.
-    /// Cranelift performs the copy.
+    /// The code generator performs the copy.
     OnStack { size: u32, align: u32 },
     /// A struct written into storage the caller allocated, whose address
     /// arrives as a hidden first parameter.
@@ -119,19 +131,27 @@ impl Shape {
     }
 }
 
-/// An ABI parameter carrying the extension the C ABI asks for.
+/// Which extension a sub-register-width value carries across the boundary.
 ///
 /// Both rustc and clang mark a C parameter or return narrower than a register
 /// `zeroext` or `signext`, and a function compiled that way is entitled to use
-/// the whole register without masking first. Cranelift defaults to neither, so
-/// saying which is on us — two method calls, against a class of bug that only
-/// ever shows up as a wrong answer on somebody else's machine.
-pub fn extended(ty: ClifType, signed: bool) -> AbiParam {
-    let param = AbiParam::new(ty);
-    if !ty.is_int() || ty.bits() >= 32 {
-        return param;
+/// the whole register without masking first. Neither Cranelift nor LLVM
+/// supplies one by default, so saying which is on us — against a class of bug
+/// that only ever shows up as a wrong answer on somebody else's machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ext {
+    /// The value already fills a register. Nothing to say.
+    None,
+    Sext,
+    Zext,
+}
+
+/// The extension the C ABI asks for on a value of this scalar.
+pub fn extension(ty: Scalar, signed: bool, target: crate::layout::TargetInfo) -> Ext {
+    if !ty.is_integer() || ty.bits(target) >= 32 {
+        return Ext::None;
     }
-    if signed { param.sext() } else { param.uext() }
+    if signed { Ext::Sext } else { Ext::Zext }
 }
 
 /// Reject anything whose bytes are not the whole of its value.
@@ -242,7 +262,7 @@ fn scalars(layouts: &mut Layouts<'_>, ty: TyId, at: u32, out: &mut Vec<(u32, boo
 /// That is the rule that puts `struct { int; float; }` in one general register
 /// and `struct { float; float; }` in one SSE register — and getting it
 /// backwards is silent corruption rather than a crash (REWRITE-PLAN §6).
-fn eightbytes(layouts: &mut Layouts<'_>, ty: TyId, size: u32) -> Result<Vec<ClifType>> {
+fn eightbytes(layouts: &mut Layouts<'_>, ty: TyId, size: u32) -> Result<Vec<Scalar>> {
     let mut flat = Vec::new();
     scalars(layouts, ty, 0, &mut flat)?;
 
@@ -256,20 +276,14 @@ fn eightbytes(layouts: &mut Layouts<'_>, ty: TyId, size: u32) -> Result<Vec<Clif
             .any(|(offset, float)| *offset >= start && *offset < end && !*float);
         // An eightbyte no field reaches is padding; INTEGER is the conservative
         // reading and matches what compilers emit for trailing padding.
-        carriers.push(if integer { types::I64 } else { types::F64 });
+        carriers.push(if integer { Scalar::I64 } else { Scalar::F64 });
     }
     Ok(carriers)
 }
 
 /// The integer carrier for a Win64 struct of 1, 2, 4 or 8 bytes.
-fn packed(size: u32) -> Option<ClifType> {
-    match size {
-        1 => Some(types::I8),
-        2 => Some(types::I16),
-        4 => Some(types::I32),
-        8 => Some(types::I64),
-        _ => None,
-    }
+fn packed(size: u32) -> Option<Scalar> {
+    Scalar::int_of_bytes(size)
 }
 
 fn signedness(module: &Module, ty: TyId) -> bool {
@@ -386,55 +400,6 @@ pub fn classify(
     })
 }
 
-/// Turn a classified shape into Cranelift's parameter list.
-pub fn to_signature(
-    shape: &Shape,
-    call_conv: cranelift_codegen::isa::CallConv,
-    pointer: ClifType,
-) -> cranelift_codegen::ir::Signature {
-    let mut out = cranelift_codegen::ir::Signature::new(call_conv);
-
-    // The hidden return pointer comes first, and Cranelift returns it *itself*
-    // from the parameter's `StructReturn` purpose. Declaring it as a return
-    // value as well panics inside the ABI layer with a message that does not
-    // obviously say so (REWRITE-PLAN §10).
-    if let Slot::Sret { .. } = shape.returns {
-        out.params
-            .push(AbiParam::special(pointer, ArgumentPurpose::StructReturn));
-    }
-
-    for slot in &shape.params {
-        match slot {
-            Slot::Plain { ty, signed } => out.params.push(extended(*ty, *signed)),
-            Slot::Registers { carriers, .. } => {
-                for carrier in carriers {
-                    out.params.push(AbiParam::new(*carrier));
-                }
-            }
-            Slot::ByAddress { .. } => out.params.push(AbiParam::new(pointer)),
-            Slot::OnStack { size, .. } => out.params.push(AbiParam::special(
-                pointer,
-                ArgumentPurpose::StructArgument(*size),
-            )),
-            Slot::Sret { .. } | Slot::None => {}
-        }
-    }
-
-    match &shape.returns {
-        Slot::Plain { ty, signed } => out.returns.push(extended(*ty, *signed)),
-        Slot::Registers { carriers, .. } => {
-            for carrier in carriers {
-                out.returns.push(AbiParam::new(*carrier));
-            }
-        }
-        Slot::Sret { .. } | Slot::None => {}
-        Slot::ByAddress { .. } | Slot::OnStack { .. } => {
-            unreachable!("a return is never classified by address or on stack")
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -538,7 +503,7 @@ mod tests {
         assert_eq!(
             f.param(one, Conv::Win64),
             Slot::Registers {
-                carriers: vec![types::I8],
+                carriers: vec![Scalar::I8],
                 size: 1,
                 align: 1
             }
@@ -546,7 +511,7 @@ mod tests {
         assert_eq!(
             f.param(eight, Conv::Win64),
             Slot::Registers {
-                carriers: vec![types::I64],
+                carriers: vec![Scalar::I64],
                 size: 8,
                 align: 4
             }
@@ -563,7 +528,7 @@ mod tests {
         assert_eq!(
             f.param(two_floats, Conv::Win64),
             Slot::Registers {
-                carriers: vec![types::I64],
+                carriers: vec![Scalar::I64],
                 size: 8,
                 align: 4
             }
@@ -592,7 +557,7 @@ mod tests {
         assert_eq!(
             f.param(two_floats, Conv::SysV),
             Slot::Registers {
-                carriers: vec![types::F64],
+                carriers: vec![Scalar::F64],
                 size: 8,
                 align: 4
             }
@@ -608,7 +573,7 @@ mod tests {
         assert_eq!(
             f.param(mixed, Conv::SysV),
             Slot::Registers {
-                carriers: vec![types::I64],
+                carriers: vec![Scalar::I64],
                 size: 8,
                 align: 4
             }
@@ -624,7 +589,7 @@ mod tests {
         assert_eq!(
             f.param(two_doubles, Conv::SysV),
             Slot::Registers {
-                carriers: vec![types::F64, types::F64],
+                carriers: vec![Scalar::F64, Scalar::F64],
                 size: 16,
                 align: 8
             }
@@ -633,7 +598,7 @@ mod tests {
         assert_eq!(
             f.param(mixed, Conv::SysV),
             Slot::Registers {
-                carriers: vec![types::I64, types::F64],
+                carriers: vec![Scalar::I64, Scalar::F64],
                 size: 16,
                 align: 8
             }
@@ -660,7 +625,7 @@ mod tests {
         assert_eq!(
             f.param(twelve, Conv::SysV),
             Slot::Registers {
-                carriers: vec![types::I64, types::I64],
+                carriers: vec![Scalar::I64, Scalar::I64],
                 size: 12,
                 align: 4
             }
@@ -681,7 +646,7 @@ mod tests {
         assert_eq!(
             f.param(nested, Conv::SysV),
             Slot::Registers {
-                carriers: vec![types::F64],
+                carriers: vec![Scalar::F64],
                 size: 8,
                 align: 4
             }
@@ -695,14 +660,14 @@ mod tests {
             assert_eq!(
                 f.param(Fixture::I32, conv),
                 Slot::Plain {
-                    ty: types::I32,
+                    ty: Scalar::I32,
                     signed: true
                 }
             );
             assert_eq!(
                 f.param(Fixture::F64, conv),
                 Slot::Plain {
-                    ty: types::F64,
+                    ty: Scalar::F64,
                     signed: false
                 }
             );
@@ -728,28 +693,42 @@ mod tests {
 
     #[test]
     fn sub_register_widths_carry_their_extension() {
-        use cranelift_codegen::ir::ArgumentExtension;
-        assert_eq!(extended(types::I8, true).extension, ArgumentExtension::Sext);
-        assert_eq!(
-            extended(types::I8, false).extension,
-            ArgumentExtension::Uext
-        );
-        assert_eq!(
-            extended(types::I16, true).extension,
-            ArgumentExtension::Sext
-        );
+        // The *rule*. How a code generator spells it is `clif.rs`'s problem,
+        // and has its own test there.
+        let target = TargetInfo::from_pointer_bits(64);
+        assert_eq!(extension(Scalar::I8, true, target), Ext::Sext);
+        assert_eq!(extension(Scalar::I8, false, target), Ext::Zext);
+        assert_eq!(extension(Scalar::I16, true, target), Ext::Sext);
         // Nothing a register already holds in full needs one.
+        assert_eq!(extension(Scalar::I32, true, target), Ext::None);
+        assert_eq!(extension(Scalar::I64, true, target), Ext::None);
+        assert_eq!(extension(Scalar::F64, false, target), Ext::None);
+        assert_eq!(extension(Scalar::Ptr, false, target), Ext::None);
+    }
+
+    #[test]
+    fn a_pointer_is_not_a_pointer_width_integer() {
+        // `Scalar::Ptr` and `Scalar::I64` are the same register on x86-64 and
+        // will not be the same LLVM type. `usize` is the integer; a
+        // `Pointer<T>` is the pointer. Collapsing them is the thing this
+        // vocabulary exists to prevent (LLVM-PORT stage 0).
+        let mut f = Fixture::new();
+        f.module.types.push(TyDef {
+            kind: TyKind::Int(IntTy::Usize),
+            category: Category::Trivial,
+        });
+        let usize_ty = TyId(f.module.types.len() as u32 - 1);
+        f.module.types.push(TyDef {
+            kind: TyKind::Pointer(Fixture::I32),
+            category: Category::Trivial,
+        });
+        let pointer_ty = TyId(f.module.types.len() as u32 - 1);
+
+        let mut layouts = Layouts::new(&f.module, TargetInfo::from_pointer_bits(64));
+        assert_eq!(layouts.repr(usize_ty).unwrap(), Repr::Register(Scalar::I64));
         assert_eq!(
-            extended(types::I32, true).extension,
-            ArgumentExtension::None
-        );
-        assert_eq!(
-            extended(types::I64, true).extension,
-            ArgumentExtension::None
-        );
-        assert_eq!(
-            extended(types::F64, false).extension,
-            ArgumentExtension::None
+            layouts.repr(pointer_ty).unwrap(),
+            Repr::Register(Scalar::Ptr)
         );
     }
 }

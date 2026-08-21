@@ -7,13 +7,17 @@
 //! * [`Layout`] answers **how many bytes does this occupy**. Array strides,
 //!   field offsets, `sizeOf`, and anything the allocator is told all come
 //!   from here.
-//! * [`Repr`] answers **what does a register hold**. Cranelift types, ABI
-//!   classification and parameter passing come from here.
+//! * [`Repr`] answers **what does a register hold**, in the vocabulary of
+//!   [`Scalar`]. ABI classification and parameter passing come from here.
 //!
 //! Nothing has one function that answers both, and no function on this page
 //! returns a number that could plausibly be mistaken for the other.
+//!
+//! Neither answer is spelled in any code generator's types. [`Scalar`] is this
+//! compiler's own, and the backend translates it — `clif.rs` today, LLVM next
+//! (DECISIONS §17, LLVM-PORT stage 0). That indirection is what lets the
+//! classification in `abi.rs` outlive the code generator underneath it.
 
-use cranelift_codegen::ir::types;
 use goblin_mir::{FloatTy, IntTy, Module, TyId, TyKind};
 
 use crate::error::Result;
@@ -32,11 +36,63 @@ impl TargetInfo {
         }
     }
 
-    /// The Cranelift type of a machine address on this target.
-    pub fn pointer_type(self) -> types::Type {
-        match self.pointer_bytes {
-            4 => types::I32,
-            _ => types::I64,
+    /// The width of a machine address, in bits.
+    pub fn pointer_bits(self) -> u32 {
+        self.pointer_bytes * 8
+    }
+}
+
+/// What one register holds, named without reference to any code generator.
+///
+/// **`Ptr` is deliberately not `I64`.** Cranelift has no pointer type and wants
+/// the integer width; LLVM has an opaque `ptr` and wants nothing else. Folding
+/// the two together here would be free today and would have to be *undone*, at
+/// every load and store, by the backend that needs the distinction — which is
+/// the pattern REWRITE-PLAN spends its length arguing against. So the fact is
+/// written down once, and each backend spells it its own way.
+///
+/// A pointer-width *integer* — `usize`, `isize` — is not `Ptr`. It is the
+/// integer of that width, because that is what it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Scalar {
+    I8,
+    I16,
+    I32,
+    I64,
+    F32,
+    F64,
+    /// A machine address.
+    Ptr,
+}
+
+impl Scalar {
+    /// How many bits this occupies on `target`.
+    pub fn bits(self, target: TargetInfo) -> u32 {
+        match self {
+            Scalar::I8 => 8,
+            Scalar::I16 => 16,
+            Scalar::I32 | Scalar::F32 => 32,
+            Scalar::I64 | Scalar::F64 => 64,
+            Scalar::Ptr => target.pointer_bits(),
+        }
+    }
+
+    /// Whether this lands in an integer register rather than an SSE one.
+    ///
+    /// System V's eightbyte classification is the caller that matters, and
+    /// there a pointer is an INTEGER like any other.
+    pub fn is_integer(self) -> bool {
+        !matches!(self, Scalar::F32 | Scalar::F64)
+    }
+
+    /// The integer scalar of a given byte width, for a carrier.
+    pub fn int_of_bytes(bytes: u32) -> Option<Scalar> {
+        match bytes {
+            1 => Some(Scalar::I8),
+            2 => Some(Scalar::I16),
+            4 => Some(Scalar::I32),
+            8 => Some(Scalar::I64),
+            _ => None,
         }
     }
 }
@@ -80,14 +136,14 @@ impl Layout {
 pub enum Repr {
     /// Nothing travels at all. Only `void`.
     Void,
-    /// One machine register of this Cranelift type.
-    Register(types::Type),
+    /// One machine register holding this scalar.
+    Register(Scalar),
     /// Too large or too structured for a register. Travels by address.
     Aggregate,
 }
 
 impl Repr {
-    pub fn register(self) -> Option<types::Type> {
+    pub fn register(self) -> Option<Scalar> {
         match self {
             Repr::Register(ty) => Some(ty),
             _ => None,
@@ -284,16 +340,16 @@ impl<'m> Layouts<'m> {
             // `bool` is one byte of storage and one `I8` in a register. Note
             // that this is a place where the two answers genuinely differ from
             // each other for a scalar, which is why they are two functions.
-            TyKind::Bool => Repr::Register(types::I8),
-            TyKind::Int(int) => Repr::Register(int_clif_type(*int, self.target)),
-            TyKind::Float(FloatTy::F32) => Repr::Register(types::F32),
-            TyKind::Float(FloatTy::F64) => Repr::Register(types::F64),
+            TyKind::Bool => Repr::Register(Scalar::I8),
+            TyKind::Int(int) => Repr::Register(int_scalar(*int, self.target)),
+            TyKind::Float(FloatTy::F32) => Repr::Register(Scalar::F32),
+            TyKind::Float(FloatTy::F64) => Repr::Register(Scalar::F64),
             TyKind::Pointer(_)
             | TyKind::Reference(_)
             | TyKind::FnPtr(_)
             | TyKind::Str
             | TyKind::CStr
-            | TyKind::Array(_) => Repr::Register(self.target.pointer_type()),
+            | TyKind::Array(_) => Repr::Register(Scalar::Ptr),
             // Too big for a register, and it travels by address like any other
             // aggregate.
             TyKind::FixedArray { .. }
@@ -321,13 +377,15 @@ fn int_bytes(int: IntTy, pointer_bytes: u32) -> u32 {
     }
 }
 
-fn int_clif_type(int: IntTy, target: TargetInfo) -> types::Type {
+/// `usize` and `isize` have no width of their own — they are whatever an
+/// address is wide — so they are the *integer* of that width, not [`Scalar::Ptr`].
+fn int_scalar(int: IntTy, target: TargetInfo) -> Scalar {
     match int.bits() {
-        Some(8) => types::I8,
-        Some(16) => types::I16,
-        Some(32) => types::I32,
-        Some(64) => types::I64,
-        _ => target.pointer_type(),
+        Some(8) => Scalar::I8,
+        Some(16) => Scalar::I16,
+        Some(32) => Scalar::I32,
+        Some(64) => Scalar::I64,
+        _ => Scalar::int_of_bytes(target.pointer_bytes).unwrap_or(Scalar::I64),
     }
 }
 

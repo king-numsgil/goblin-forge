@@ -13,6 +13,9 @@ how the thing is put together and which mistakes it is designed to prevent.
 - [`DECISIONS.md`](DECISIONS.md) — the answers to the questions the plan left
   open, recorded as they land.
 - [`NOTES.md`](NOTES.md) — working notes.
+- [`LLVM-PORT.md`](LLVM-PORT.md) — the staged plan for replacing Cranelift,
+  decided by DECISIONS §17. §17 is the reasoning; this is the order of
+  operations and the checkpoint each stage ends at.
 - [`POINTER-ERASURE.md`](POINTER-ERASURE.md) — how `void *` was arrived at,
   including the design that was probed and rejected. Answered by DECISIONS §13;
   worth reading before changing anything about `erase()` / `reify<U>()`, because

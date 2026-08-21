@@ -10,11 +10,12 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 
 use goblin_mir::{Abi, Linkage, Module};
 
+use crate::abi::Conv;
 use crate::error::{InternalError, Result};
 use crate::internal_error;
 use crate::layout::{Layouts, TargetInfo};
 use crate::runtime::RuntimeRefs;
-use crate::translate::{FuncRefs, FunctionTranslator, ModuleContext, translate_signature};
+use crate::translate::{FuncRefs, FunctionTranslator, Machine, ModuleContext, translate_signature};
 
 /// How the backend was asked to compile.
 #[derive(Debug, Clone)]
@@ -82,7 +83,12 @@ pub fn compile_module(
     let isa = make_isa(options)?;
     let target = TargetInfo::from_pointer_bits(u32::from(isa.pointer_bits()));
     let call_conv = isa.default_call_conv();
-    let frontend_config = isa.frontend_config();
+    let conv = conv_of(options)?;
+    let machine = Machine {
+        call_conv,
+        conv,
+        frontend_config: isa.frontend_config(),
+    };
 
     let name = module.sym(module.name).unwrap_or("module").to_owned();
     let builder = ObjectBuilder::new(isa, name.clone(), cranelift_module::default_libcall_names())
@@ -107,7 +113,7 @@ pub fn compile_module(
         let symbol = module
             .sym(import.name)
             .ok_or_else(|| InternalError::new("an import has no name"))?;
-        let clif_sig = translate_signature(&mut layouts, sig, call_conv)?;
+        let clif_sig = translate_signature(&mut layouts, sig, call_conv, conv)?;
         let id = clif_module
             .declare_function(symbol, ClifLinkage::Import, &clif_sig)
             .map_err(|error| InternalError::new(format!("declaring `{symbol}`: {error}")))?;
@@ -122,7 +128,7 @@ pub fn compile_module(
         let symbol = module
             .sym(func.name)
             .ok_or_else(|| InternalError::new("a function has no name"))?;
-        let clif_sig = translate_signature(&mut layouts, sig, call_conv)?;
+        let clif_sig = translate_signature(&mut layouts, sig, call_conv, conv)?;
         let linkage = match func.linkage {
             Linkage::Export => ClifLinkage::Export,
             Linkage::Internal => ClifLinkage::Local,
@@ -153,7 +159,7 @@ pub fn compile_module(
         let symbol = module.sym(func.name).unwrap_or("<unnamed>").to_owned();
 
         context.clear();
-        context.func.signature = translate_signature(&mut layouts, sig, call_conv)?;
+        context.func.signature = translate_signature(&mut layouts, sig, call_conv, conv)?;
 
         let function_builder = FunctionBuilder::new(&mut context.func, &mut builder_context);
         let translator = FunctionTranslator::new(
@@ -167,8 +173,7 @@ pub fn compile_module(
                 runtime: &mut runtime,
                 literals: &mut literals,
             },
-            call_conv,
-            frontend_config,
+            machine,
         );
         translator
             .translate(func)
@@ -216,6 +221,55 @@ pub fn target_info(options: &CodegenOptions) -> Result<TargetInfo> {
     Ok(TargetInfo::from_pointer_bits(u32::from(isa.pointer_bits())))
 }
 
+/// The triple being compiled for, named explicitly or the host's.
+///
+/// Wanted for its own sake rather than as a detour through the ISA: the C
+/// calling convention is a property of the *platform*, and asking Cranelift's
+/// `CallConv` for it was asking the code generator a question about the target
+/// (LLVM-PORT stage 0).
+pub fn target_triple(options: &CodegenOptions) -> Result<target_lexicon::Triple> {
+    match &options.target {
+        Some(triple) => triple.parse().map_err(|error| {
+            InternalError::new(format!("`{triple}` is not a target triple: {error}"))
+        }),
+        None => Ok(target_lexicon::Triple::host()),
+    }
+}
+
+/// The C convention for a target, or a loud failure.
+///
+/// `None` means this compiler has no rules written down for the platform, and
+/// there is no safe default to fall back on — guessing System V on an
+/// unsupported architecture produces a program that links and is wrong, which
+/// is the failure mode REWRITE-PLAN §8 exists to make impossible.
+fn conv_of(options: &CodegenOptions) -> Result<Conv> {
+    let triple = target_triple(options)?;
+    match Conv::of(&triple) {
+        Some(conv) => Ok(conv),
+        None => internal_error!("no C calling convention is written down for `{triple}`"),
+    }
+}
+
+/// Every feature `x86-64-v3` names, as Cranelift spells them.
+///
+/// DECISIONS §17's amendment: the compiler targets `x86-64-v3` and does not run
+/// on anything older. Cranelift has no microarchitecture presets — its x64
+/// settings expose the features one at a time — so the single `-march` flag
+/// that arrives with LLVM is this list until then.
+///
+/// This also closes the fault §17 records: `cranelift_native::builder()`
+/// detects host features, while `isa::lookup` on an explicit triple yields a
+/// **baseline** ISA, so naming the host's own triple produced different code
+/// from naming nothing. Both paths now enable the same set.
+const X86_64_V3: [&str; 6] = [
+    "has_avx",
+    "has_avx2",
+    "has_fma",
+    "has_bmi1",
+    "has_bmi2",
+    "has_lzcnt",
+];
+
 fn make_isa(options: &CodegenOptions) -> Result<std::sync::Arc<dyn isa::TargetIsa>> {
     let mut flags = settings::builder();
     flags
@@ -237,11 +291,9 @@ fn make_isa(options: &CodegenOptions) -> Result<std::sync::Arc<dyn isa::TargetIs
 
     let shared = settings::Flags::new(flags);
 
-    let builder = match &options.target {
+    let mut builder = match &options.target {
         Some(triple) => {
-            let parsed: target_lexicon::Triple = triple.parse().map_err(|error| {
-                InternalError::new(format!("`{triple}` is not a target triple: {error}"))
-            })?;
+            let parsed = target_triple(options)?;
             isa::lookup(parsed).map_err(|error| {
                 InternalError::new(format!("no backend for `{triple}`: {error}"))
             })?
@@ -251,6 +303,18 @@ fn make_isa(options: &CodegenOptions) -> Result<std::sync::Arc<dyn isa::TargetIs
             Err(message) => internal_error!("no Cranelift backend for this host: {message}"),
         },
     };
+
+    // The baseline, on both paths. A machine without AVX2 will fault on the
+    // first VEX-encoded instruction rather than run slowly, which is the
+    // trade §17's amendment accepts.
+    //
+    // The result is discarded because these settings exist only on x86, and
+    // `target_info` is reachable with any triple. A *typo* would be discarded
+    // just as quietly, so `the_baseline_is_actually_enabled` reads the flags
+    // back off a finished ISA rather than trusting this loop.
+    for feature in X86_64_V3 {
+        let _ = builder.enable(feature);
+    }
 
     builder
         .finish(shared)
@@ -263,4 +327,77 @@ fn make_isa(options: &CodegenOptions) -> Result<std::sync::Arc<dyn isa::TargetIs
 /// the classification that depends on it live together.
 pub fn is_c_abi(abi: Abi) -> bool {
     abi == Abi::C
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn options(target: Option<&str>) -> CodegenOptions {
+        CodegenOptions {
+            target: target.map(str::to_owned),
+            opt_level: OptLevel::Speed,
+            debug_info: false,
+            checked: false,
+            verify_ir: true,
+        }
+    }
+
+    /// The features `x86-64-v3` names are really on, on both paths.
+    ///
+    /// DECISIONS §17 records the fault this closes: the host path detected
+    /// features and the explicit-triple path did not, so naming your own
+    /// machine's triple produced *different code* from naming nothing. It also
+    /// catches a misspelled setting name, which `make_isa` discards in silence
+    /// because these settings do not exist outside x86.
+    #[test]
+    fn the_baseline_is_actually_enabled() {
+        for target in ["x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"] {
+            let isa = make_isa(&options(Some(target))).expect(target);
+            let flags = isa.isa_flags();
+            for feature in X86_64_V3 {
+                let value = flags
+                    .iter()
+                    .find(|flag| flag.name == feature)
+                    .unwrap_or_else(|| panic!("`{feature}` is not a setting on {target}"));
+                assert_eq!(
+                    value.as_bool(),
+                    Some(true),
+                    "`{feature}` is off for {target}"
+                );
+            }
+        }
+    }
+
+    /// A platform with no convention written down fails loudly.
+    ///
+    /// Guessing System V on an unsupported architecture produces a program that
+    /// links and is wrong — the failure REWRITE-PLAN §8 exists to prevent.
+    #[test]
+    fn an_unsupported_target_has_no_convention() {
+        crate::error::set_panic_on_internal_errors(false);
+        let error = conv_of(&options(Some("aarch64-unknown-linux-gnu")))
+            .expect_err("aarch64 has no convention here");
+        assert!(
+            error.to_string().contains("no C calling convention"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn the_host_and_its_own_triple_agree() {
+        // The two paths through `make_isa`, on the same machine.
+        let host = make_isa(&options(None)).expect("host");
+        let named = make_isa(&options(Some(&target_lexicon::Triple::host().to_string())))
+            .expect("host triple");
+        for feature in X86_64_V3 {
+            let read = |isa: &std::sync::Arc<dyn isa::TargetIsa>| {
+                isa.isa_flags()
+                    .iter()
+                    .find(|flag| flag.name == feature)
+                    .and_then(|flag| flag.as_bool())
+            };
+            assert_eq!(read(&host), read(&named), "`{feature}` differs");
+        }
+    }
 }

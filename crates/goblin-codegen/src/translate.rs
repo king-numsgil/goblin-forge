@@ -26,7 +26,7 @@ use goblin_mir::{
 use crate::abi::{self, Slot as AbiSlot};
 use crate::error::{InternalError, Result};
 use crate::internal_error;
-use crate::layout::{Layouts, Repr, TargetInfo, align_to};
+use crate::layout::{Layouts, Repr, Scalar, TargetInfo, align_to};
 use crate::runtime::{RuntimeFn, RuntimeRefs, STRING_HEADER_BYTES};
 
 /// Where a MIR local lives.
@@ -72,17 +72,18 @@ pub fn translate_signature(
     layouts: &mut Layouts<'_>,
     sig: &Signature,
     call_conv: cranelift_codegen::isa::CallConv,
+    conv: abi::Conv,
 ) -> Result<cranelift_codegen::ir::Signature> {
-    let pointer = layouts.target().pointer_type();
+    let target = layouts.target();
+    let pointer = target.pointer_type();
 
     // At the boundary, an aggregate is not an address — it is the struct, packed
     // into registers or copied onto the stack by rules that differ per platform.
     // Handing a C function an address instead produces an answer made of the
     // address, so `Abi::C` is classified rather than passed our way.
     if sig.abi == Abi::C {
-        let conv = abi::Conv::of_call_conv(call_conv);
         let shape = abi::classify(layouts, sig, conv)?;
-        return Ok(abi::to_signature(&shape, call_conv, pointer));
+        return Ok(crate::clif::to_signature(&shape, call_conv, target));
     }
 
     let mut out = cranelift_codegen::ir::Signature::new(call_conv);
@@ -124,18 +125,16 @@ pub fn translate_signature(
     Ok(out)
 }
 
-fn extended(clif: types::Type, ty: TyId, layouts: &mut Layouts<'_>, abi: Abi) -> Result<AbiParam> {
-    let param = AbiParam::new(clif);
+fn extended(scalar: Scalar, ty: TyId, layouts: &mut Layouts<'_>, abi: Abi) -> Result<AbiParam> {
+    let target = layouts.target();
     // Only the C ABI needs the extension: an internal call has both halves
     // compiled by us, and both agree that the high bits are undefined. Marking
     // it anyway would be harmless but slower.
-    if abi != Abi::C || clif.bits() >= 32 {
-        return Ok(param);
+    if abi != Abi::C {
+        return Ok(AbiParam::new(scalar.clif(target)));
     }
-    Ok(match signedness(layouts, ty) {
-        Some(true) => param.sext(),
-        _ => param.uext(),
-    })
+    let signed = signedness(layouts, ty).unwrap_or(false);
+    Ok(crate::clif::abi_param(scalar, signed, target))
 }
 
 /// `Some(true)` for a signed integer, `Some(false)` for anything else that
@@ -162,6 +161,10 @@ pub struct FunctionTranslator<'a, 'm, M: ClifModule> {
     /// The caller's storage for an aggregate return, when the signature has one.
     sret: Option<Value>,
     call_conv: cranelift_codegen::isa::CallConv,
+    /// The platform C convention. A property of the target, not of the code
+    /// generator, which is why it arrives rather than being read off
+    /// `call_conv` (LLVM-PORT stage 0).
+    conv: abi::Conv,
     target: TargetInfo,
     frontend_config: TargetFrontendConfig,
 }
@@ -170,6 +173,22 @@ pub struct FunctionTranslator<'a, 'm, M: ClifModule> {
 pub struct FuncRefs {
     pub defined: Vec<ClifFuncId>,
     pub imported: Vec<ClifFuncId>,
+}
+
+/// The target, in the terms code generation needs it.
+///
+/// Grouped for the same reason [`ModuleContext`] is: these travel together and
+/// always have. It also draws the line the port runs along — `conv` is a fact
+/// about the platform and survives into the LLVM emitter, while `call_conv` and
+/// `frontend_config` are Cranelift's own and do not.
+#[derive(Clone, Copy)]
+pub struct Machine {
+    pub call_conv: cranelift_codegen::isa::CallConv,
+    /// The platform C convention. Read off the target triple, never off
+    /// `call_conv` — the convention is a property of the platform, and asking
+    /// the code generator for it was asking the wrong thing (LLVM-PORT stage 0).
+    pub conv: abi::Conv,
+    pub frontend_config: TargetFrontendConfig,
 }
 
 /// State shared by every function in one module.
@@ -193,8 +212,7 @@ impl<'a, 'm, M: ClifModule> FunctionTranslator<'a, 'm, M> {
         module: &'m Module,
         clif_module: &'a mut M,
         context: ModuleContext<'a>,
-        call_conv: cranelift_codegen::isa::CallConv,
-        frontend_config: TargetFrontendConfig,
+        machine: Machine,
     ) -> Self {
         let target = layouts.target();
         FunctionTranslator {
@@ -207,9 +225,10 @@ impl<'a, 'm, M: ClifModule> FunctionTranslator<'a, 'm, M> {
             blocks: Vec::new(),
             context,
             sret: None,
-            call_conv,
+            call_conv: machine.call_conv,
+            conv: machine.conv,
             target,
-            frontend_config,
+            frontend_config: machine.frontend_config,
         }
     }
 
@@ -298,8 +317,8 @@ impl<'a, 'm, M: ClifModule> FunctionTranslator<'a, 'm, M> {
             }
             let slot = match repr {
                 Repr::Void => LocalSlot::Empty,
-                Repr::Register(ty) if !addressed.contains(&local) => {
-                    LocalSlot::Register(self.builder.declare_var(ty))
+                Repr::Register(scalar) if !addressed.contains(&local) => {
+                    LocalSlot::Register(self.builder.declare_var(scalar.clif(self.target)))
                 }
                 Repr::Register(_) | Repr::Aggregate => {
                     let layout = self.layouts.layout(decl.ty)?;
@@ -327,8 +346,7 @@ impl<'a, 'm, M: ClifModule> FunctionTranslator<'a, 'm, M> {
         if signature.abi != Abi::C {
             return Ok(None);
         }
-        let conv = abi::Conv::of_call_conv(self.call_conv);
-        Ok(Some(abi::classify(self.layouts, &signature, conv)?))
+        Ok(Some(abi::classify(self.layouts, &signature, self.conv)?))
     }
 
     /// Bind the incoming block parameters to the function's locals.
@@ -437,7 +455,7 @@ impl<'a, 'm, M: ClifModule> FunctionTranslator<'a, 'm, M> {
     fn gather_carriers(
         &mut self,
         source: Value,
-        carriers: &[types::Type],
+        carriers: &[Scalar],
         size: u32,
         align: u32,
     ) -> Result<Vec<Value>> {
@@ -465,10 +483,11 @@ impl<'a, 'm, M: ClifModule> FunctionTranslator<'a, 'm, M> {
 
         let mut out = Vec::with_capacity(carriers.len());
         for (index, carrier) in carriers.iter().enumerate() {
+            let clif = carrier.clif(self.target);
             out.push(
                 self.builder
                     .ins()
-                    .stack_load(pointer, *carrier, scratch, (index * 8) as i32),
+                    .stack_load(pointer, clif, scratch, (index * 8) as i32),
             );
         }
         Ok(out)
@@ -982,7 +1001,8 @@ impl<'a, 'm, M: ClifModule> FunctionTranslator<'a, 'm, M> {
         Ok(match self.layouts.repr(ty)? {
             // A nested aggregate is inline, so its "value" is its address.
             Repr::Aggregate => self.builder.ins().iadd_imm_s(base, i64::from(offset)),
-            Repr::Register(clif) => {
+            Repr::Register(scalar) => {
+                let clif = scalar.clif(self.target);
                 self.builder
                     .ins()
                     .load(clif, MemFlagsData::trusted(), base, offset as i32)
@@ -1246,9 +1266,10 @@ impl<'a, 'm, M: ClifModule> FunctionTranslator<'a, 'm, M> {
             return match self.slot(place.local)? {
                 LocalSlot::Register(var) => Ok(self.builder.use_var(var)),
                 LocalSlot::Memory { slot, ty } => {
-                    let Repr::Register(clif) = self.layouts.repr(ty)? else {
+                    let Repr::Register(scalar) = self.layouts.repr(ty)? else {
                         internal_error!("an aggregate reached the scalar load path");
                     };
+                    let clif = scalar.clif(self.target);
                     let pointer = self.target.pointer_type();
                     Ok(self.builder.ins().stack_load(pointer, clif, slot, 0))
                 }
@@ -1260,9 +1281,10 @@ impl<'a, 'm, M: ClifModule> FunctionTranslator<'a, 'm, M> {
         }
 
         let (address, offset) = self.place_address(place)?;
-        let Repr::Register(clif) = self.layouts.repr(ty)? else {
+        let Repr::Register(scalar) = self.layouts.repr(ty)? else {
             internal_error!("an aggregate reached the scalar load path");
         };
+        let clif = scalar.clif(self.target);
         Ok(self
             .builder
             .ins()
@@ -1671,15 +1693,11 @@ impl<'a, 'm, M: ClifModule> FunctionTranslator<'a, 'm, M> {
         let ty = self.place_type(place)?;
         match self.layouts.repr(ty)? {
             Repr::Void => Ok(()),
-            Repr::Register(clif) => {
-                let zero = if clif.is_float() {
-                    if clif == types::F32 {
-                        self.builder.ins().f32const(0.0)
-                    } else {
-                        self.builder.ins().f64const(0.0)
-                    }
-                } else {
-                    self.builder.ins().iconst(clif, 0)
+            Repr::Register(scalar) => {
+                let zero = match scalar {
+                    Scalar::F32 => self.builder.ins().f32const(0.0),
+                    Scalar::F64 => self.builder.ins().f64const(0.0),
+                    _ => self.builder.ins().iconst(scalar.clif(self.target), 0),
                 };
                 self.write_place(place, Some(zero))
             }
@@ -1962,12 +1980,13 @@ impl<'a, 'm, M: ClifModule> FunctionTranslator<'a, 'm, M> {
                 Some(self.builder.ins().iconst(types::I8, i64::from(*value)))
             }
             Const::Int { bits, ty } => {
-                let Repr::Register(clif) = self.layouts.repr(*ty)? else {
+                let Repr::Register(scalar) = self.layouts.repr(*ty)? else {
                     internal_error!("an integer constant with a non-register type");
                 };
                 // The frontend has already folded any sign into the bit
                 // pattern and range-checked the result, so this is a
                 // reinterpretation and never a conversion.
+                let clif = scalar.clif(self.target);
                 Some(self.builder.ins().iconst(clif, *bits as i64))
             }
             Const::Float { bits, ty } => {
@@ -2181,9 +2200,10 @@ impl<'a, 'm, M: ClifModule> FunctionTranslator<'a, 'm, M> {
             .operand(operand)?
             .ok_or_else(|| InternalError::new("a cast operand produced no value"))?;
         let from_ty = self.operand_type(operand)?;
-        let Repr::Register(target) = self.layouts.repr(to)? else {
+        let Repr::Register(to_scalar) = self.layouts.repr(to)? else {
             internal_error!("casting to a non-register type");
         };
+        let target = to_scalar.clif(self.target);
         let source = self.builder.func.dfg.value_type(value);
 
         Ok(match op {
@@ -2536,7 +2556,8 @@ impl<'a, 'm, M: ClifModule> FunctionTranslator<'a, 'm, M> {
                     self.module.sig(callee_sig).cloned().ok_or_else(|| {
                         InternalError::new("a call to a signature that is missing")
                     })?;
-                let clif_sig = translate_signature(self.layouts, &signature, self.call_conv)?;
+                let clif_sig =
+                    translate_signature(self.layouts, &signature, self.call_conv, self.conv)?;
                 let sig_ref = self.builder.import_signature(clif_sig);
                 self.builder.ins().call_indirect(sig_ref, address, &values)
             }

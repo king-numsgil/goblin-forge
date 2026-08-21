@@ -70,9 +70,19 @@ export function buildRuntime(target?: string): RuntimeBuild {
     if (target !== undefined) {
         args.push("--target", target);
     }
+    // The same baseline the compiler itself targets (DECISIONS §17's
+    // amendment). Without this the runtime — which already goes through LLVM —
+    // is built at the x86-64 baseline while the code calling it is built for
+    // `x86-64-v3`, so `gf_string_concat` and friends are the one part of a
+    // program compiled for a 2003 CPU.
+    //
+    // rustc spells it `-C target-cpu`; clang spells the same value `-march`,
+    // and `llc` spells it `-mcpu`. Getting the spelling wrong is an error
+    // rather than a silent fallback, which is the one merciful thing about it.
+    args.push("--", "-C", "target-cpu=x86-64-v3");
     // `--print native-static-libs` reports what a staticlib needs on stderr, as
     // part of an ordinary build, so this is not a second compilation.
-    args.push("--", "--print", "native-static-libs");
+    args.push("--print", "native-static-libs");
 
     const result = spawnSync("cargo", args, {
         cwd: RUNTIME_CRATE(),
