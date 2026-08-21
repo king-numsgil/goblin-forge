@@ -12,6 +12,8 @@ goblin-mir.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 
-
+# Triple parsing: the pointer width, the operating system, and therefore the C
+# convention and the debug-info format. Nothing here links LLVM — `clang` is
+# invoked as a subprocess (DECISIONS §17).
 target-lexicon = "0.13"
 cc.workspace = true

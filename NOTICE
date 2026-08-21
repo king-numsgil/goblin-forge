@@ -25,15 +25,10 @@ Linked into compiled output
 These end up inside binaries this compiler produces, which is the case where
 attribution obligations follow the artefact rather than the repository.
 
-  Cranelift                       Apache-2.0 WITH LLVM-exception
-  (cranelift-codegen, -frontend, -module, -native, -object)
-  Bytecode Alliance
-  https://github.com/bytecodealliance/wasmtime
-  Code generation. Its output is machine code in every binary produced.
-
-  target-lexicon                  Apache-2.0 WITH LLVM-exception
-  Bytecode Alliance
-  https://github.com/bytecodealliance/target-lexicon
+LLVM is deliberately not in this list. `clang` compiles the IR this compiler
+emits, but it is invoked as a *subprocess* — a tool the compiler requires, like
+the linker, rather than a library linked into it or into what it produces
+(DECISIONS §17). Nothing of LLVM's ends up in a Goblin binary.
 
   libc                            MIT OR Apache-2.0
   The Rust Project Developers
@@ -84,9 +79,10 @@ Used to build the compiler
   https://github.com/jamesmunns/postcard
   The wire format the MIR crosses the napi boundary in.
 
-  object                          Apache-2.0 OR MIT
-  https://github.com/gimli-rs/object
-  Object-file writing, beneath cranelift-object.
+  target-lexicon                  Apache-2.0 WITH LLVM-exception
+  Bytecode Alliance
+  https://github.com/bytecodealliance/target-lexicon
+  Triple parsing, for the pointer width and the platform's C convention.
 
   anyhow                          MIT OR Apache-2.0
   thiserror                       MIT OR Apache-2.0
@@ -118,5 +114,5 @@ Used to test the compiler
 
 `SPDX-License-Identifier: Apache-2.0` is the identifier for this project's own
 code. Dual-licensed dependencies above ("MIT OR Apache-2.0") are used under
-Apache-2.0, so that one licence covers the whole; the LLVM exception on the
-Cranelift crates is an additional permission and imposes nothing extra.
+Apache-2.0, so that one licence covers the whole; the LLVM exception on
+`target-lexicon` is an additional permission and imposes nothing extra.

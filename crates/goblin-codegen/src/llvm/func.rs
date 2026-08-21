@@ -1,17 +1,21 @@
 //! MIR function bodies as LLVM IR.
 //!
-//! LLVM-PORT stage 3. The MIR is already a CFG, so this is close to a
-//! transcription — and, as in `translate.rs`, it is **not** a place where
-//! decisions get made. Copy versus move, initialisation versus assignment,
-//! where a drop goes: all settled by the frontend, and this file obeys.
+//! The MIR is already a CFG, so this is close to a transcription — and it is
+//! **not** a place where decisions get made. Copy versus move, initialisation
+//! versus assignment, where a drop goes: all settled by the frontend, and this
+//! file obeys.
 //!
 //! ## Every local is an `alloca`
 //!
-//! `translate.rs` decides per local between an SSA `Variable` and a stack slot,
-//! because cranelift-frontend builds SSA and inserts block parameters. LLVM has
-//! no such helper and needs none: MIR blocks carry no parameters, so the answer
-//! is clang's own — one `alloca` per local in the entry block, and `mem2reg`
-//! builds the SSA. The three-way `LocalSlot` collapses to one case.
+//! MIR blocks carry no parameters, so there are no phis to construct and no
+//! need for the SSA-building machinery a code generator usually supplies. The
+//! answer is clang's own: one `alloca` per local in the entry block, and
+//! `mem2reg` turns the promotable ones into registers.
+//!
+//! **In the entry block, always** — including the scratch slots this file asks
+//! for mid-body, which `scratch_slot` hoists. An `alloca` inside a loop is a
+//! fresh allocation per iteration, so the stack grows without bound, and
+//! `mem2reg` will not promote one either.
 //!
 //! The consequence, said out loud so it is not discovered as a regression: at
 //! `optLevel: "none"` LLVM does not run `mem2reg`, so every local really does

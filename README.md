@@ -557,7 +557,10 @@ All of them are declared or valid TypeScript, and all of them produce a
         ▼
   packages/backend    the native addon
   crates/goblin-mir       the MIR, defined once, in Rust
-  crates/goblin-codegen   layout, Cranelift, linking
+  crates/goblin-codegen   layout, ABI, LLVM IR, linking
+        │  one .ll, one clang
+        ▼
+  build/main.ll → main.o → the linker
 ```
 
 One process. The MIR is defined once, in Rust, and the TypeScript types *and*
@@ -571,7 +574,7 @@ cannot drift.
 | `packages/runtime` | `global.d.ts`, the tsconfig base, and the native runtime library |
 | `packages/backend` | the napi addon, the generated MIR bindings, and the MIR builder |
 | `crates/goblin-mir` | the MIR, plus the generator that projects it into TypeScript |
-| `crates/goblin-codegen` | layout and repr, Cranelift translation, object emission, linking |
+| `crates/goblin-codegen` | layout and repr, the C ABI, LLVM IR emission, linking |
 | `tests/` | real source → real compiler → real binary → real output |
 | `examples/hello` | a build script you can run |
 
@@ -607,7 +610,10 @@ answered.
 Apache License 2.0 — see [`LICENSE`](LICENSE).
 
 [`NOTICE`](NOTICE) attributes the projects this is built on, and separates the
-ones that end up *inside* a compiled program — Cranelift, `target-lexicon`, and
-`libc` and mimalloc by way of the runtime — from the ones that only build or
-test the compiler. That distinction is the one that matters if you ship what this
-produces.
+ones that end up *inside* a compiled program — `libc` and mimalloc, by way of
+the runtime — from the ones that only build or test the compiler. That
+distinction is the one that matters if you ship what this produces.
+
+LLVM is not in either list, and the reason is the design: `clang` is invoked as
+a subprocess, so it is a *tool this compiler requires*, like the linker, rather
+than a library linked into it or into what it produces.

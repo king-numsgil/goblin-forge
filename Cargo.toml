@@ -24,14 +24,13 @@ anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 postcard = { version = "1", features = ["use-std"] }
 thiserror = "2"
-ts-rs = "12"
 
 napi = { version = "3", default-features = false, features = ["napi9"] }
 napi-derive = "3"
 napi-build = "2"
 
-
-object = "0.37"
+# `cc` is here for `windows_registry`, which finds `link.exe` and `lib.exe`.
+# Nothing in this repository compiles C.
 cc = "1"
 mimalloc = "0.1"
 

@@ -8,18 +8,28 @@ person — or the next session — can pick it up cold.
   answers. Read it before re-litigating anything.
 - This file is *where the code is* and *what it does not do yet*.
 
-736 TS tests, 6 Rust test binaries, `tsc --noEmit` clean, `cargo clippy
---workspace --all-targets -D warnings` clean. `cargo fmt --all --check` is clean
-on the toolchain this was written against but not on rustfmt 1.9 — see the last
-section for why that was left alone.
+907 TS tests, 48 compiler Rust tests, 6 runtime Rust tests, `tsc --build` clean,
+`cargo clippy --workspace --all-targets -D warnings` clean. Green on Windows and
+on Linux.
 
 REWRITE-PLAN §12's build order is finished. What is left is not a milestone: it
 is the list under "What it does not have yet".
+
+**The backend is LLVM.** Cranelift is gone — DECISIONS §17 is the decision and
+[`LLVM-PORT.md`](LLVM-PORT.md) is the record of doing it. A module is rendered
+as LLVM IR text, written beside the object, and compiled by a `clang`
+subprocess. Anything in this file that still describes Cranelift is a bug in
+this file.
 
 **System V has now been run for real** — Ubuntu, x86_64, GCC 15, the whole suite
 green from a cold checkout. §6 asked for that on day one and it took until after
 milestone 10; see "What the first System V run found" below for the two things
 it caught, only one of which was about System V.
+
+The two most recent bugs were both "passes on Windows, fails on Linux": a test
+that hardcoded CodeView while compiling for the host, and a runtime crate that
+only built in release. Neither was a compiler defect and both cost a round trip,
+which is the argument for turning the CI Linux job back on.
 
 ---
 
@@ -39,29 +49,48 @@ compile(options)                          packages/forge/src/compile.ts
   3. encodeModule() → Backend.compileModule()
        generated postcard encoder         packages/backend/js/mir.generated.ts
        ── napi boundary ──
-       decode + layout + Cranelift        crates/goblin-codegen/
+       decode                             crates/goblin-mir/
+       layout + ABI + IR text             crates/goblin-codegen/src/llvm/
+       ── clang, as a subprocess ──       build/<module>.ll → .o
   4. buildRuntime() + Backend.link()      packages/runtime/src/build.ts
 ```
+
+The `.ll` is kept beside the object, always. It costs nothing and it is the
+first thing to read when the backend is suspected — DECISIONS §17 chose text IR
+and a subprocess partly for that.
 
 ## Where things live
 
 | Path | Lines | What it is |
 |---|---:|---|
-| `crates/goblin-mir/src/ty.rs` | 235 | `TyKind`, `Category`, `StorageClass`, `Signature`, `Abi` |
-| `crates/goblin-mir/src/body.rs` | 428 | `Place`, `Operand`, `Rvalue`, `Statement`, `Terminator`, `UnwindAction` |
-| `crates/goblin-mir/src/bindings.rs` | 610 | **generates** the TS types *and* the postcard encoder |
-| `crates/goblin-mir/src/schema.rs` | 174 | reflection over the type graph, wire fingerprint |
-| `crates/goblin-codegen/src/layout.rs` | 277 | `Layout` (bytes) and `Repr` (registers) — §5.2's two questions |
-| `crates/goblin-codegen/src/abi.rs` | 626 | Win64 + System V classification, with unit tests |
-| `crates/goblin-codegen/src/translate.rs` | 1789 | MIR → Cranelift. The big one. |
-| `crates/goblin-codegen/src/vtable.rs` | 199 | per-class descriptor, vtable and itabs, as static data |
-| `crates/goblin-codegen/src/runtime.rs` | 153 | runtime symbols, string literal data layout |
-| `crates/goblin-codegen/src/link.rs` | 199 | linker discovery, lifted from v1 |
-| `packages/forge/src/lower.ts` | 2701 | AST → MIR. The other big one. |
-| `packages/forge/src/classes.ts` | 313 | class discovery, field/vtable flattening, slot assignment |
-| `packages/forge/src/drop-elaboration.ts` | 461 | §5.1's pass: initialisedness dataflow, drop flags |
-| `packages/runtime/native/src/lib.rs` | 369 | string runtime, `console`, live-allocation counter |
-| `packages/runtime/global.d.ts` | — | **the entire language surface** |
+Line counts are a rough guide to where the weight is, not a promise.
+
+| Path | Lines | What it is |
+|---|---:|---|
+| `crates/goblin-mir/src/ty.rs` | 388 | `TyKind`, `Category`, `StorageClass`, `Signature`, `Abi` |
+| `crates/goblin-mir/src/body.rs` | 591 | `Place`, `Operand`, `Rvalue`, `Statement`, `Terminator`, `UnwindAction` |
+| `crates/goblin-mir/src/bindings.rs` | 632 | **generates** the TS types *and* the postcard encoder |
+| `crates/goblin-mir/src/schema.rs` | 172 | reflection over the type graph, wire fingerprint |
+| `crates/goblin-codegen/src/layout.rs` | 459 | `Layout` (bytes), `Repr`/`Scalar` (registers) — §5.2's two questions |
+| `crates/goblin-codegen/src/abi.rs` | 734 | Win64 + System V classification, with unit tests |
+| `crates/goblin-codegen/src/llvm/func.rs` | 2467 | MIR bodies → LLVM IR. The big one. |
+| `crates/goblin-codegen/src/llvm/sig.rs` | 225 | a signature as `declare`/`define`/`call` want it |
+| `crates/goblin-codegen/src/llvm/ty.rs` | 242 | MIR types → LLVM types, packed with padding spelled out |
+| `crates/goblin-codegen/src/llvm/vtable.rs` | 218 | per-class descriptor, vtable and itabs, as constants |
+| `crates/goblin-codegen/src/llvm/data.rs` | 207 | constants with relocations; string literals |
+| `crates/goblin-codegen/src/llvm/debug.rs` | 239 | `DIFile`/`DISubprogram`/`DILocation` — CodeView or DWARF |
+| `crates/goblin-codegen/src/llvm/driver.rs` | 128 | write the `.ll`, run clang |
+| `crates/goblin-codegen/src/runtime.rs` | 130 | runtime symbols, string literal data layout |
+| `crates/goblin-codegen/src/link.rs` | 468 | linker discovery, lifted from v1 and never ported |
+| `packages/forge/src/lower/body.ts` | 4395 | statements and expressions → MIR. The other big one. |
+| `packages/forge/src/lower/module.ts` | 2210 | declarations, signatures, the module shell |
+| `packages/forge/src/lower/width.ts` | 1167 | §7's width rules |
+| `packages/forge/src/lower/intrinsics.ts` | 1077 | `alloc`, `sizeOf`, `cstring`, and the rest |
+| `packages/forge/src/classes.ts` | 717 | class discovery, field/vtable flattening, slot assignment |
+| `packages/forge/src/drop-elaboration.ts` | 501 | §5.1's pass: initialisedness dataflow, drop flags |
+| `packages/runtime/native/src/lib.rs` | 1328 | string runtime, `console`, live-allocation counter |
+| `packages/runtime/global.d.ts` | 1066 | **the entire language surface** |
+| `packages/runtime/build-config.d.ts` | 126 | what a build script exports, for the editor |
 
 ## Commands
 
@@ -387,51 +416,44 @@ wider values through stdout.
 
 ## What the backend optimises, and what it does not
 
-Cranelift 0.134. `optLevel` defaults to `"speed"` (`compile.ts`), and `"size"`
-maps to Cranelift's `speed_and_size` rather than to a pure size mode.
+`clang` does, and `driver.rs` is the whole of what it is told:
+`-O0` / `-O2` / `-Oz` from `optLevel`, `--target=` from the triple,
+`-march=x86-64-v3` unconditionally, `-fPIC` off Windows. So the pass pipeline is
+LLVM's own at that level — inlining, SROA, GVN, LICM, the vectorisers — and
+nothing here reimplements or configures any of it.
 
-From `Context::optimize`, at `"speed"`:
+Three consequences worth knowing before profiling anything.
 
-| Runs | What |
-|---|---|
-| always, every level | unreachable-code elimination, constant-phi removal, alias resolution; then instruction selection, regalloc2, branch ordering and emission in `isa.compile_function` |
-| `opt_level != none` | `egraph_pass` — the mid-end: GVN, constant folding, algebraic rewrites, LICM, and redundant-load elimination through `AliasAnalysis` |
+**`optLevel: "none"` is genuinely unoptimised.** Every local is an `alloca` in
+the entry block and `mem2reg` is what turns those into registers; at `-O0` it
+does not run, so a debug build really does keep every local in memory. That is
+what `clang -O0` does and it is correct. The harness compiles at `"none"`, so
+test binaries are slower than a release build by more than the usual margin.
 
-`enable_alias_analysis` is left at its default of `true`; Cranelift documents it
-as effective only at `speed` / `speed_and_size`, so the default level is what
-switches it on.
+**Inlining and SROA are the reason the port happened.** DECISIONS §17: Cranelift
+had an inliner but no scalar replacement, so inlining a `dvec3` operator left
+the callee's body plus a stack slot, and a four-operator chain was four slots
+and eight round trips. Both are now free at `-O2` and the "largest single
+performance item outstanding" that this section used to describe is closed.
 
-**The IR verifier is off unless `strictInternalErrors` is set.** Cranelift
-defaults `enable_verifier` to `true` and runs it *twice* per function — once in
-`Context::compile`, once inside `Context::optimize`. It checks that the CLIF
-this compiler produced is well formed, which says nothing about the program
-being compiled, so it is a pure compile-time cost in a shipped build. It is now
-tied to the flag that already means "a compiler bug should be loud here"
-(REWRITE-PLAN §8), which the test harness sets — so every test still compiles
-with it on. If the two ever need to be separated, `verify_ir` on
-`CodegenOptions` is the seam.
+**No `nsw`, `nuw`, `noalias`, TBAA or fast-math flags are emitted, anywhere.**
+That costs some performance and is deliberate: §17 names the hazard as asserting
+one *accidentally* and having it be true for two years. `Emitter::binary` is the
+one place such a flag could be attached and it is empty. Turning any of them on
+is a decision, not an optimisation.
 
-**Nothing is inlined — worth researching.** Cranelift 0.134 does have an
-inliner, but `Context::inline(impl Inline)` is caller-driven: the embedder
-supplies the policy and calls it. `object.rs` only calls `define_function`, so
-no call is ever inlined. For a value-semantics language whose ordinary shape is
-small accessors, one-line methods and `this`-borrowing wrappers, that is
-probably the largest single performance item outstanding. Open questions before
-attempting it: where the policy lives (a size heuristic in `object.rs`, or
-something the frontend marks in the MIR), whether it can run at all when each
-module is compiled to its own object file, and what it does to compile time —
-which is the budget this project has otherwise been careful with.
-
-A smaller note: host builds go through `cranelift_native::builder()` and pick
-up the host's CPU features. An explicit `--target` triple goes through
-`isa::lookup()`, which is **baseline only** — so a cross-compiled binary is
-more conservative than a native build of the same source.
+Two things that are *not* optional and are checked rather than assumed. The
+`x86-64-v3` baseline reaches the object — `the_avx2_baseline_reaches_the_object`
+compiles a 256-bit `fadd` and requires a VEX-encoded `vaddpd` on a YMM register.
+And a shift is masked before it is emitted, because a shift of at least the
+value's width is *poison* in LLVM where Cranelift and the hardware both mask it.
 
 ---
 
 ## Classes, as built
 
-Read this before touching `classes.ts` or the class paths in `translate.rs`.
+Read this before touching `classes.ts` or the class paths in `llvm/func.rs` and
+`llvm/vtable.rs`.
 
 **Fields and vtables are flattened at lowering, base entries first.** A
 `FieldId` and a vtable slot therefore mean the same thing whatever the static
@@ -664,18 +686,24 @@ handing back a plausible answer, which is why 727 tests and a C++ oracle had
 never noticed. It is not a Linux bug — Linux is only where it stopped being
 silent, which is exactly the argument §6 makes for running the second platform.
 
-The fix is `assignment_overlaps` / `assign_overlapping` in `translate.rs`: when
-an assignment reads the local it writes, the new value is built *before* the old
-one is destroyed. Aggregates clone into a stack temporary and then move the bytes
-home; a one-word handle needs no temporary, because the clone is already a
-separate value by the time the old handle is released. A move out of the very
-place being assigned is a no-op — the value is already there, and destroying
-would release the thing being moved in.
+The fix is that an assignment builds the new value **before** destroying the old
+one. `Statement::Assign` in `llvm/func.rs` does that unconditionally rather than
+testing for overlap: an aggregate is written into a scratch slot and then moved
+home, and a one-word handle is already a separate value by the time the old one
+is released. Paying for a temporary is the better half of the trade — the other
+half is proving two places do not alias, and being wrong about it corrupts the
+heap.
 
-The overlap test is **by local, not by place**: `a[i] = a[j]` takes the careful
-path whether or not the indices turn out to be equal. Paying for a temporary is
-the better half of that trade — the other half is proving two indices differ,
-and being wrong about it corrupts the heap.
+The second half of the same rule is that **`Operand::Move` poisons the source
+with null**. The frontend legitimately emits `_1 <- move _4` onto a binding
+already moved out of, and without the null that assignment's destroy is a double
+free. Only a one-word handle can be poisoned; an aggregate's "value" is its
+address and there is no single word to clear, which is why drop elaboration
+rather than the backend is what stops a moved-from aggregate being destroyed.
+
+The LLVM port re-learned this the hard way: the port had the ordering right and
+the poisoning missing, and `s = move(s)` hung. Dumping the MIR found it in a
+minute where reasoning about it had not.
 
 `rvalue_reads` is the third member of the `rvalue_places` / `rvalue_operands`
 pair, and the same warning applies: **an rvalue that reads a place and is not

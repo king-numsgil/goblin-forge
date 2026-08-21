@@ -74,6 +74,27 @@ do nothing, and the reason was a stale addon.
 Changing the runtime (`packages/runtime/native`) needs no manual step; it is
 built on demand by `cargo rustc` for the user's target and cached per process.
 
+**The runtime is its own cargo workspace**, deliberately — it is built for the
+*user's* target, not the host. So `cargo build --workspace`, `cargo test
+--workspace` and `cargo clippy --workspace` do not reach it, and neither does
+anything in the checklist below unless it names that directory. That is how a
+`panic = "abort"` set only under `[profile.release]` left `cargo build` there
+failing for two days with six tests behind it that nobody could run.
+
+## The toolchain a build needs
+
+`clang` on `PATH`, and a linker. The backend emits LLVM IR as text and compiles
+it with `clang -c`, so a machine without one cannot build a program — see
+DECISIONS §17 for why a subprocess rather than `llvm-sys`, and note that the
+compiler already shells out to `cargo` and to the linker, so this is the status
+quo rather than a new class of dependency.
+
+`GOBLIN_CLANG` names a specific one. `llvm-objdump` is wanted only by tests, and
+they fall back to GNU `objdump`.
+
+The `.ll` is written beside every object and kept. When the backend is
+suspected, read it first — that is half of what text IR was chosen for.
+
 ## The wire format
 
 The MIR is defined once, in Rust, and the TypeScript types *and their postcard
@@ -155,9 +176,20 @@ names the ones nothing can reach, with the reason.
 - Development happens on `master`. Commit there directly.
 - Comments explain *why*, not what. The existing source is the reference for
   tone and density — match it rather than adding a different register.
-- `bun run typecheck`, `cargo test`, and `bun test` should all be clean before
-  a commit. So should `cargo clippy --workspace --all-targets -- -D warnings`,
-  which CI enforces.
+- `bun run typecheck`, `cargo test --workspace`, and `bun test` should all be
+  clean before a commit. So should
+  `cargo clippy --workspace --all-targets -- -D warnings`.
+- **And the same two in `packages/runtime/native`**, which is a separate
+  workspace that none of the above reaches. Four commands, not two:
+
+  ```console
+  cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings
+  cd packages/runtime/native && cargo test && cargo clippy --all-targets -- -D warnings
+  ```
+- Green on one platform is not green. The last two defects were both "passes on
+  Windows, fails on Linux" — a test that hardcoded CodeView, and the runtime
+  profile above. `.github/workflows/ci.yml` has the Linux job and is parked on
+  `workflow_dispatch`; run it by hand, or expect to find these the slow way.
 - Avoid raw NUL bytes in source. One in `lower.ts` made git treat the file as
   binary and ripgrep skip it, which silently broke every grep over the largest
   file in the project. Write `\0` in a string literal instead.

@@ -14,7 +14,7 @@
  *
  * Each program below is valid TypeScript that tsc accepts. Every one of them
  * should end at a `GF####` with a file and a line. The ones marked failing end
- * at a panic in `crates/goblin-codegen/src/translate.rs` instead.
+ * at a panic in `crates/goblin-codegen/src/llvm/func.rs` instead.
  */
 
 import { describe, expect, test } from "bun:test";
