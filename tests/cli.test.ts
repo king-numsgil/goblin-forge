@@ -108,6 +108,38 @@ describe("`init`", () => {
         );
     });
 
+    /**
+     * A build script is the one file in a project tsserver otherwise knows
+     * nothing about: the tsconfig covers `src/`, and a build script is not
+     * source. So the type it is checked against has to arrive some other way,
+     * and a reference line is the way that needs no configuration at all.
+     */
+    test("a build script gets its own type, and the seeded one uses it", () => {
+        expect(readFileSync(join(dir, ".goblin", "build.d.ts"), "utf8")).toBe(
+            readFileSync(join(REPO, "packages", "runtime", "build-config.d.ts"), "utf8"),
+        );
+
+        const script = readFileSync(join(dir, "build.ts"), "utf8");
+        expect(script).toContain(`/// <reference path="./.goblin/build.d.ts" />`);
+        // `satisfies` rather than an annotation: it checks the object without
+        // widening it, so the literal keeps its exact types and an unknown key
+        // is an error rather than being quietly ignored.
+        expect(script).toContain("satisfies GoblinBuild;");
+    });
+
+    test("a build refreshes the build script's type, not just `init`", () => {
+        // The same reason the prelude is rewritten every run: a stale copy
+        // describes a compiler that is no longer the one about to run, and the
+        // symptom is an editor disagreeing with a build that succeeds.
+        const path = join(dir, ".goblin", "build.d.ts");
+        writeFileSync(path, "declare type GoblinBuild = { stale: true };\n", "utf8");
+        const result = run(dir);
+        expect(result.status).toBe(0);
+        expect(readFileSync(path, "utf8")).toBe(
+            readFileSync(join(REPO, "packages", "runtime", "build-config.d.ts"), "utf8"),
+        );
+    }, TIMEOUT);
+
     test("seeds a project that builds without being edited", () => {
         const result = run(dir);
         expect({status: result.status, stderr: result.stderr}).toEqual({status: 0, stderr: ""});

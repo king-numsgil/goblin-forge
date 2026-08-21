@@ -24,6 +24,15 @@ import { EMBEDDED } from "./embedded.generated.ts";
 /** Where the compiler's own files ended up. */
 export interface Materialised {
     readonly globalDeclarations: string;
+    /**
+     * The build script's type, for the editor.
+     *
+     * Nothing in the compiler reads this one — it is written for tsserver, so a
+     * build script can say `satisfies GoblinBuild` and get completion on the
+     * fields and their values. It is refreshed like the others because a stale
+     * copy would describe a compiler that no longer exists.
+     */
+    readonly buildDeclarations: string;
     readonly tsconfigBase: string;
     readonly runtimeCrate: string;
 }
@@ -51,6 +60,7 @@ export function materialise(root: string): Materialised {
 
     return {
         globalDeclarations: write(join(root, "global.d.ts"), EMBEDDED.globalDeclarations),
+        buildDeclarations: write(join(root, "build.d.ts"), EMBEDDED.buildDeclarations),
         tsconfigBase: write(join(root, "tsconfig.base.json"), EMBEDDED.tsconfigBase),
         runtimeCrate: (() => {
             write(join(crate, "Cargo.toml"), EMBEDDED.runtimeCargo);

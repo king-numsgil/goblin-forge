@@ -19,6 +19,7 @@ const runtime = join(repo, "packages", "runtime");
 
 const sources = {
     globalDeclarations: join(runtime, "global.d.ts"),
+    buildDeclarations: join(runtime, "build-config.d.ts"),
     tsconfigBase: join(runtime, "tsconfig.base.json"),
     runtimeCargo: join(runtime, "native", "Cargo.toml"),
     runtimeSource: join(runtime, "native", "src", "lib.rs"),

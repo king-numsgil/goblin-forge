@@ -1,3 +1,5 @@
+/// <reference path="../../runtime/build-config.d.ts" />
+
 /**
  * `goblin-forge` — the compiler as one executable.
  *
@@ -45,12 +47,42 @@ const VERSION = "0.1.0";
 /**
  * What a build script exports.
  *
- * `CompileOptions` minus the two the tool supplies: `root`, which is the
- * script's own directory, and `tsconfig`, which defaults to the one beside it.
+ * `CompileOptions` minus what the tool supplies: `root` is the script's own
+ * directory, `tsconfig` defaults to the one beside it, and `onProgress` is the
+ * CLI's — it is overwritten below unless `--quiet`, so advertising it would be
+ * a lie.
  */
-export type BuildConfig = Omit<CompileOptions, "root"> & {
+export type BuildConfig = Omit<CompileOptions, "root" | "tsconfig" | "onProgress"> & {
     readonly root?: string;
+    readonly tsconfig?: string;
 };
+
+/**
+ * The editor's copy of that type and this one are the same shape.
+ *
+ * `packages/runtime/build-config.d.ts` declares `GoblinBuild`, which is written
+ * into a project's `.goblin/` and is what a build script's `satisfies` names.
+ * It is a hand-written mirror of the type above, so the only thing stopping the
+ * two from drifting is this check — a field added to `CompileOptions` and not
+ * to the declaration, or a value spelled differently in one, fails
+ * `bun run typecheck` rather than silently leaving the editor describing a
+ * compiler that no longer exists.
+ *
+ * Keys *and* assignability, because they catch different mistakes: an added
+ * field shows up in the key comparison, and a changed union — a new `optLevel`,
+ * say — shows up in the other.
+ */
+type Assert<T extends true> = T;
+type _BuildConfigKeysMatch = Assert<
+    [Exclude<keyof BuildConfig, keyof GoblinBuild>] extends [never]
+        ? [Exclude<keyof GoblinBuild, keyof BuildConfig>] extends [never]
+            ? true
+            : false
+        : false
+>;
+type _BuildConfigShapesMatch = Assert<
+    GoblinBuild extends BuildConfig ? (BuildConfig extends GoblinBuild ? true : false) : false
+>;
 
 /** A build script may export the config, or a function that produces it. */
 type BuildModule = {
@@ -71,12 +103,18 @@ own directory, not the working directory.
 
 EXAMPLE
   // build.ts
+  /// <reference path="./.goblin/build.d.ts" />
   export default {
     entry: "./src/main.ts",
     output: "./bin/app",
     type: "bin",              // or "static-lib" / "shared-lib"
     optLevel: "speed",        // "none" | "speed" | "size"
-  };
+  } satisfies GoblinBuild;
+
+The reference line and the \`satisfies\` are optional — a build script without
+them builds the same. They are what gives an editor completion on the fields and
+their values; \`.goblin/build.d.ts\` is written by \`init\` and refreshed by every
+build, so it always describes the compiler that is about to run.
 `;
 
 /**
@@ -93,6 +131,17 @@ EXAMPLE
  * declaring the same globals.
  */
 const PROJECT_DIR = ".goblin";
+
+/**
+ * How a build script reaches its own type.
+ *
+ * A reference line rather than an import, because a build script is not part of
+ * the project's tsconfig — that covers `src/`, and a build script is not source
+ * — so there is no program for a module import to resolve inside. A reference
+ * pulls the declaration in on its own, which works in a bare editor with no
+ * configuration at all.
+ */
+const BUILD_REFERENCE = `/// <reference path="./${PROJECT_DIR}/build.d.ts" />`;
 
 /**
  * Where extracted files live.
@@ -268,7 +317,11 @@ async function main(argv: readonly string[]): Promise<number> {
  */
 function init(root: string): number {
     const files = materialise(join(root, PROJECT_DIR));
-    const written: string[] = [`${PROJECT_DIR}/global.d.ts`, `${PROJECT_DIR}/tsconfig.base.json`];
+    const written: string[] = [
+        `${PROJECT_DIR}/global.d.ts`,
+        `${PROJECT_DIR}/build.d.ts`,
+        `${PROJECT_DIR}/tsconfig.base.json`,
+    ];
 
     const seed = (relative: string, contents: string): void => {
         const path = join(root, relative);
@@ -305,12 +358,13 @@ function init(root: string): number {
 
     seed(
         "build.ts",
-        `export default {
+        `${BUILD_REFERENCE}
+export default {
     entry: "./src/main.ts",
     output: "./bin/app",
     type: "bin",
     optLevel: "speed",
-};
+} satisfies GoblinBuild;
 `,
     );
 
