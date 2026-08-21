@@ -14,6 +14,7 @@
 //! [`LLVM-PORT.md`]: ../../../../LLVM-PORT.md
 
 pub mod data;
+pub mod debug;
 pub mod driver;
 pub mod func;
 pub mod sig;
@@ -85,7 +86,13 @@ pub struct Emitted {
 }
 
 /// Render a whole module as LLVM IR text.
-pub fn emit_module(module: &Module, target: TargetInfo, conv: Conv) -> Result<Emitted> {
+pub fn emit_module(
+    module: &Module,
+    target: TargetInfo,
+    conv: Conv,
+    debug_info: bool,
+    windows: bool,
+) -> Result<Emitted> {
     let mut layouts = Layouts::new(module, target);
     let mut types = Types::new();
     let name = module.sym(module.name).unwrap_or("module");
@@ -145,6 +152,7 @@ pub fn emit_module(module: &Module, target: TargetInfo, conv: Conv) -> Result<Em
     // is what discovers the names they refer to.
     let mut globals = Globals::new();
     let classes = crate::llvm::vtable::emit(module, &mut globals, target)?;
+    let mut debug = debug::Debug::new(module, windows, debug_info);
 
     // Bodies last: emitting one can discover a string literal, a named type or
     // an intrinsic, and all three are written above it in the file.
@@ -156,6 +164,7 @@ pub fn emit_module(module: &Module, target: TargetInfo, conv: Conv) -> Result<Em
             continue;
         }
         let symbol = symbols.defined[index].clone();
+        let subprogram = debug.subprogram(&symbol, function.span, function.linkage);
         let emitter = func::Emitter::new(
             module,
             &mut layouts,
@@ -166,6 +175,7 @@ pub fn emit_module(module: &Module, target: TargetInfo, conv: Conv) -> Result<Em
             &classes,
             &mut intrinsics,
             conv,
+            subprogram,
         );
         bodies.push(
             emitter
@@ -214,6 +224,8 @@ pub fn emit_module(module: &Module, target: TargetInfo, conv: Conv) -> Result<Em
         text.push_str(body);
     }
 
+    text.push_str(&debug.render());
+
     defines.sort_unstable();
     defines.dedup();
     requires.sort_unstable();
@@ -232,7 +244,7 @@ fn declare(rendered: &Rendered, symbol: &str) -> String {
 }
 
 /// Escape a string for an LLVM metadata-style quoted string.
-fn escape(text: &str) -> String {
+pub(crate) fn escape(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for byte in text.bytes() {
         match byte {

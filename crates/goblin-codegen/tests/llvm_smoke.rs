@@ -259,7 +259,8 @@ fn every_type_shape_parses() {
         (Conv::Win64, "x86_64-pc-windows-msvc"),
         (Conv::SysV, "x86_64-unknown-linux-gnu"),
     ] {
-        let emitted = llvm::emit_module(&module, target, conv).expect("the shapes render");
+        let emitted =
+            llvm::emit_module(&module, target, conv, false, true).expect("the shapes render");
         let mut options = options();
         options.target = Some(triple.to_owned());
 
@@ -386,4 +387,106 @@ fn which_objdump() -> Option<std::ffi::OsString> {
         }
     }
     Some(std::ffi::OsString::from("llvm-objdump"))
+}
+
+/// `debug_info` stops being a lie.
+///
+/// DECISIONS §17 lists it among the arguments for the port: Cranelift declared
+/// the flag, `packages/backend` threaded it, and nothing read it. There was no
+/// DWARF, no PDB and no line table, so no source-level debugger, no symbolized
+/// profile and no symbolicated crash dump from a player.
+///
+/// The check is the object file rather than the IR, because metadata that does
+/// not survive to a debug section is the same lie in a longer form.
+#[test]
+fn debug_info_reaches_the_object_when_asked_for_and_not_otherwise() {
+    let module = shapes_with_a_body();
+    let target = TargetInfo::from_pointer_bits(64);
+    let dir = scratch();
+
+    for (wanted, label) in [(true, "on"), (false, "off")] {
+        let emitted = llvm::emit_module(&module, target, Conv::Win64, wanted, true)
+            .expect("the module renders");
+        let mut options = options();
+        options.debug_info = wanted;
+        let object = dir.join(format!("debug-{label}.obj"));
+        driver::compile(&emitted.text, &options, &object).unwrap_or_else(|error| {
+            panic!(
+                "clang rejected the module with debug {label}:\n{error}\n\n{}",
+                emitted.text
+            )
+        });
+
+        let objdump = which_objdump().expect("llvm-objdump");
+        let output = Command::new(objdump)
+            .arg("-h")
+            .arg(&object)
+            .output()
+            .expect("running llvm-objdump");
+        let sections = String::from_utf8_lossy(&output.stdout);
+        // CodeView, because the target is MSVC. The same metadata produces
+        // DWARF on ELF, decided by one module flag.
+        let has_debug = sections.contains(".debug$S");
+        assert_eq!(
+            has_debug, wanted,
+            "debug {label}: expected debug sections {wanted}, got {has_debug}\n{sections}"
+        );
+    }
+}
+
+/// One exported function with a real span, so there is something to describe.
+fn shapes_with_a_body() -> Module {
+    let mut module = Module {
+        schema_fingerprint: 0,
+        name: SymId(0),
+        strings: vec!["dbg".into(), "answer".into()],
+        files: vec!["F:/src/main.ts".into()],
+        types: vec![goblin_mir::TyDef {
+            kind: TyKind::Int(IntTy::I32),
+            category: Category::Trivial,
+        }],
+        structs: Vec::new(),
+        classes: Vec::new(),
+        interfaces: Vec::new(),
+        sigs: vec![Signature {
+            params: Vec::new(),
+            ret: TyId(0),
+            abi: Abi::C,
+            variadic: false,
+        }],
+        externs: Vec::new(),
+        globals: Vec::new(),
+        funcs: Vec::new(),
+    };
+    let span = Span {
+        file: goblin_mir::FileId(0),
+        line: 12,
+        col: 3,
+    };
+    module.funcs.push(goblin_mir::Function {
+        name: SymId(1),
+        sig: goblin_mir::SigId(0),
+        linkage: goblin_mir::Linkage::Export,
+        locals: vec![goblin_mir::LocalDecl {
+            ty: TyId(0),
+            storage: goblin_mir::StorageClass::Owned,
+            name: None,
+            span,
+        }],
+        blocks: vec![goblin_mir::Block {
+            kind: goblin_mir::BlockKind::Normal,
+            statements: vec![goblin_mir::Statement::Init {
+                place: goblin_mir::Place::local(goblin_mir::LocalId::RETURN),
+                rvalue: goblin_mir::Rvalue::Use(goblin_mir::Operand::Const(
+                    goblin_mir::Const::Int {
+                        bits: 42,
+                        ty: TyId(0),
+                    },
+                )),
+            }],
+            terminator: goblin_mir::Terminator::Return,
+        }],
+        span,
+    });
+    module
 }

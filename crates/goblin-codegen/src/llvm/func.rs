@@ -39,6 +39,7 @@ use crate::error::{InternalError, Result};
 use crate::internal_error;
 use crate::layout::{Layouts, Repr, TargetInfo};
 use crate::llvm::data::Globals;
+use crate::llvm::debug::{self, Subprogram};
 use crate::llvm::sig;
 use crate::llvm::ty::{Types, ident, scalar};
 use crate::llvm::vtable::ClassSymbols;
@@ -98,6 +99,8 @@ pub struct Emitter<'a, 'm> {
     next_label: u32,
     /// Scratch slots discovered mid-body, hoisted into the entry block.
     entry_allocas: Vec<String>,
+    /// This function's debug scope, when debug info was asked for.
+    subprogram: Option<Subprogram>,
     locals: Vec<Local>,
     local_types: Vec<TyId>,
     /// The caller's storage for an aggregate return, when there is one.
@@ -116,6 +119,7 @@ impl<'a, 'm> Emitter<'a, 'm> {
         classes: &'a [ClassSymbols],
         intrinsics: &'a mut BTreeSet<String>,
         conv: Conv,
+        subprogram: Option<Subprogram>,
     ) -> Emitter<'a, 'm> {
         let target = layouts.target();
         Emitter {
@@ -133,6 +137,7 @@ impl<'a, 'm> Emitter<'a, 'm> {
             next: 0,
             next_label: 0,
             entry_allocas: Vec::new(),
+            subprogram,
             locals: Vec::new(),
             local_types: Vec::new(),
             sret: None,
@@ -280,9 +285,19 @@ impl<'a, 'm> Emitter<'a, 'm> {
         format!("%v{}", self.next)
     }
 
+    /// One instruction, carrying this function's debug location.
+    ///
+    /// Every instruction, not only the calls. LLVM's verifier requires a `!dbg`
+    /// on an inlinable call site inside a function that has debug info, and
+    /// "which calls will the inliner touch" is not a question worth answering
+    /// per site — attaching it everywhere is uniform and costs one metadata
+    /// reference per line.
     fn line(&mut self, text: impl AsRef<str>) {
         self.out.push_str("  ");
         self.out.push_str(text.as_ref());
+        self.out.push_str(&debug::attach(
+            self.subprogram.map(|program| program.location),
+        ));
         self.out.push('\n');
     }
 
@@ -366,10 +381,11 @@ impl<'a, 'm> Emitter<'a, 'm> {
         body.push_str(self.out.strip_prefix("entry:\n").unwrap_or(&self.out));
 
         Ok(format!(
-            "define {linkage}{} @{}({}) {{\n{body}}}\n",
+            "define {linkage}{} @{}({}){} {{\n{body}}}\n",
             rendered.returns,
             ident(symbol),
             params.join(", "),
+            debug::on_define(self.subprogram),
         ))
     }
 

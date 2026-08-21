@@ -144,7 +144,8 @@ fn line_for<'a>(text: &'a str, symbol: &str) -> &'a str {
 #[test]
 fn a_descriptor_names_its_base_its_interfaces_and_their_itabs() {
     let module = zoo();
-    let emitted = llvm::emit_module(&module, TARGET, Conv::Win64).expect("the zoo renders");
+    let emitted =
+        llvm::emit_module(&module, TARGET, Conv::Win64, false, true).expect("the zoo renders");
 
     // The name is a nul-terminated C string, so a descriptor's name can be
     // handed straight to C.
@@ -199,7 +200,8 @@ fn class_data_compiles() {
         (Conv::Win64, "x86_64-pc-windows-msvc"),
         (Conv::SysV, "x86_64-unknown-linux-gnu"),
     ] {
-        let emitted = llvm::emit_module(&module, TARGET, conv).expect("the zoo renders");
+        let emitted =
+            llvm::emit_module(&module, TARGET, conv, false, true).expect("the zoo renders");
         let mut options = options();
         options.target = Some(triple.to_owned());
         let object = scratch().join(format!("zoo-{triple}.obj"));
@@ -249,7 +251,8 @@ fn the_vtable_bias_is_right_at_run_time() {
     module.classes[0].vtable.clear();
     module.classes[1].implements.clear();
 
-    let mut emitted = llvm::emit_module(&module, TARGET, Conv::Win64).expect("the zoo renders");
+    let mut emitted =
+        llvm::emit_module(&module, TARGET, Conv::Win64, false, true).expect("the zoo renders");
 
     let mut globals = Globals::new();
     let mut literals = Literals::new();

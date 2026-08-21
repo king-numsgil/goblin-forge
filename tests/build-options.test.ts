@@ -13,7 +13,9 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
 
 import type { BuildEvent } from "goblin-forge";
 
@@ -98,6 +100,31 @@ describe("debug information", () => {
         for (const optLevel of ["none", "speed"] as const) {
             const result = await run(`dbg-opt-${optLevel}`, WORKLOAD, {optLevel, debugInfo: true});
             expect({optLevel, stdout: result.stdout}).toEqual({optLevel, stdout: "423\n"});
+        }
+    });
+
+    /**
+     * The flag was a lie for the whole of the Cranelift era: declared, threaded
+     * through `packages/backend`, and read by nothing. DECISIONS §17 lists that
+     * among the arguments for the port, so "the program still runs" is not the
+     * assertion that matters here — *something arrived in the object* is.
+     *
+     * CodeView on Windows, DWARF elsewhere, from the same metadata and one
+     * module flag.
+     */
+    test("`debugInfo: true` puts debug information in the object, and `false` does not", async () => {
+        const section = process.platform === "win32" ? ".debug$S" : ".debug_info";
+        for (const debugInfo of [false, true]) {
+            const {project} = await compileSource(`dbg-sections-${debugInfo}`, WORKLOAD, {
+                debugInfo,
+            });
+            const dumped = spawnSync("llvm-objdump", ["-h", join(project.dir, "build", "main.o")], {
+                encoding: "utf8",
+            });
+            expect({debugInfo, present: (dumped.stdout ?? "").includes(section)}).toEqual({
+                debugInfo,
+                present: debugInfo,
+            });
         }
     });
 });

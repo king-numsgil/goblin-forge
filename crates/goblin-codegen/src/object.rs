@@ -65,7 +65,12 @@ pub fn compile_module(
 ) -> Result<ModuleArtifact> {
     let target = target_info(options)?;
     let conv = conv_of(options)?;
-    let emitted = crate::llvm::emit_module(module, target, conv)?;
+    let triple = target_triple(options)?;
+    let windows = matches!(
+        triple.operating_system,
+        target_lexicon::OperatingSystem::Windows
+    );
+    let emitted = crate::llvm::emit_module(module, target, conv, options.debug_info, windows)?;
     crate::llvm::driver::compile(&emitted.text, options, object_path)?;
 
     let mut defines = emitted.defines;

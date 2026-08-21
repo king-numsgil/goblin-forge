@@ -116,7 +116,7 @@ once or twice. Every one has a one-line LLVM spelling.
 - [x] **Stage 4** — the C boundary *(done 2026-08-21, with 3b)*
 - [x] **Stage 5** — options, targets, and the `.ll` beside the object *(done 2026-08-21, with 6)*
 - [x] **Stage 6** — delete Cranelift *(done 2026-08-21)*
-- [ ] **Stage 7** — debug information
+- [x] **Stage 7** — debug information *(done 2026-08-21)*
 
 Decided along the way, so it does not get re-litigated:
 
@@ -480,6 +480,34 @@ arguments for the port.
 
 **Done when:** a breakpoint in a Goblin function stops in a debugger, and a
 profile symbolizes.
+
+### What landed, and what it can honestly claim
+
+`llvm/debug.rs`. `DIFile` per entry in `Module::files`, a `DICompileUnit`, a
+`DISubprogram` per function, and a `DILocation` on every instruction. Two module
+flags decide the format: `CodeView` on Windows, `Dwarf Version` on ELF, from the
+same metadata. clang needs no `-g` — the metadata in the module *is* the
+request, which was checked rather than assumed.
+
+`debug_info: bool` was declared, threaded through `packages/backend`, and read
+by nothing for the whole Cranelift era; §17 lists that among the arguments for
+the port. It now does something, and `build-options.test.ts` asserts the
+*object* carries a debug section when it is on and none when it is off — "the
+program still runs" was never the assertion that mattered.
+
+**Function granularity, because that is what the MIR carries.** `Function`,
+`LocalDecl` and every type definition have a `Span`; `Statement` and
+`Terminator` do not. So a backtrace names the right function and its declaring
+line, a profiler attributes samples, and a crash dump symbolicates — and
+stepping line by line does not work, because there are no per-statement lines to
+step through.
+
+Closing that is a `Span` on `Statement`: a MIR change, so a wire-format
+fingerprint change and frontend work, not something the backend can do alone. It
+is the natural next increment and was deliberately not smuggled in here.
+`DILocalVariable` for named locals is reachable from `LocalDecl` today and wants
+`DICompositeType` for the aggregates to be worth having, which is the same
+increment's other half.
 
 ---
 
