@@ -33,8 +33,20 @@ use crate::llvm::ty::{Types, scalar};
 /// take the part they need.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rendered {
-    /// The return type text: a scalar, `void`, or a named aggregate.
+    /// The return, **with its attribute**: `zeroext i8`, `void`, `{ i64, i64 }`.
+    ///
+    /// This is what a `declare`, a `define` and a `call` all want, and all three
+    /// accept a return attribute in front of the type.
     pub returns: String,
+    /// The return type **alone**, with no attribute.
+    ///
+    /// What the *value* a call produces is of, which is a different question
+    /// with a different answer: `zeroext` is an attribute of the call, not part
+    /// of the type, and `store zeroext i8 %v, …` is a parse error. Keeping the
+    /// two apart is the whole reason this is two fields — an extern C function
+    /// returning `bool` is `zeroext i8`, and storing its result is the most
+    /// ordinary thing a program does with it.
+    pub returns_type: String,
     /// Each parameter, attributes included, in order.
     pub params: Vec<String>,
     /// Whether the first parameter is the hidden return pointer.
@@ -123,6 +135,9 @@ fn internal_abi(types: &mut Types, layouts: &mut Layouts<'_>, sig: &Signature) -
     };
 
     Ok(Rendered {
+        // The internal convention attaches no extension: both halves of the
+        // call are compiled by us and both agree the high bits are undefined.
+        returns_type: returns.clone(),
         returns,
         params,
         sret: returns_aggregate,
@@ -170,13 +185,9 @@ fn c_abi(
         }
     }
 
-    let returns = match &shape.returns {
+    let returns_type = match &shape.returns {
         Slot::None | Slot::Sret { .. } => "void".to_owned(),
-        // A sub-register-width return carries its extension too, on the return
-        // rather than on a parameter: `declare signext i8 @f()`.
-        Slot::Plain { ty, signed } => {
-            return_text(scalar(*ty), abi::extension(*ty, *signed, target))
-        }
+        Slot::Plain { ty, .. } => scalar(*ty).to_owned(),
         // Two carriers come back as an anonymous struct, which is how clang
         // spells a multi-register return: `{ i64, i64 } @f(…)`.
         Slot::Registers { carriers, .. } => match carriers.as_slice() {
@@ -195,8 +206,19 @@ fn c_abi(
         }
     };
 
+    // A sub-register-width return carries its extension, on the return rather
+    // than on a parameter: `declare signext i8 @f()`. Only here — the bare type
+    // above is what the produced value is of.
+    let returns = match &shape.returns {
+        Slot::Plain { ty, signed } => {
+            return_text(&returns_type, abi::extension(*ty, *signed, target))
+        }
+        _ => returns_type.clone(),
+    };
+
     Ok(Rendered {
         returns,
+        returns_type,
         params,
         sret: shape.has_sret(),
     })

@@ -1043,7 +1043,7 @@ impl<'a, 'm> Emitter<'a, 'm> {
             ident(&symbol),
             arguments.join(", ")
         ));
-        Ok(Some(Val::new(rendered.returns, out)))
+        Ok(Some(Val::new(rendered.returns_type, out)))
     }
 
     // -- arrays --------------------------------------------------------------
@@ -2177,7 +2177,7 @@ impl<'a, 'm> Emitter<'a, 'm> {
                 "{out} = call {returns} {target}({})",
                 arguments.join(", ")
             ));
-            Some(Val::new(returns, out))
+            Some(Val::new(rendered.returns_type.clone(), out))
         };
 
         if let Some(dest) = destination

@@ -78,6 +78,12 @@ declare function gf_c_add(a: i32, b: i32): i32;
 declare function gf_c_add_narrow(a: i8, b: u8, c: i16, d: u16): i32;
 declare function gf_c_scale(value: f64, by: f32): f64;
 
+declare function gf_c_ret_i8(v: i32): i8;
+declare function gf_c_ret_u8(v: i32): u8;
+declare function gf_c_ret_i16(v: i32): i16;
+declare function gf_c_ret_u16(v: i32): u16;
+declare function gf_c_ret_bool(v: i32): boolean;
+
 declare function gf_c_one(v: One): i32;
 declare function gf_c_two(v: Two): i32;
 declare function gf_c_four(v: Four): i32;
@@ -137,6 +143,46 @@ describe("scalars cross intact", () => {
                 `console.log(\`\${gf_c_add_narrow(-1, 255, -1000, 60000)}\`);`,
             ),
         ).toBe(`${-1 + 255 - 1000 + 60000}\n`);
+    });
+
+    /**
+     * The same question in the other direction, and the direction that was
+     * wrong.
+     *
+     * A narrow *return* carries its extension on the result, not on a
+     * parameter. The attribute is part of the call, not part of the type — and
+     * the LLVM backend spelled the produced value with the attribute glued on,
+     * so `store zeroext i8 %v, ptr %p` reached clang and was a parse error.
+     * Nothing in this suite imported a C function with a narrow return, so
+     * nothing caught it; an SDL3 program did, on `SDL_SubmitGPUCommandBuffer`,
+     * which returns `bool`.
+     *
+     * Storing the result is what matters — a call whose value is used only as
+     * an argument would have gone on working.
+     */
+    test("a narrow return carries its extension, and its value is still storable", async () => {
+        expect(
+            await acrossTheBoundary(
+                "abi-narrow-return",
+                `const a: i8 = gf_c_ret_i8(-1);
+         const b: u8 = gf_c_ret_u8(200);
+         const c: i16 = gf_c_ret_i16(-1000);
+         const d: u16 = gf_c_ret_u16(60000);
+         console.log(\`\${a} \${b} \${c} \${d}\`);`,
+            ),
+        ).toBe("-1 200 -1000 60000\n");
+    });
+
+    test("a C `bool` return round-trips and branches", async () => {
+        expect(
+            await acrossTheBoundary(
+                "abi-ret-bool",
+                `const yes: boolean = gf_c_ret_bool(1);
+         const no: boolean = gf_c_ret_bool(0);
+         if (yes) { console.log("yes"); }
+         if (!no) { console.log("no"); }`,
+            ),
+        ).toBe("yes\nno\n");
     });
 
     test("floats land in the float registers", async () => {

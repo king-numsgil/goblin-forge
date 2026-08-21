@@ -36,6 +36,20 @@ int32_t gf_c_add_narrow(int8_t a, uint8_t b, int16_t c, uint16_t d) {
 
 double gf_c_scale(double value, float by) { return value * static_cast<double>(by); }
 
+// Narrow *returns*, which the C ABI marks `signext` or `zeroext` on the result
+// rather than on a parameter. Whether the caller may believe the high bits is
+// the same question `gf_c_add_narrow` asks in the other direction, and the two
+// have different answers only if somebody got one of them wrong.
+//
+// `bool` is here because it is what a real C library returns constantly —
+// SDL3's `SDL_SubmitGPUCommandBuffer` among them — and it is one byte with an
+// extension attribute, which is the combination that bites.
+int8_t gf_c_ret_i8(int32_t v) { return static_cast<int8_t>(v); }
+uint8_t gf_c_ret_u8(int32_t v) { return static_cast<uint8_t>(v); }
+int16_t gf_c_ret_i16(int32_t v) { return static_cast<int16_t>(v); }
+uint16_t gf_c_ret_u16(int32_t v) { return static_cast<uint16_t>(v); }
+bool gf_c_ret_bool(int32_t v) { return v != 0; }
+
 // ---- one byte, two bytes, four bytes, eight bytes -------------------------
 
 struct One {
