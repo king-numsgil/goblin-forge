@@ -154,4 +154,146 @@ int32_t gf_c_mixed(int32_t a, int32_t b, int32_t c, int32_t d, Pair e, int32_t f
   return a + b + c + d + e.x + e.y + f;
 }
 
+// ---- pointers to structs, and nesting reached through them ----------------
+//
+// Everything above passes structs *by value*, which is the half the
+// classification decides. Real C libraries mostly do not: they hand out
+// pointers and take them back, and a field is reached through one. Nothing was
+// checking that, and it is where a wrong offset shows up as a plausible number
+// rather than as a crash.
+//
+// The shapes are deliberately not anybody's real API. What matters is that a
+// `Vec3` is three doubles — past a register under both conventions — and that
+// `Body` nests two of them behind a scalar, so a field's offset is the sum of
+// two layouts rather than one.
+
+struct Vec3 {
+  double x;
+  double y;
+  double z;
+};
+
+struct Body {
+  int32_t id;
+  Vec3 position;
+  Vec3 velocity;
+};
+
+double gf_c_vec3_length_sq(const Vec3 *v) {
+  return v->x * v->x + v->y * v->y + v->z * v->z;
+}
+
+/// Writes through the pointer. The caller must see the change — the opposite of
+/// `gf_c_clobber`, and the reason those two sit in the same file.
+void gf_c_vec3_set(Vec3 *v, double x, double y, double z) {
+  v->x = x;
+  v->y = y;
+  v->z = z;
+}
+
+int32_t gf_c_body_id(const Body *b) { return b->id; }
+
+/// Reads a nested struct through a pointer and writes another one back.
+void gf_c_body_step(Body *b, double dt) {
+  b->position.x += b->velocity.x * dt;
+  b->position.y += b->velocity.y * dt;
+  b->position.z += b->velocity.z * dt;
+}
+
+/// A pointer *into* a struct: the address arithmetic is the callee's, and the
+/// caller has to agree about where the field starts.
+const Vec3 *gf_c_body_position(const Body *b) { return &b->position; }
+
+/// A struct by value that contains a nested struct by value, returned by value.
+Body gf_c_make_body(int32_t id, double x, double y) {
+  return Body{id, Vec3{x, y, 0.0}, Vec3{1.0, 2.0, 3.0}};
+}
+
+// ---- out-parameters -------------------------------------------------------
+//
+// The shape half of C uses for anything that can fail: a `bool` result and the
+// real answer written through a pointer. It pairs a narrow return with a
+// pointer write, which is exactly the combination an SDL3 program hits on its
+// first line.
+
+bool gf_c_try_divide(int32_t a, int32_t b, int32_t *out) {
+  if (b == 0) {
+    return false;
+  }
+  *out = a / b;
+  return true;
+}
+
+/// Fills a caller-provided struct rather than returning one.
+bool gf_c_try_make_pair(int32_t x, int32_t y, Pair *out) {
+  if (x > y) {
+    return false;
+  }
+  out->x = x;
+  out->y = y;
+  return true;
+}
+
+// ---- strings, both directions ---------------------------------------------
+//
+// A `const char *` in and a `const char *` out. The one out lives in static
+// storage on purpose: whoever receives it must **not** free it, which is the
+// ownership question at this boundary and the one a copy would paper over.
+
+int32_t gf_c_strlen(const char *s) {
+  int32_t n = 0;
+  while (s[n] != '\0') {
+    n += 1;
+  }
+  return n;
+}
+
+int32_t gf_c_str_equal(const char *a, const char *b) {
+  while (*a != '\0' && *a == *b) {
+    a += 1;
+    b += 1;
+  }
+  return static_cast<int32_t>(*a == *b);
+}
+
+const char *gf_c_greeting(void) { return "hello from C"; }
+
+/// Writes into caller-owned storage, the way `snprintf` does.
+int32_t gf_c_copy_into(const char *src, char *dest, int32_t cap) {
+  int32_t n = 0;
+  while (src[n] != '\0' && n < cap - 1) {
+    dest[n] = src[n];
+    n += 1;
+  }
+  dest[n] = '\0';
+  return n;
+}
+
+// ---- callbacks: C calling back into Goblin --------------------------------
+//
+// The direction the rest of this file never goes. Everything else has Goblin as
+// the caller and the C ABI applied to arguments on the way out; here the C
+// library is the caller and Goblin's exported function has to *receive* under
+// the same rules.
+
+typedef int32_t (*BinOp)(int32_t, int32_t);
+typedef Pair (*PairOp)(Pair);
+
+int32_t gf_c_apply(BinOp op, int32_t a, int32_t b) { return op(a, b); }
+
+int32_t gf_c_fold(BinOp op, const int32_t *values, int32_t count) {
+  int32_t total = 0;
+  for (int32_t i = 0; i < count; i += 1) {
+    total = op(total, values[i]);
+  }
+  return total;
+}
+
+/// A callback taking and returning a struct, so the classification applies on
+/// the way in *and* the way out of a function this compiler defined.
+int32_t gf_c_apply_pair(PairOp op, int32_t x, int32_t y) {
+  Pair result = op(Pair{x, y});
+  return result.x * 1000 + result.y;
+}
+
 }  // extern "C"

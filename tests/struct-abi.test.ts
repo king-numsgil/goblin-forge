@@ -109,13 +109,45 @@ declare function gf_c_make_nested(x: i32, y: i32, tail: i32): Nested;
 declare function gf_c_clobber(v: Pair): i32;
 declare function gf_c_many(a: Pair, b: Pair, c: Pair, d: Pair, e: Pair): i32;
 declare function gf_c_mixed(a: i32, b: i32, c: i32, d: i32, e: Pair, f: i32): i32;
+
+interface Vec3 { x: f64; y: f64; z: f64; }
+interface Body { id: i32; position: Vec3; velocity: Vec3; }
+
+declare function gf_c_vec3_length_sq(v: Pointer<Vec3>): f64;
+declare function gf_c_vec3_set(v: Pointer<Vec3>, x: f64, y: f64, z: f64): void;
+declare function gf_c_body_id(b: Pointer<Body>): i32;
+declare function gf_c_body_step(b: Pointer<Body>, dt: f64): void;
+declare function gf_c_body_position(b: Pointer<Body>): Pointer<Vec3>;
+declare function gf_c_make_body(id: i32, x: f64, y: f64): Body;
+
+declare function gf_c_try_divide(a: i32, b: i32, out: Pointer<i32>): boolean;
+declare function gf_c_try_make_pair(x: i32, y: i32, out: Pointer<Pair>): boolean;
+
+declare function gf_c_strlen(s: CString): i32;
+declare function gf_c_str_equal(a: CString, b: CString): i32;
+declare function gf_c_greeting(): CString;
+declare function gf_c_copy_into(src: CString, dest: Pointer<u8>, cap: i32): i32;
+
+declare function gf_c_apply(op: (a: i32, b: i32) => i32, a: i32, b: i32): i32;
+declare function gf_c_fold(op: (a: i32, b: i32) => i32, values: Pointer<i32>, count: i32): i32;
+declare function gf_c_apply_pair(op: (v: Pair) => Pair, x: i32, y: i32): i32;
 `;
 
-/** Compile and run a body against the C library, returning its stdout. */
-async function acrossTheBoundary(name: string, body: string): Promise<string> {
+/**
+ * Compile and run a body against the C library, returning its stdout.
+ *
+ * `prelude` goes above `main`, for the cases where C is the caller and this
+ * side has to define the function it calls.
+ */
+async function acrossTheBoundary(
+    name: string,
+    body: string,
+    prelude = "",
+): Promise<string> {
     const result = await run(
         name,
         `${DECLARATIONS}
+     ${prelude}
      export function main(): i32 {
        ${body}
        return 0;
@@ -390,5 +422,222 @@ describe("by-value means the caller keeps its own", () => {
                 `console.log(\`\${gf_c_mixed(1, 2, 3, 4, { x: 5, y: 6 }, 7)}\`);`,
             ),
         ).toBe("28\n");
+    });
+});
+
+/**
+ * The half of the boundary the by-value suite above never reaches.
+ *
+ * Every case up to here has Goblin handing a struct *to* C by value, which is
+ * what the classification decides and what REWRITE-PLAN §9 asked for. Real C
+ * libraries mostly do not work that way: they hand out pointers, take them
+ * back, write through out-parameters, exchange `const char *`, and call back
+ * into you. None of that was covered, and an SDL3 program found a hole in it
+ * within its first few lines.
+ */
+describe("the pointer-shaped half of C", () => {
+    test("a struct is read through a pointer", async () => {
+        expect(
+            await acrossTheBoundary(
+                "abi-ptr-read",
+                `const v: Pointer<Vec3> = alloc<Vec3>({x: 3, y: 4, z: 12});
+         console.log(\`\${gf_c_vec3_length_sq(v)}\`);
+         v.free();`,
+            ),
+        ).toBe("169\n");
+    });
+
+    test("C writes through a pointer and the caller sees it", async () => {
+        // The opposite of `gf_c_clobber`: a by-value argument must *not* reach
+        // the caller's copy, and a pointer argument must.
+        expect(
+            await acrossTheBoundary(
+                "abi-ptr-write",
+                `const v: Pointer<Vec3> = alloc<Vec3>({x: 0, y: 0, z: 0});
+         gf_c_vec3_set(v, 1.5, 2.5, 3.5);
+         console.log(\`\${v.x} \${v.y} \${v.z}\`);
+         v.free();`,
+            ),
+        ).toBe("1.5 2.5 3.5\n");
+    });
+
+    test("a nested struct is reached through a pointer, by both sides", async () => {
+        // `position` starts at an offset that is the sum of two layouts. If
+        // this compiler and the C compiler disagree about it, the numbers are
+        // plausible and wrong rather than absent.
+        expect(
+            await acrossTheBoundary(
+                "abi-ptr-nested",
+                `const b: Pointer<Body> = alloc<Body>({
+           id: 7,
+           position: {x: 10, y: 20, z: 30},
+           velocity: {x: 1, y: 2, z: 3},
+         });
+         gf_c_body_step(b, 2);
+         console.log(\`\${gf_c_body_id(b)} \${b.position.x} \${b.position.y} \${b.position.z}\`);
+         b.free();`,
+            ),
+        ).toBe("7 12 24 36\n");
+    });
+
+    test("a pointer into the middle of a struct agrees with the field's offset", async () => {
+        expect(
+            await acrossTheBoundary(
+                "abi-ptr-interior",
+                `const b: Pointer<Body> = alloc<Body>({
+           id: 1,
+           position: {x: 3, y: 4, z: 0},
+           velocity: {x: 0, y: 0, z: 0},
+         });
+         const p: Pointer<Vec3> = gf_c_body_position(b);
+         console.log(\`\${gf_c_vec3_length_sq(p)} \${p.x}\`);
+         b.free();`,
+            ),
+        ).toBe("25 3\n");
+    });
+
+    test("a nested struct returned by value", async () => {
+        expect(
+            await acrossTheBoundary(
+                "abi-nested-return",
+                `const b: Body = gf_c_make_body(9, 1.5, 2.5);
+         console.log(\`\${b.id} \${b.position.x} \${b.position.y} \${b.velocity.z}\`);`,
+            ),
+        ).toBe("9 1.5 2.5 3\n");
+    });
+
+    test("an out-parameter, with a narrow result saying whether it was written", async () => {
+        // The shape C uses for anything that can fail, and the one that pairs a
+        // `bool` return with a pointer write.
+        expect(
+            await acrossTheBoundary(
+                "abi-outparam",
+                `const slot: Pointer<i32> = alloc<i32>();
+         const ok: boolean = gf_c_try_divide(84, 2, slot);
+         const bad: boolean = gf_c_try_divide(1, 0, slot);
+         console.log(\`\${ok} \${bad} \${slot[0]}\`);
+         slot.free();`,
+            ),
+        ).toBe("true false 42\n");
+    });
+
+    test("a struct filled through an out-parameter", async () => {
+        expect(
+            await acrossTheBoundary(
+                "abi-outparam-struct",
+                `const slot: Pointer<Pair> = alloc<Pair>({x: 0, y: 0});
+         const ok: boolean = gf_c_try_make_pair(3, 8, slot);
+         console.log(\`\${ok} \${slot.x} \${slot.y}\`);
+         slot.free();`,
+            ),
+        ).toBe("true 3 8\n");
+    });
+});
+
+describe("strings across the boundary", () => {
+    test("a Goblin string is *borrowed* as a `const char *`", async () => {
+        // No `cstringFree`. Without `move` the `string` still owns the bytes and
+        // still releases them at the end of its scope, so the `CString` is a
+        // borrow that dies with it. Freeing here is a double free, and the
+        // automatic live-allocation check reports it as a *negative* count —
+        // which is how this test was written wrong the first time.
+        expect(
+            await acrossTheBoundary(
+                "abi-str-borrow",
+                `const s: string = "hello" + " there";
+         console.log(\`\${gf_c_strlen(cstring(s))}\`);`,
+            ),
+        ).toBe("11\n");
+    });
+
+    test("`cstring(move(s))` hands the bytes over, and `cstringFree` takes them back", async () => {
+        // The other half of the same rule, and the only shape `cstringFree` is
+        // for: nothing releases the bytes any more, so this leaks unless the C
+        // side frees them or this line does.
+        expect(
+            await acrossTheBoundary(
+                "abi-str-move",
+                `const s: string = "hello" + " there";
+         const c: CString = cstring(move(s));
+         console.log(\`\${gf_c_strlen(c)}\`);
+         cstringFree(c);`,
+            ),
+        ).toBe("11\n");
+    });
+
+    test("two C strings compare, one built and one static", async () => {
+        expect(
+            await acrossTheBoundary(
+                "abi-str-compare",
+                `const a: CString = cstring("hello from C");
+         const same: i32 = gf_c_str_equal(a, gf_c_greeting());
+         const different: i32 = gf_c_str_equal(a, cstring("something else"));
+         console.log(\`\${same} \${different}\`);`,
+            ),
+        ).toBe("1 0\n");
+    });
+
+    test("a `const char *` from C becomes a Goblin string", async () => {
+        // The static-storage case, and the ownership question at this boundary:
+        // whoever receives this must not free it, so `stringFromCString` copies.
+        expect(
+            await acrossTheBoundary(
+                "abi-str-in",
+                `const greeting: string = stringFromCString(gf_c_greeting());
+         console.log(greeting + \`, length \${greeting.length}\`);`,
+            ),
+        ).toBe("hello from C, length 12\n");
+    });
+
+    test("C writes into storage this side owns", async () => {
+        expect(
+            await acrossTheBoundary(
+                "abi-str-buffer",
+                `const buffer: Pointer<u8> = allocArray<u8>(32);
+         const written: i32 = gf_c_copy_into(gf_c_greeting(), buffer, 32);
+         console.log(\`\${written} \${stringFromCString(buffer)}\`);
+         buffer.free();`,
+            ),
+        ).toBe("12 hello from C\n");
+    });
+});
+
+describe("C calling back into Goblin", () => {
+    test("a callback taking scalars", async () => {
+        // Every other case here has Goblin as the caller. This one has the C
+        // library applying the convention to a function *this* compiler
+        // defined, which is the other half of the same agreement.
+        expect(
+            await acrossTheBoundary(
+                "abi-callback",
+                `console.log(\`\${gf_c_apply(add, 40, 2)}\`);`,
+                `function add(a: i32, b: i32): i32 { return a + b; }\n`,
+            ),
+        ).toBe("42\n");
+    });
+
+    test("a callback invoked repeatedly over a buffer", async () => {
+        expect(
+            await acrossTheBoundary(
+                "abi-callback-fold",
+                `const values: Pointer<i32> = allocArray<i32>(4);
+         values[0] = 1; values[1] = 2; values[2] = 3; values[3] = 4;
+         console.log(\`\${gf_c_fold(add, values, 4)}\`);
+         values.free();`,
+                `function add(a: i32, b: i32): i32 { return a + b; }\n`,
+            ),
+        ).toBe("10\n");
+    });
+
+    test("a callback taking and returning a struct", async () => {
+        // The classification applies on the way in *and* the way out of a
+        // function this compiler defined, with C on the other side of both.
+        expect(
+            await acrossTheBoundary(
+                "abi-callback-pair",
+                `console.log(\`\${gf_c_apply_pair(swap, 3, 8)}\`);`,
+                `function swap(v: Pair): Pair { return { x: v.y, y: v.x }; }\n`,
+            ),
+        ).toBe("8003\n");
     });
 });
