@@ -156,7 +156,7 @@ pub fn emit_module(module: &Module, target: TargetInfo, conv: Conv) -> Result<Em
     // Bodies last: emitting one can discover a string literal, a named type or
     // an intrinsic, and all three are written above it in the file.
     let mut literals = Literals::new();
-    let mut intrinsics = BTreeSet::new();
+    let mut intrinsics: BTreeSet<String> = BTreeSet::new();
     let mut bodies = Vec::new();
     for (index, function) in module.funcs.iter().enumerate() {
         if function.blocks.is_empty() {
@@ -170,6 +170,7 @@ pub fn emit_module(module: &Module, target: TargetInfo, conv: Conv) -> Result<Em
             &mut globals,
             &mut literals,
             &symbols,
+            &classes,
             &mut intrinsics,
             conv,
         );

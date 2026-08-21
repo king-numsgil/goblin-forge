@@ -112,8 +112,8 @@ once or twice. Every one has a one-line LLVM spelling.
       *(done 2026-08-21)*
 - [x] **Stage 2** — types, globals, and the data half *(done 2026-08-21)*
 - [x] **Stage 3a** — function bodies: the scalar core *(done 2026-08-21)*
-- [ ] **Stage 3b** — function bodies: owning types and dispatch
-- [ ] **Stage 4** — the C boundary
+- [x] **Stage 3b** — function bodies: owning types and dispatch *(done 2026-08-21)*
+- [x] **Stage 4** — the C boundary *(done 2026-08-21, with 3b)*
 - [ ] **Stage 5** — options, targets, and the `.ll` beside the object
 - [ ] **Stage 6** — delete Cranelift
 - [ ] **Stage 7** — debug information
@@ -375,14 +375,36 @@ pointer, a literal printed through the runtime, and float arithmetic with a
 comparison. They select `backend: "llvm"` **per test** rather than reading
 `GOBLIN_BACKEND`, so a Cranelift regression cannot mask an LLVM one.
 
-**3b — owning types and dispatch.** Not started. `Drop` and assignment over a
-live value; `Copy` of an owning type; `string` and `T[]`; `Len` and
-`ArrayPushSlot`; `MakeInterface`, `TryInterface`, `TryClass`,
-`InterfaceIsNull`; virtual, interface and indirect calls; and the C boundary's
-aggregate slots — `Registers`, `ByAddress`, `OnStack`, `Sret`, which stage 4
-tests. Every one of these raises a named internal error pointing at 3b rather
-than emitting something plausible, so the remaining work is enumerable by
-running the suite and reading what fires.
+**3b — owning types and dispatch. Done, and it took stage 4 with it.** `Drop`
+with drop flags, assignment over a live value, `Copy` and `Move` of owning
+types, `string` and `T[]`, `Len`, `ArrayPushSlot`, `MakeInterface`,
+`TryInterface`, `TryClass`, `InterfaceIsNull`, virtual, interface and indirect
+calls — and the C boundary's aggregate slots on both sides of the call, which
+was stage 4's whole content.
+
+**The entire suite passes under both backends: 887 tests, Cranelift and LLVM.**
+The live-allocation check runs on every `run` test and nobody opts in, so that
+is 887 programs that also do not leak.
+
+Four bugs found by running it, all worth recording because three are LLVM
+differing from Cranelift rather than the port being sloppy:
+
+- **A shift of at least the value's width is *poison* in LLVM**, where
+  Cranelift masks the count and so does the hardware. `1 << 9` in a `u8` is 2
+  by REWRITE-PLAN §7 and was silently poison. Poison does not crash — it makes
+  some later branch quietly unreachable — so this is exactly §17's hazard, and
+  the fix is one `and` before every shift.
+- **A moved-from handle has to be poisoned with null.** `move_out` does it in
+  `translate.rs` and the reason is not obvious until you see the MIR: the
+  frontend legitimately emits `_1 <- move _4` onto a binding already moved from,
+  and without the null that assignment's destroy is a double free. Found by
+  dumping the MIR rather than by reasoning about it.
+- **Every `alloca` must be in the entry block.** A scratch slot emitted where it
+  is used means a fresh allocation per loop iteration — unbounded stack growth,
+  and unpromotable by `mem2reg` besides. `scratch_slot` hoists them all.
+- **A runtime symbol the program imports itself must not be declared twice.**
+  `cstringFree` *is* `gf_string_free`; there is no privileged channel, which is
+  the design working as intended, and LLVM rejects the duplicate.
 
 ### What the shape confirmed
 
