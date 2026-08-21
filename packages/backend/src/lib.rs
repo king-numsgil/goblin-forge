@@ -15,7 +15,10 @@ use std::path::PathBuf;
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
-use goblin_codegen::{CodegenOptions, OptLevel, OutputKind};
+// Renamed on import: the napi class exposed to JS is also called `Backend`, and
+// it is a different thing — the addon's handle, not the choice of code
+// generator.
+use goblin_codegen::{Backend as CodegenBackend, CodegenOptions, OptLevel, OutputKind};
 
 mod summary;
 
@@ -50,6 +53,13 @@ pub struct BackendOptions {
     /// reads as a passing test. The test harness sets this; a release build of
     /// a shipped compiler leaves it off.
     pub strict_internal_errors: Option<bool>,
+    /// `"cranelift" | "llvm"`. Omitted falls back to `GOBLIN_BACKEND`, then to
+    /// Cranelift.
+    ///
+    /// A switch for the duration of the LLVM port, so the whole suite can be
+    /// run under either code generator one failure at a time. It goes away at
+    /// LLVM-PORT stage 6.
+    pub backend: Option<String>,
 }
 
 /// A structured diagnostic.
@@ -175,6 +185,17 @@ impl Backend {
             goblin_codegen::error::set_panic_on_internal_errors(strict);
         }
 
+        let backend = CodegenBackend::resolve(options.backend.as_deref()).ok_or_else(|| {
+            Error::from_reason(format!(
+                "`{}` is not a backend; expected \"cranelift\" or \"llvm\"",
+                options
+                    .backend
+                    .clone()
+                    .or_else(|| std::env::var("GOBLIN_BACKEND").ok())
+                    .unwrap_or_default()
+            ))
+        })?;
+
         Ok(Backend {
             codegen: CodegenOptions {
                 target: options.target,
@@ -186,6 +207,7 @@ impl Backend {
                 // sets it, so every test compiles with the verifier on and a
                 // shipped compiler does not pay for it.
                 verify_ir: strict_internal_errors,
+                backend,
             },
         })
     }

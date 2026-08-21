@@ -36,6 +36,47 @@ pub struct CodegenOptions {
     /// internal error rather than returning one (REWRITE-PLAN §8) — and off in
     /// a shipped compiler, which is why it is not simply left at its default.
     pub verify_ir: bool,
+    /// Which code generator to run.
+    pub backend: Backend,
+}
+
+/// Which code generator compiles a module.
+///
+/// A switch, not a permanent arrangement. It exists so the whole test suite can
+/// be run under either backend, one failure at a time, while LLVM is built up
+/// (LLVM-PORT stages 1–5) — and it is deleted at stage 6, because two backends
+/// is a permanent doubling of the surface a silent miscompile can live on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Backend {
+    #[default]
+    Cranelift,
+    Llvm,
+}
+
+impl Backend {
+    pub fn parse(text: &str) -> Option<Backend> {
+        match text {
+            "cranelift" => Some(Backend::Cranelift),
+            "llvm" => Some(Backend::Llvm),
+            _ => None,
+        }
+    }
+
+    /// The backend an explicit setting asks for, or `GOBLIN_BACKEND`, or the
+    /// default.
+    ///
+    /// The environment variable is what lets `bun test` and `cargo test` run
+    /// the existing suite against the new backend without a flag reaching every
+    /// call site.
+    pub fn resolve(explicit: Option<&str>) -> Option<Backend> {
+        match explicit {
+            Some(text) => Backend::parse(text),
+            None => match std::env::var("GOBLIN_BACKEND") {
+                Ok(text) => Backend::parse(&text),
+                Err(_) => Some(Backend::default()),
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,6 +117,48 @@ pub struct ModuleArtifact {
 
 /// Compile a decoded module to an object file on disk.
 pub fn compile_module(
+    module: &Module,
+    options: &CodegenOptions,
+    object_path: &Path,
+) -> Result<ModuleArtifact> {
+    match options.backend {
+        Backend::Cranelift => compile_with_cranelift(module, options, object_path),
+        Backend::Llvm => compile_with_llvm(module, options, object_path),
+    }
+}
+
+/// Compile a module through LLVM.
+///
+/// Stage 1 of the port: the IR text is written and clang checks it, which
+/// exercises the type mapping and the signature writer against LLVM's own
+/// verifier. Nothing has a body yet, so the object defines no code — and rather
+/// than hand back an object that links and does nothing, this says so.
+fn compile_with_llvm(
+    module: &Module,
+    options: &CodegenOptions,
+    object_path: &Path,
+) -> Result<ModuleArtifact> {
+    let target = TargetInfo::from_pointer_bits(u32::from(make_isa(options)?.pointer_bits()));
+    let conv = conv_of(options)?;
+    let emitted = crate::llvm::emit_module(module, target, conv)?;
+    crate::llvm::driver::compile(&emitted.text, options, object_path)?;
+
+    if module.funcs.iter().any(|func| !func.blocks.is_empty()) {
+        internal_error!(
+            "the LLVM backend cannot emit function bodies yet (LLVM-PORT stage 3). \
+             The IR it did produce is at {}.",
+            crate::llvm::driver::ir_path(object_path).display()
+        );
+    }
+
+    Ok(ModuleArtifact {
+        object_path: object_path.to_path_buf(),
+        defines: emitted.defines,
+        requires: emitted.requires,
+    })
+}
+
+fn compile_with_cranelift(
     module: &Module,
     options: &CodegenOptions,
     object_path: &Path,
@@ -340,6 +423,7 @@ mod tests {
             debug_info: false,
             checked: false,
             verify_ir: true,
+            backend: Backend::Cranelift,
         }
     }
 

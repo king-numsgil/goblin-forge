@@ -108,7 +108,8 @@ once or twice. Every one has a one-line LLVM spelling.
 ## Tracking
 
 - [x] **Stage 0** — Cranelift out of the type vocabulary *(done 2026-08-21)*
-- [ ] **Stage 1** — the emitter skeleton, the backend switch, and the ABI oracle
+- [x] **Stage 1** — the emitter skeleton, the backend switch, and the ABI oracle
+      *(done 2026-08-21)*
 - [ ] **Stage 2** — types, globals, and the data half
 - [ ] **Stage 3** — function bodies
 - [ ] **Stage 4** — the C boundary
@@ -212,6 +213,53 @@ is not compressible by throwing compute at it.
 the table above. Also: one hand-written smoke module compiled by clang, linked
 by the untouched `link.rs` against the MSVC-built Rust runtime staticlib, and
 run. That confirms COFF interop end to end before anything depends on it.
+
+### What landed
+
+`crates/goblin-codegen/src/llvm/` — `ty.rs`, `sig.rs`, `driver.rs` — plus
+`Backend::{Cranelift, Llvm}` on `CodegenOptions`, a `backend` field on the napi
+options, and `GOBLIN_BACKEND` behind both. `link.rs` is untouched, as promised.
+
+**LLVM never computes a layout; ours is imposed.** Every aggregate renders as a
+*packed* struct with its padding spelled out — `<{ i32, [4 x i8], i64 }>` —
+driven by `Layouts`. Letting LLVM lay out a `{ i32, i64 }` itself would mean two
+layout engines that agree until they do not, and the symptom of that
+disagreement is a field read from the wrong offset. The cost is that a packed
+struct has alignment 1 to LLVM, so every use carries an explicit `align`.
+
+**`GOBLIN_BACKEND=llvm` fails loudly rather than producing a broken binary.**
+Bodies are stage 3, so the LLVM path emits types and declarations, writes the
+`.ll`, has clang check it, and then says what it cannot do and where the IR is.
+An object that links and does nothing would have been the wrong kind of honest.
+
+Two things the new tests caught immediately, both worth recording:
+
+- **Parameter and return extension attributes go on opposite sides of the
+  type.** `declare signext i8 @f(i8 signext)` — the return attribute precedes
+  the result type, the parameter attribute follows its own. Written backwards
+  first; `every_type_shape_parses` failed on it within a minute of existing.
+  Confirmed against clang rather than guessed.
+- **The oracle has teeth.** Spelling Win64's `ByAddress` as `byval` — the exact
+  silent-corruption swap `Slot`'s two variants exist to prevent — was
+  deliberately introduced and the oracle named every affected case and both
+  answers. It also passed on the first honest run for both conventions, which
+  is the more reassuring half.
+
+The oracle covers fifteen shapes in both argument and return position on both
+triples, unions included — a union's eightbyte merges every overlapping member,
+so `union { char; double; }` is INTEGER, and `SDL_Event` is the reason that is
+not a corner case.
+
+40 Rust tests, 881 TS tests, `tsc --build` and `cargo clippy -D warnings` clean.
+
+### Still owed, and deliberately not done here
+
+- **Classes and interfaces have no named type yet.** `Types::aggregate` handles
+  them, but nothing exercises a real vtable-bearing class, because the module
+  fixtures would need class tables — that arrives with stage 2's descriptors.
+- **The oracle's fixtures are hand-built MIR.** Running it over the real corpus
+  needs a napi seam that stage 3 will want anyway; adding one now would be
+  surface invented ahead of a caller.
 
 ## Stage 2 — Types, globals, and the data half
 
