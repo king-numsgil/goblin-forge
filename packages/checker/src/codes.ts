@@ -93,6 +93,25 @@ export const CODES = {
             "you are not doing that, you do not need it.",
     },
 
+    GF0006: {
+        title: "the toolchain a build needs is not installed",
+        explanation:
+            "This compiler produces native code by driving native tools, and none " +
+            "of them ship inside it: clang compiles the LLVM IR the backend emits, " +
+            "cargo builds the runtime for your target, and the platform's linker " +
+            "or archiver assembles the result.\n\n" +
+            "They are looked for before the type-check rather than when they are " +
+            "first run, because the alternative is a full compile followed by a " +
+            "failure from inside the backend — which reads as a broken compiler " +
+            "rather than a missing package, and arrives after the wait instead of " +
+            "instead of it.\n\n" +
+            "`GOBLIN_CLANG`, `CC` and `AR` name a specific tool where a machine has " +
+            "several or keeps them somewhere unusual. On Windows the linker and " +
+            "the archiver are found through the registry rather than `PATH`, so " +
+            "they are not checked here and a Developer Command Prompt is not " +
+            "needed.",
+    },
+
     // -- Widths and arithmetic ----------------------------------------------
     GF0160: {
         title: "implicit narrowing",

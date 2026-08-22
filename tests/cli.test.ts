@@ -255,6 +255,22 @@ describe("building", () => {
         expect(program.status).toBe(0);
     }, TIMEOUT);
 
+    test("a machine without the tools is told before anything is compiled", () => {
+        // The whole point is the timing. Emptying `PATH` takes clang, cargo and
+        // the linker away at once, and the build has to answer immediately
+        // rather than after a type-check it cannot use.
+        const result = spawnSync(EXE, ["build.ts"], {
+            cwd: dir,
+            encoding: "utf8",
+            env: {...process.env, PATH: ""},
+        });
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain("GF0006");
+        expect(result.stderr).toContain("clang");
+        // Not a phase that ran and failed — a build that never started.
+        expect(result.stdout).not.toContain("checking types");
+    });
+
     test("a program that does not compile is an error, with a caret", () => {
         writeFileSync(
             join(dir, "src", "main.ts"),

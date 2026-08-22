@@ -16,6 +16,8 @@
 import { CODES } from "@goblin-forge/checker";
 // noinspection ES6UnusedImports
 import { describe, expect, test } from "bun:test";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { compileSource, expectRejected } from "./harness.ts";
 
@@ -84,6 +86,30 @@ describe("codes raised by a program", () => {
        }\n`,
             "GF0004",
         );
+    });
+
+    test("GF0006 — a tool the build needs is not installed", async () => {
+        // Pointed at nothing rather than emptying `PATH`, because this runs
+        // in-process alongside every other test in the file and `GOBLIN_CLANG`
+        // is the surgical version of the same question. The program is valid:
+        // what is being provoked is the machine, not the source.
+        const saved = process.env["GOBLIN_CLANG"];
+        process.env["GOBLIN_CLANG"] = join(tmpdir(), "goblin-no-such-clang");
+        try {
+            await expectRejected(
+                "diag-0006",
+                `export function main(): i32 {
+         return 0;
+       }\n`,
+                "GF0006",
+            );
+        } finally {
+            if (saved === undefined) {
+                delete process.env["GOBLIN_CLANG"];
+            } else {
+                process.env["GOBLIN_CLANG"] = saved;
+            }
+        }
     });
 
     test("GF0160 — arithmetic narrowing into a declared width", async () => {
@@ -372,6 +398,7 @@ describe("the registry and the suite agree", () => {
             "GF0001",
             "GF0002",
             "GF0003",
+            "GF0006",
             "GF0004",
             "GF0160",
             "GF0161",

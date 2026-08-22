@@ -92,6 +92,20 @@ quo rather than a new class of dependency.
 `GOBLIN_CLANG` names a specific one. `llvm-objdump` is wanted only by tests, and
 they fall back to GNU `objdump`.
 
+**They are checked before the type-check, not when they are first run.**
+`packages/forge/src/toolchain.ts` walks `PATH` for clang, cargo and the linker —
+`ar` instead, for a `static-lib`, since an archive is not a link — and a build
+that cannot finish says so as `GF0006` before it does anything. Without that, a
+machine with no clang compiles the whole program and then fails inside the
+backend with an `InternalError`, which is a `GF90xx` claiming the compiler is
+broken about a machine that is only missing a package.
+
+Two things it deliberately does not check. **Bun**, because it cannot be
+missing: the executable *is* Bun. And **the linker on Windows**, which is found
+through the registry rather than `PATH` — a `PATH` walk would report it missing
+on a machine where the build then succeeds, and a check that cries wolf is worse
+than no check.
+
 The `.ll` is written beside every object and kept. When the backend is
 suspected, read it first — that is half of what text IR was chosen for.
 

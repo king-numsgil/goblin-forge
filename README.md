@@ -184,9 +184,11 @@ succeeds. When those files are present the compiler uses them rather than its
 own copies, so the two cannot drift.
 
 Two caveats while this is experimental. The binary is large (~110 MB — it
-contains a JavaScript runtime), and it still needs **cargo and a linker on the
-machine**, because it compiles and links native code. It removes the need to
-install goblin-forge, not the need for a toolchain.
+contains a JavaScript runtime), and it still needs **clang, cargo and a linker
+on the machine**, because it compiles and links native code. It removes the need
+to install goblin-forge, not the need for a toolchain. A machine that is missing
+one of them is told so before the type-check rather than after it, with what is
+missing and what each one is for.
 
 ### Compiling your own program
 

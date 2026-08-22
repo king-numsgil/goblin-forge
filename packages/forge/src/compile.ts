@@ -34,6 +34,7 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { elaborateDrops } from "./drop-elaboration.ts";
 import { emitHeader, HeaderError, runtimeSymbols } from "./header.ts";
 import { lower } from "./lower.ts";
+import { checkToolchain } from "./toolchain.ts";
 
 export type OutputKind = "bin" | "static-lib" | "shared-lib";
 export type OptLevel = "none" | "speed" | "size";
@@ -270,6 +271,16 @@ export class Compiler {
 
     async build(): Promise<CompileResult> {
         const diagnostics: Diagnostic[] = [];
+
+        // 0. The machine. Before tsc rather than at the point of use, because a
+        // missing clang is otherwise found after the whole program has been
+        // checked and lowered — and found by the backend, which reports it as an
+        // internal error, which is the compiler saying it is broken about a
+        // machine that is only missing a package.
+        const toolchain = checkToolchain(this.#options.type ?? "bin");
+        if (toolchain.length > 0) {
+            return failed(toolchain);
+        }
 
         // 1. tsc. Its verdict is final: nothing downstream runs if it says no.
         const checked = this.#phase("check", () => this.#checker.check());
