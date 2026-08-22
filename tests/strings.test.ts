@@ -389,6 +389,74 @@ describe("the three methods that are runtime calls", () => {
         expect(result.leaked).toBe(0);
     });
 
+    test("the offsets that are out of range, at every edge", async () => {
+        // Each of these is a value the runtime is documented to answer for, and
+        // none of them was covered by the cases above: a `from` past the end, a
+        // needle longer than the haystack, and an empty span.
+        const result = await run(
+            "string-edges",
+            `export function main(): i32 {
+         const s: string = "abc";
+         console.log(\`\${s.indexOf("a", 99)}\`);
+         console.log(\`\${s.indexOf("abcd")}\`);
+         console.log(\`[\${s.substring(2, 2)}]\`);
+         console.log(\`[\${s.substring(99)}]\`);
+         const empty: string = "";
+         console.log(\`\${empty.indexOf("a")} \${empty.codePointAt(0)}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("-1\n-1\n[]\n[]\n-1 0\n");
+        expect(result.leaked).toBe(0);
+    });
+
+    test("a literal is a receiver, though its `length` is not readable", async () => {
+        // The asymmetry is real and worth pinning rather than discovering. A
+        // literal's bytes are static with no allocation behind them, so passing
+        // one to the runtime is fine; `length` is refused because it reads a
+        // header the literal path does not produce a place for.
+        const result = await run(
+            "string-literal-receiver",
+            `export function main(): i32 {
+         console.log("hello".substring(1, 3));
+         console.log(\`\${"hello".indexOf("ll")}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("el\n2\n");
+        expect(result.leaked).toBe(0);
+    });
+
+    test("the methods chain, and the intermediate is released", async () => {
+        const result = await run(
+            "string-chained",
+            `export function main(): i32 {
+         const s: string = "hello, world";
+         // The substring is a temporary that dies with the statement.
+         console.log(\`\${s.substring(7).indexOf("or")}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("1\n");
+        expect(result.leaked).toBe(0);
+    });
+
+    test("a moved-from string cannot be a receiver", async () => {
+        // The ownership rules reach these the same as any other read.
+        await expectRejected(
+            "string-moved-receiver",
+            `function take(s: string): void { }
+
+       export function main(): i32 {
+         let s: string = \`built\`;
+         take(move(s));
+         console.log(s.substring(0, 2));
+         return 0;
+       }\n`,
+            "GF0235",
+        );
+    });
+
     test("the receiver is borrowed, not copied", async () => {
         // A `substring` of a string that is then still readable, and a clean
         // allocation count: if the receiver were copied into the call, the copy

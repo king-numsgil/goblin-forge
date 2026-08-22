@@ -708,6 +708,75 @@ describe("`forEach`, the first prelude method that takes a closure", () => {
         expect(result.leaked).toBe(0);
     });
 
+    test("an array reached through a `Reference` iterates too", async () => {
+        // The receiver is resolved by `asArray`, which unwraps a reference — so
+        // a function taking `Reference<T[]>` to avoid copying the buffer can
+        // still iterate it.
+        const result = await run(
+            "foreach-by-reference",
+            `function total(xs: Reference<i32[]>): i32 {
+         let n: i32 = 0;
+         xs.forEach((x) => { n = n + x; });
+         return n;
+       }
+
+       export function main(): i32 {
+         const xs: i32[] = [1, 2, 3];
+         return total(xs);
+       }\n`,
+        );
+        expect(result.exitCode).toBe(6);
+        expect(result.leaked).toBe(0);
+    });
+
+    test("an array of class values iterates without copying itself apart", async () => {
+        const result = await run(
+            "foreach-classes",
+            `class Rect { w: i32; h: i32; constructor(w: i32, h: i32) { this.w = w; this.h = h; } }
+
+       export function main(): i32 {
+         const rs: Rect[] = [new Rect(2, 3), new Rect(4, 5)];
+         let area: i32 = 0;
+         rs.forEach((r) => { area = area + r.w * r.h; });
+         return area;
+       }\n`,
+        );
+        expect(result.exitCode).toBe(26);
+        expect(result.leaked).toBe(0);
+    });
+
+    test("a `FixedArray` has no `forEach`, and tsc is what says so", async () => {
+        // Not an oversight. `FixedArray<T, N>` extends `CorePointer<T>`, not
+        // `Array<T>` — it *is* the bytes, and the methods that grow and iterate
+        // a handle are the handle's. Pinned because "helpfully" adding it to the
+        // prelude would make a fixed array pretend to be a vector.
+        await expectRejected(
+            "foreach-fixed-array",
+            `export function main(): i32 {
+         const buf: FixedArray<i32, 3> = fixedArray(3, 2);
+         let total: i32 = 0;
+         buf.forEach((x) => { total = total + x; });
+         return total;
+       }\n`,
+            "TS2339",
+        );
+    });
+
+    test("a callback of the wrong arity is refused by tsc", async () => {
+        // Which is why the lowerer's own arity check is defence rather than the
+        // diagnostic anybody sees: the declared parameter type is a `LocalFn`
+        // with one argument, and a two-argument lambda does not satisfy it.
+        await expectRejected(
+            "foreach-wrong-arity",
+            `export function main(): i32 {
+         const xs: i32[] = [1];
+         xs.forEach((a, b) => { });
+         return 0;
+       }\n`,
+            "TS2345",
+        );
+    });
+
     test("a callback that is not written as a lambda still works", async () => {
         // A `LocalFn` parameter accepts a non-capturing lambda with a null
         // environment, which is what lets a caller not know which kind it wrote.
