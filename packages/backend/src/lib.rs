@@ -363,6 +363,44 @@ pub fn output_prefix(kind: String) -> String {
     goblin_codegen::prefix_for(output_kind(&kind), cfg!(windows)).to_owned()
 }
 
+/// Whether the platform's linker can be found, for a build that has not started.
+#[napi(object)]
+pub struct LinkerProbe {
+    /// Whether this platform finds the tool by probing rather than on `PATH`.
+    ///
+    /// `false` is not "missing" — it means the caller's own `PATH` lookup is the
+    /// right question, which is the case on every Unix and on MinGW.
+    pub probed: bool,
+
+    /// Where the tool is, when the probe found it.
+    pub path: Option<String>,
+}
+
+/// Find the linker a build of this kind would run, without running it.
+///
+/// The frontend checks the toolchain before it type-checks anything, and on
+/// MSVC it cannot do that for itself: `link.exe` and `lib.exe` are found by
+/// probing the registry, so they work without a Developer Command Prompt and
+/// without being on `PATH` — and a `PATH` walk would call them missing on a
+/// machine where the build then succeeds.
+///
+/// This is the same lookup the link step performs, through the same function,
+/// so the check and the thing it checks cannot answer differently.
+#[napi]
+pub fn locate_linker(kind: String) -> LinkerProbe {
+    if !goblin_codegen::uses_registry() {
+        return LinkerProbe {
+            probed: false,
+            path: None,
+        };
+    }
+    LinkerProbe {
+        probed: true,
+        path: goblin_codegen::locate_msvc_tool(output_kind(&kind))
+            .map(|path| path.to_string_lossy().into_owned()),
+    }
+}
+
 fn output_kind(kind: &str) -> OutputKind {
     match kind {
         "static-lib" => OutputKind::StaticLib,

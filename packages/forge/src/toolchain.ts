@@ -25,22 +25,28 @@
  * (DECISIONS §17).
  */
 
+import { locateLinker } from "@goblin-forge/backend";
 import type { Diagnostic } from "@goblin-forge/checker";
 import { accessSync, constants, statSync } from "node:fs";
 import { delimiter, isAbsolute, join, sep } from "node:path";
 
 import type { OutputKind } from "./compile.ts";
 
-/** One thing a build runs, and what it is for. */
+/** One thing a build runs, and whether it is there. */
 interface Tool {
-    /** What to look for: a bare name to find on `PATH`, or a path as given. */
+    /** What it is called, in the terms it was looked for. */
     readonly name: string;
 
     /** What it does, for somebody who has just been told to install it. */
     readonly what: string;
 
-    /** The variable that names a specific one, where there is one. */
-    readonly override?: string;
+    readonly found: boolean;
+
+    /** How the looking failed, when it did. */
+    readonly missing: string;
+
+    /** What to do about it, where the answer is more specific than "install it". */
+    readonly remedy?: string;
 }
 
 /**
@@ -50,38 +56,65 @@ interface Tool {
  * also roughly the order somebody would install them in.
  */
 function required(kind: OutputKind): readonly Tool[] {
-    const tools: Tool[] = [
-        {
-            name: process.env["GOBLIN_CLANG"] ?? "clang",
-            what: "compiles the LLVM IR the backend emits",
-            override: "GOBLIN_CLANG",
-        },
-        {
-            name: "cargo",
-            what: "builds the Goblin runtime for your target",
-        },
+    return [
+        onPath(
+            process.env["GOBLIN_CLANG"] ?? "clang",
+            "compiles the LLVM IR the backend emits",
+            "GOBLIN_CLANG",
+        ),
+        onPath("cargo", "builds the Goblin runtime for your target"),
+        linker(kind),
     ];
+}
 
-    // An archive is not a link. Nothing is resolved and no runtime is pulled in,
-    // so a `static-lib` never runs the linker and a machine without one can
-    // still build it.
-    tools.push(
-        kind === "static-lib"
-            ? {
-                  name: process.env["AR"] ?? "ar",
-                  what: "bundles the objects into an archive",
-                  override: "AR",
-              }
-            : {
-                  // The platform C compiler rather than `ld`, because it is the
-                  // thing that knows where the CRT startup files live.
-                  name: process.env["CC"] ?? "cc",
-                  what: "links the artefact",
-                  override: "CC",
-              },
-    );
+/** A tool found by name on `PATH`, or at the path a variable named. */
+function onPath(name: string, what: string, override?: string): Tool {
+    return {
+        name,
+        what,
+        found: found(name),
+        // A name that is already a path was given by whoever set the variable, so
+        // "not on PATH" would be answering a question they did not ask.
+        missing: isPath(name) ? "no such file" : "not on PATH",
+        ...(override === undefined ? {} : {remedy: `\`${override}\` names a specific one`}),
+    };
+}
 
-    return tools;
+/**
+ * The linker, or the archiver — and whichever route this platform finds it by.
+ *
+ * The backend is asked rather than guessed at. On MSVC it answers from the same
+ * registry probe the link step itself runs, which is the only thing that can
+ * answer: those tools are not on `PATH` even when they are installed, so a walk
+ * would report a missing linker on a machine that links fine. Everywhere else —
+ * every Unix, and MinGW on Windows — it says so, and `PATH` is the question.
+ *
+ * An archive is not a link: nothing is resolved and no runtime is pulled in, so
+ * a `static-lib` wants `ar` (or `lib.exe`) and a machine with no linker can
+ * still build one.
+ */
+function linker(kind: OutputKind): Tool {
+    const archiving = kind === "static-lib";
+    const what = archiving ? "bundles the objects into an archive" : "links the artefact";
+    const probe = locateLinker(kind);
+
+    if (!probe.probed) {
+        return archiving
+            ? onPath(process.env["AR"] ?? "ar", what, "AR")
+            // The platform C compiler rather than `ld`, because it is the thing
+            // that knows where the CRT startup files live.
+            : onPath(process.env["CC"] ?? "cc", what, "CC");
+    }
+
+    return {
+        name: archiving ? "lib.exe" : "link.exe",
+        what,
+        found: probe.path !== undefined,
+        missing: "the Visual Studio registry probe found none",
+        remedy:
+            "install the Visual Studio Build Tools with the " +
+            "\"Desktop development with C++\" workload",
+    };
 }
 
 /**
@@ -91,17 +124,17 @@ function required(kind: OutputKind): readonly Tool[] {
  * missing cargo too, and finding that out one build at a time is a worse
  * afternoon than being told once.
  *
- * **Windows is checked less**, deliberately. `link.exe` and `lib.exe` are found
- * through the same registry probing cargo's `cc` crate uses, so they work
- * without a Developer Command Prompt and without being on `PATH` — a `PATH`
- * walk would report them missing on a machine where the build then succeeds,
- * and a check that cries wolf is worse than no check. clang and cargo are
- * ordinary `PATH` lookups there like everywhere else.
+ * **The linker is not always a `PATH` question**, and this does not guess which
+ * case it is in. On MSVC, `link.exe` and `lib.exe` are found by probing the
+ * registry — they work without a Developer Command Prompt and without being on
+ * `PATH`, so a walk would call them missing on a machine where the build then
+ * succeeds. `locateLinker` is the backend answering with the same lookup the
+ * link step itself performs, so the check and the thing it checks cannot
+ * disagree; it says `probed: false` where `PATH` really is the right question,
+ * which is every Unix and MinGW.
  */
 export function checkToolchain(kind: OutputKind): Diagnostic[] {
-    const missing = required(kind).filter(
-        (tool) => !(process.platform === "win32" && isPlatformLinker(tool)) && !found(tool.name),
-    );
+    const missing = required(kind).filter((tool) => !tool.found);
     if (missing.length === 0) {
         return [];
     }
@@ -128,18 +161,8 @@ export function checkToolchain(kind: OutputKind): Diagnostic[] {
 
 /** One line per missing tool: what was looked for, what it is for, and the way out. */
 function describe(tool: Tool): string {
-    // A name that is already a path was given by whoever set the variable, so
-    // "not on PATH" would be answering a question they did not ask.
-    const where = isPath(tool.name) ? "no such file" : "not on PATH";
-    const override = tool.override === undefined
-        ? ""
-        : `; \`${tool.override}\` names a specific one`;
-    return `  ${tool.name} (${where}) — ${tool.what}${override}`;
-}
-
-/** The linker and the archiver, which Windows finds by a route `PATH` cannot see. */
-function isPlatformLinker(tool: Tool): boolean {
-    return tool.override === "CC" || tool.override === "AR";
+    const remedy = tool.remedy === undefined ? "" : `; ${tool.remedy}`;
+    return `  ${tool.name} (${tool.missing}) — ${tool.what}${remedy}`;
 }
 
 /** Whether a tool can be run: a path as given, a bare name found on `PATH`. */

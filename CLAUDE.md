@@ -93,18 +93,32 @@ quo rather than a new class of dependency.
 they fall back to GNU `objdump`.
 
 **They are checked before the type-check, not when they are first run.**
-`packages/forge/src/toolchain.ts` walks `PATH` for clang, cargo and the linker —
-`ar` instead, for a `static-lib`, since an archive is not a link — and a build
-that cannot finish says so as `GF0006` before it does anything. Without that, a
+`packages/forge/src/toolchain.ts` looks for clang, cargo and the linker — `ar`
+instead, for a `static-lib`, since an archive is not a link — and a build that
+cannot finish says so as `GF0006` before it does anything. Without that, a
 machine with no clang compiles the whole program and then fails inside the
 backend with an `InternalError`, which is a `GF90xx` claiming the compiler is
 broken about a machine that is only missing a package.
 
-Two things it deliberately does not check. **Bun**, because it cannot be
-missing: the executable *is* Bun. And **the linker on Windows**, which is found
-through the registry rather than `PATH` — a `PATH` walk would report it missing
-on a machine where the build then succeeds, and a check that cries wolf is worse
-than no check.
+**The linker is not always a `PATH` question, and the check does not decide that
+for itself.** `locateLinker` in the addon answers, using the same
+`find_msvc_tool` the link step calls: under MSVC it probes the registry, and
+everywhere else — every Unix, and MinGW, which is `windows` and wants the
+opposite answer — it reports that `PATH` is the question. Deciding it in
+TypeScript from `process.platform` would be a second opinion about which linker
+is going to run, and the interesting failures are exactly where two opinions
+differ.
+
+**Bun is not checked**, because it cannot be missing: the executable *is* Bun.
+Neither is LLVM a separate thing to look for — the backend emits text IR and
+hands it to clang.
+
+Adding a `#[napi]` export means rebuilding the CLI, not just the addon.
+`packages/cli/build.ts` generates a shim that re-exports the addon's bindings by
+name, because there is no `export *` from a `require`d `.node`. That list is now
+read off the addon itself; it used to be typed out, and a hand-listed surface
+that nothing checked is how `locateLinker` reached the bundle as a
+`ReferenceError` at run time rather than an error at build time.
 
 The `.ll` is written beside every object and kept. When the backend is
 suspected, read it first — that is half of what text IR was chosen for.

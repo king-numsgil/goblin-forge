@@ -60,6 +60,47 @@ pub struct LinkReport {
     pub command: String,
 }
 
+/// Whether this build finds its linker through the registry rather than `PATH`.
+///
+/// The same condition [`link`] branches on, exported rather than restated: a
+/// toolchain check that decided this for itself would be a second opinion about
+/// which linker is going to run, and the interesting failures are exactly the
+/// ones where the two opinions differ. MinGW on Windows answers `false` here and
+/// is right to — it is driven through `cc` like any other Unix.
+pub fn uses_registry() -> bool {
+    cfg!(target_env = "msvc")
+}
+
+/// Where the MSVC tool this kind of build would run actually is.
+///
+/// `None` means the registry probe found nothing, which is the failure worth
+/// reporting early — the tools are not on `PATH` even when they are installed,
+/// so nothing else can answer this question.
+pub fn locate_msvc_tool(kind: OutputKind) -> Option<PathBuf> {
+    // An archive is not a link, and the two are different programs.
+    let name = if kind == OutputKind::StaticLib {
+        "lib.exe"
+    } else {
+        "link.exe"
+    };
+    find_msvc_tool(name).map(|tool| tool.path().to_path_buf())
+}
+
+/// The target the MSVC probe answers for.
+fn msvc_target() -> String {
+    std::env::var("TARGET").unwrap_or_else(|_| "x86_64-pc-windows-msvc".to_owned())
+}
+
+/// The one place a Visual Studio tool is looked for.
+///
+/// Registry probing, the same as cargo's build scripts do, so a Developer
+/// Command Prompt is not required. Everything that needs one of these tools —
+/// the link, the archive, and the check that runs before either — comes through
+/// here, so there is one answer rather than three that can drift apart.
+fn find_msvc_tool(name: &str) -> Option<cc::Tool> {
+    cc::windows_registry::find_tool(&msvc_target(), name)
+}
+
 pub fn link(request: &LinkRequest<'_>) -> Result<LinkReport> {
     if let Some(parent) = request.output.parent() {
         std::fs::create_dir_all(parent)
@@ -115,12 +156,11 @@ fn archive(request: &LinkRequest<'_>) -> Result<LinkReport> {
     }
 
     let mut command = if cfg!(target_env = "msvc") {
-        let target =
-            std::env::var("TARGET").unwrap_or_else(|_| "x86_64-pc-windows-msvc".to_owned());
-        let tool = cc::windows_registry::find_tool(&target, "lib.exe").ok_or_else(|| {
+        let tool = find_msvc_tool("lib.exe").ok_or_else(|| {
             anyhow::anyhow!(
-                "could not find lib.exe for {target}. Install the Visual Studio Build Tools \
-                 with the \"Desktop development with C++\" workload."
+                "could not find lib.exe for {}. Install the Visual Studio Build Tools \
+                 with the \"Desktop development with C++\" workload.",
+                msvc_target()
             )
         })?;
         let mut command = Command::new(tool.path());
@@ -165,11 +205,11 @@ fn archive(request: &LinkRequest<'_>) -> Result<LinkReport> {
 /// MSVC: `link.exe`, found through the same registry probing `cc` uses for
 /// build scripts, so it works without a Developer Command Prompt.
 fn msvc_command(request: &LinkRequest<'_>) -> Result<Command> {
-    let target = std::env::var("TARGET").unwrap_or_else(|_| "x86_64-pc-windows-msvc".to_owned());
-    let tool = cc::windows_registry::find_tool(&target, "link.exe").ok_or_else(|| {
+    let tool = find_msvc_tool("link.exe").ok_or_else(|| {
         anyhow::anyhow!(
-            "could not find link.exe for {target}. Install the Visual Studio Build Tools \
-             with the \"Desktop development with C++\" workload."
+            "could not find link.exe for {}. Install the Visual Studio Build Tools \
+             with the \"Desktop development with C++\" workload.",
+            msvc_target()
         )
     })?;
 
@@ -352,6 +392,21 @@ pub fn extension_for(kind: OutputKind, target_is_windows: bool) -> &'static str 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The frontend checks the toolchain before it type-checks anything, and it
+    /// asks here rather than deciding for itself — a `PATH` walk cannot see a
+    /// registry, and MSVC and MinGW are both `windows` and want opposite
+    /// answers. What this pins is that the check and the link agree about which
+    /// case they are in: `link` branches on `target_env = "msvc"`, and so does
+    /// this, and a host that is not MSVC must say the probe is not the question.
+    #[test]
+    fn the_registry_is_consulted_exactly_where_the_link_consults_it() {
+        assert_eq!(uses_registry(), cfg!(target_env = "msvc"));
+        if !uses_registry() {
+            assert!(locate_msvc_tool(OutputKind::Bin).is_none());
+            assert!(locate_msvc_tool(OutputKind::StaticLib).is_none());
+        }
+    }
 
     #[test]
     fn a_rust_staticlibs_crt_choice_wins_over_our_default() {

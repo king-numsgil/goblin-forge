@@ -14,6 +14,8 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
+import { locateLinker } from "@goblin-forge/backend";
+
 import { checkToolchain } from "../packages/forge/src/toolchain.ts";
 
 const VARIABLES = ["PATH", "GOBLIN_CLANG", "CC", "AR"] as const;
@@ -71,6 +73,33 @@ describe("the toolchain check", () => {
         expect(message).toContain("GOBLIN_CLANG");
         expect(message).toContain("Nothing has been compiled");
     });
+
+    /**
+     * The one question a `PATH` walk cannot answer for itself.
+     *
+     * On MSVC the linker is found by probing the registry — installed and not
+     * on `PATH` is the normal state there — so the backend answers with the
+     * same lookup the link step runs, and the two cannot disagree. Everywhere
+     * else it says so, and `PATH` is the right question.
+     *
+     * Only half of that is assertable here. A Windows host is the other half,
+     * and it is why the answer comes from the backend rather than from a
+     * `process.platform` test in TypeScript: MSVC and MinGW are both `win32`
+     * and want opposite answers, and only the built addon knows which it is.
+     */
+    test.skipIf(process.platform === "win32")(
+        "the backend says how the linker is found, and the check takes its word",
+        () => {
+            const probe = locateLinker("bin");
+            expect({probed: probe.probed, path: probe.path}).toEqual({
+                probed: false,
+                path: undefined,
+            });
+
+            process.env["PATH"] = "";
+            expect(checkToolchain("bin")[0]?.message).toMatch(/\bcc \(not on PATH\)/);
+        },
+    );
 
     test("a static library wants the archiver, not the linker", () => {
         // An archive is not a link: nothing is resolved and no runtime is pulled

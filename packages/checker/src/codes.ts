@@ -106,10 +106,11 @@ export const CODES = {
             "rather than a missing package, and arrives after the wait instead of " +
             "instead of it.\n\n" +
             "`GOBLIN_CLANG`, `CC` and `AR` name a specific tool where a machine has " +
-            "several or keeps them somewhere unusual. On Windows the linker and " +
-            "the archiver are found through the registry rather than `PATH`, so " +
-            "they are not checked here and a Developer Command Prompt is not " +
-            "needed.",
+            "several or keeps them somewhere unusual. Under MSVC the linker is not " +
+            "a `PATH` question at all — `link.exe` and `lib.exe` are found by " +
+            "probing the registry, which is why a Developer Command Prompt is not " +
+            "needed — so the backend is asked instead, with the same lookup the " +
+            "link step itself performs.",
     },
 
     // -- Widths and arithmetic ----------------------------------------------

@@ -19,5 +19,8 @@ pub mod runtime;
 
 pub use error::{InternalError, Result};
 pub use layout::{Layout, Layouts, Repr, Scalar, TargetInfo, render_type};
-pub use link::{LinkReport, LinkRequest, OutputKind, extension_for, link, prefix_for};
+pub use link::{
+    LinkReport, LinkRequest, OutputKind, extension_for, link, locate_msvc_tool, prefix_for,
+    uses_registry,
+};
 pub use object::{CodegenOptions, ModuleArtifact, OptLevel, compile_module, target_info};
