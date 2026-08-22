@@ -123,4 +123,44 @@ declare type GoblinBuild = {
      * able to read as a clean rejection.
      */
     readonly strictInternalErrors?: boolean;
+
+    /**
+     * What to run before the compiler, in order.
+     *
+     * A string is a command line, run by **Bun's own shell** rather than the
+     * platform's — so `&&`, a pipe, a glob and `$VAR` mean the same thing on
+     * every machine, and a step does not depend on which `sh` is installed. A
+     * function is called inside the compiler's own process, for a step that is
+     * a few lines of TypeScript rather than a program somebody already wrote.
+     * A list of either runs one step at a time, in the order written.
+     *
+     * These run before the *typecheck*, not merely before the link, so a step
+     * that writes a source file writes it in time to be checked. A step that
+     * fails stops the build: nothing is compiled, and the exit code is 1.
+     *
+     * A command's working directory is the build script's own, like every
+     * relative path here.
+     */
+    readonly before?:
+        | string
+        | (() => void | Promise<void>)
+        | readonly (string | (() => void | Promise<void>))[];
+
+    /**
+     * What to run after a build that produced something, in order.
+     *
+     * Handed the absolute path of the artefact — as an argument to a function,
+     * and as `$GOBLIN_OUTPUT` to a command. That is the one thing a post-build
+     * step reliably wants and the one thing this config cannot spell:
+     * {@link GoblinBuild.output} carries no extension, and which one gets added
+     * is the target's business and the platform's.
+     *
+     * A build that failed does not run these — there is nothing to run them on.
+     * A step that fails here leaves the artefact where it is, says so, and
+     * exits 1: the file was built, but the build did not finish.
+     */
+    readonly after?:
+        | string
+        | ((output: string) => void | Promise<void>)
+        | readonly (string | ((output: string) => void | Promise<void>))[];
 };

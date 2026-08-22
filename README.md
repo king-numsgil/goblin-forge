@@ -136,6 +136,34 @@ Relative paths resolve against the script rather than the working directory, so
 `goblin-forge path/to/build.ts` does the same thing from anywhere. A default
 export that is a function works too, and is evaluated for its config.
 
+A script can also say what to run around the build:
+
+```ts
+// build.ts
+import { statSync } from "node:fs";
+
+export default {
+  entry: "./src/main.ts",
+  output: "./bin/app",
+
+  before: "bun run codegen",
+  after: [(output) => console.log(`${statSync(output).size} bytes`), "strip $GOBLIN_OUTPUT"],
+};
+```
+
+A string is a command line and a function is called in this process; either may
+be a list, run one step at a time in the order written. Commands go to **Bun's
+own shell** rather than the platform's, so `&&`, a pipe, a glob and `$VAR` mean
+the same thing on every machine, and a step does not depend on which `sh` is
+installed — the shell is inside the executable.
+
+`before` runs ahead of the *typecheck*, so a step that generates a source file
+generates it in time to be checked, and a step that fails stops the build with
+nothing compiled. `after` runs once the artefact exists and is handed its
+absolute path — as an argument to a function, as `$GOBLIN_OUTPUT` to a command —
+because `output` above has no extension and which one gets added is the target's
+business.
+
 `init` writes the prelude into `.goblin/` so your **editor** can read it —
 tsserver reads the project's tsconfig and nothing else, so a prelude that lives
 only inside the executable would leave `i32` underlined in red while the build

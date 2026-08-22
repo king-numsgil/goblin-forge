@@ -291,3 +291,149 @@ describe("building", () => {
         expect(result.stderr).toContain("entry");
     });
 });
+
+/**
+ * What a build script could not say before.
+ *
+ * `compile` is a function, so a script that calls it can do what it likes on
+ * either side of the call. A script that *exports* a config had nowhere to put
+ * that, and the workaround — shelling out from the script's top level — ran on
+ * load, before the tool had looked at the config at all.
+ */
+describe("`before` and `after`", () => {
+    let dir: string;
+    let exe: string;
+
+    beforeAll(() => {
+        dir = project("hooks");
+        run(dir, "init");
+        exe = join(dir, "bin", process.platform === "win32" ? "app.exe" : "app");
+
+        // The entry imports a module that does not exist yet. That is the
+        // assertion: `before` runs ahead of the *typecheck*, not merely ahead of
+        // the link, so a generated source file is generated in time to be
+        // checked rather than in time to be missed.
+        writeFileSync(
+            join(dir, "src", "main.ts"),
+            `import { seven } from "./generated.ts";
+
+       export function main(): i32 { return seven(); }\n`,
+        );
+
+        writeFileSync(
+            join(dir, "build.ts"),
+            `import { writeFileSync } from "node:fs";
+       import { join } from "node:path";
+
+       const here = import.meta.dir;
+
+       function generate(): void {
+         writeFileSync(join(here, "src", "generated.ts"), "export function seven(): i32 { return 7; }\\n");
+         writeFileSync(join(here, "steps.txt"), "first\\n");
+       }
+
+       export default {
+         entry: "./src/main.ts",
+         output: "./bin/app",
+         before: [generate, "echo second >> steps.txt"],
+         after: [
+           "echo $GOBLIN_OUTPUT > output.txt",
+           (output: string) => { writeFileSync(join(here, "after.txt"), output); },
+         ],
+       };\n`,
+        );
+    });
+
+    test("a step is a function or a command, and a list of them runs in order", () => {
+        const result = run(dir, "build.ts");
+        expect({status: result.status, stderr: result.stderr}).toEqual({status: 0, stderr: ""});
+
+        // The generated module reached the compiler: the program returns what
+        // only the `before` step could have written.
+        expect(spawnSync(exe, [], {encoding: "utf8"}).status).toBe(7);
+
+        // Sequential, not concurrent. A list in a file reads as an order, and
+        // the ordinary case is a step that consumes what the one before it
+        // wrote — the second command appends to a file the first one truncates,
+        // so a race would show up as "second\n" alone.
+        expect(readFileSync(join(dir, "steps.txt"), "utf8")).toBe("first\nsecond\n");
+    }, TIMEOUT);
+
+    test("`after` is handed the artefact's path, which the config cannot spell", () => {
+        // `output` in the config is "./bin/app": no directory, no extension, and
+        // which extension gets added is the platform's business. Both forms get
+        // the real thing — a function as an argument, a command in its
+        // environment.
+        expect(readFileSync(join(dir, "output.txt"), "utf8").trim()).toBe(exe);
+        expect(readFileSync(join(dir, "after.txt"), "utf8")).toBe(exe);
+    });
+
+    test("the steps are announced, and `after` runs under the result line", () => {
+        const result = run(dir, "build.ts");
+        // A named function is named; a command is quoted, so a line of shell
+        // reads as a quotation rather than as the tool's own words.
+        expect(result.stdout).toContain("before generate()…");
+        expect(result.stdout).toContain("after `echo $GOBLIN_OUTPUT > output.txt`…");
+        // Where the artefact landed is the answer somebody is waiting for, so it
+        // is printed before an `after` step gets the chance to print a page of
+        // its own.
+        expect(result.stdout.indexOf("built ")).toBeLessThan(result.stdout.indexOf("after `"));
+    }, TIMEOUT);
+
+    test("`--quiet` drops the announcements, not the steps", () => {
+        rmSync(join(dir, "output.txt"), {force: true});
+        const result = run(dir, "build.ts", "--quiet");
+        expect(result.status).toBe(0);
+        expect(result.stdout).not.toContain("before generate()");
+        // Quiet is about this tool's own narration. A step's output is the
+        // user's own program talking, and suppressing it would be suppressing
+        // the thing they asked for.
+        expect(readFileSync(join(dir, "output.txt"), "utf8").trim()).toBe(exe);
+    }, TIMEOUT);
+
+    test("a failing `before` step stops the build before anything is compiled", () => {
+        const failing = project("before-fails");
+        run(failing, "init");
+        writeFileSync(
+            join(failing, "build.ts"),
+            `export default {
+         entry: "./src/main.ts",
+         output: "./bin/app",
+         before: "bun -e 'process.exit(3)'",
+       };\n`,
+        );
+
+        const result = run(failing, "build.ts");
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain("exited 3");
+        // The compiler printed nothing because it never ran, and silence there
+        // is indistinguishable from a compiler that had nothing to say.
+        expect(result.stderr).toContain("Nothing was compiled.");
+        expect(result.stdout).not.toContain("checking types");
+        expect(existsSync(join(failing, "bin"))).toBe(false);
+    }, TIMEOUT);
+
+    test("a failing `after` step leaves the artefact, and still fails the build", () => {
+        const failing = project("after-fails");
+        run(failing, "init");
+        writeFileSync(
+            join(failing, "build.ts"),
+            `export default {
+         entry: "./src/main.ts",
+         output: "./bin/app",
+         after: "bun -e 'process.exit(4)'",
+       };\n`,
+        );
+
+        const result = run(failing, "build.ts");
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain("exited 4");
+        // The file really was built, and saying otherwise would send somebody
+        // looking for a compiler error that does not exist. What failed is the
+        // build, not the compile.
+        expect(result.stdout).toContain("built ");
+        expect(
+            existsSync(join(failing, "bin", process.platform === "win32" ? "app.exe" : "app")),
+        ).toBe(true);
+    }, TIMEOUT);
+});

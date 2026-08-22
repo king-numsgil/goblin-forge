@@ -28,6 +28,7 @@
  * result: there is one place that reports diagnostics and sets the exit code.
  */
 
+import { $ } from "bun";
 import {
     type BuildEvent,
     compile,
@@ -55,7 +56,48 @@ const VERSION = "0.1.0";
 export type BuildConfig = Omit<CompileOptions, "root" | "tsconfig" | "onProgress"> & {
     readonly root?: string;
     readonly tsconfig?: string;
+
+    /**
+     * What to run before the compiler, in order.
+     *
+     * The thing a build script could not say. `compile` is a function, so a
+     * script that calls it can do whatever it likes on either side of the call;
+     * a script that *exports* a config had nowhere to put that, and the answer
+     * was to shell out from the script's top level — which ran on load, before
+     * the tool had decided whether the config was even valid.
+     */
+    readonly before?: BuildStep | readonly BuildStep[];
+
+    /** What to run after a build that produced something, in order. */
+    readonly after?: AfterStep | readonly AfterStep[];
 };
+
+/**
+ * One thing to run around a build: a command line, or a function.
+ *
+ * A string goes to **Bun's own shell**, not the platform's. That is what makes
+ * `&&`, a pipe, a glob and `$VAR` mean the same thing on every machine this
+ * compiler runs on, and it is the only choice that holds for a single-file
+ * executable — the shell is inside the binary, so a step does not depend on
+ * what `sh` the machine has, or on `cmd.exe` reading the line differently.
+ *
+ * A function is called in this process. It is the form for a step that is a few
+ * lines of TypeScript rather than a program somebody already wrote, and it is
+ * why `before`/`after` are the tool's fields rather than the compiler's:
+ * `compile` is a library and does not run other people's code.
+ */
+export type BuildStep = string | (() => void | Promise<void>);
+
+/**
+ * The same, for a step that runs once the artefact exists.
+ *
+ * Handed the absolute path of what was built — as an argument to a function,
+ * and as `$GOBLIN_OUTPUT` to a command. That path is the one thing a post-build
+ * step reliably wants and the one thing the config cannot spell: `output` there
+ * carries no extension, and which one gets added is the target's business and
+ * the platform's.
+ */
+export type AfterStep = string | ((output: string) => void | Promise<void>);
 
 /**
  * The editor's copy of that type and this one are the same shape.
@@ -109,7 +151,15 @@ EXAMPLE
     output: "./bin/app",
     type: "bin",              // or "static-lib" / "shared-lib"
     optLevel: "speed",        // "none" | "speed" | "size"
+
+    before: "bun run codegen",          // a command, or a function
+    after: (output) => strip(output),   // and either may be a list
   } satisfies GoblinBuild;
+
+A \`before\` step runs before the compiler and a failing one stops the build; an
+\`after\` step runs once the artefact exists and is handed its absolute path, as
+an argument to a function and as \`$GOBLIN_OUTPUT\` to a command. Commands go to
+Bun's own shell, so a pipe, a glob and \`&&\` mean the same thing everywhere.
 
 The reference line and the \`satisfies\` are optional — a build script without
 them builds the same. They are what gives an editor completion on the fields and
@@ -208,6 +258,101 @@ function reportProgress(event: BuildEvent): void {
     }
 }
 
+/**
+ * Run what a build script asked for around the build, and say whether to go on.
+ *
+ * Sequential, because a list written in a file reads as an order: codegen and
+ * the command that consumes what it wrote is the ordinary case, and starting
+ * both at once is a race that usually wins. A step that fails ends the run —
+ * `before` because compiling sources that a step did not finish producing is
+ * worse than not compiling, `after` because a post-build step that failed is a
+ * build that did not finish, whatever is sitting on disk.
+ *
+ * `BuildStep` is assignable to `AfterStep` — a function of no arguments takes a
+ * path perfectly well — so one implementation serves both, and `before` is the
+ * case where there is no path to give.
+ */
+async function runSteps(
+    when: "before" | "after",
+    steps: AfterStep | readonly AfterStep[] | undefined,
+    root: string,
+    output: string | undefined,
+    quiet: boolean,
+): Promise<boolean> {
+    const list: readonly AfterStep[] =
+        steps === undefined
+            ? []
+            : typeof steps === "string" || typeof steps === "function"
+                ? [steps]
+                : steps;
+
+    for (const step of list) {
+        // Terminated, unlike a phase label, because what follows is the step's
+        // own output rather than a wait: a command inherits this terminal and
+        // writes to it, and a duration printed after that would be attached to
+        // whatever the step happened to say last. The total on the result line
+        // covers `before`, which is the number that was worth having.
+        if (!quiet) {
+            process.stdout.write(`  ${when} ${describe(step)}…\n`);
+        }
+
+        const failure = await runStep(step, root, output);
+        if (failure !== undefined) {
+            process.stderr.write(`goblin-forge: the ${when} step ${describe(step)} ${failure}\n`);
+            if (when === "before") {
+                // Said out loud: the compiler printed nothing, and silence from
+                // it here means it never ran rather than that it had nothing to
+                // say.
+                process.stderr.write("Nothing was compiled.\n");
+            }
+            return false;
+        }
+    }
+    return true;
+}
+
+/** Run one step, and describe how it failed if it did. */
+async function runStep(
+    step: AfterStep,
+    root: string,
+    output: string | undefined,
+): Promise<string | undefined> {
+    try {
+        if (typeof step === "string") {
+            const result = await $`${{raw: step}}`
+                .cwd(root)
+                .env({
+                    ...process.env,
+                    // Absent rather than empty for a `before` step: a command
+                    // that reads it would otherwise be handed "" and act on it,
+                    // and there is genuinely no artefact yet.
+                    ...(output === undefined ? {} : {GOBLIN_OUTPUT: output}),
+                })
+                .nothrow();
+            return result.exitCode === 0 ? undefined : `exited ${result.exitCode}`;
+        }
+        await step(output ?? "");
+        return undefined;
+    } catch (error) {
+        // The stack, not just the message: a step is the user's own code, and
+        // this is the only place it is reported.
+        return `threw\n${error instanceof Error ? (error.stack ?? error.message) : String(error)}`;
+    }
+}
+
+/** What a step is called, for somebody reading the line rather than parsing it. */
+function describe(step: AfterStep): string {
+    // Backticks around a command, so the line reads as a quotation rather than
+    // as this tool's own words when the command contains a sentence's worth of
+    // shell.
+    if (typeof step === "string") {
+        return `\`${step}\``;
+    }
+    // An arrow written straight into the config has no name at all, and `()` on
+    // its own reads worse than saying what it is.
+    return step.name === "" ? "an inline function" : `${step.name}()`;
+}
+
 function cacheRoot(): string {
     const base =
         process.env["GOBLIN_CACHE"] ??
@@ -278,9 +423,24 @@ async function main(argv: readonly string[]): Promise<number> {
     } else {
         useRuntimeFiles(materialise(cacheRoot()));
     }
+    // The two fields the compiler is not given: `compile` writes nothing and
+    // runs nothing, and these are the tool's job precisely because of that.
+    const {before, after, ...options} = config;
+
+    // Started before the `before` steps rather than after them, because the
+    // number on the result line is how long the invocation took and a codegen
+    // step that takes four seconds is four seconds somebody waited.
     const started = performance.now();
+
+    // Before the compiler rather than merely before the link: the ordinary
+    // `before` step writes a source file, and a source file that appears after
+    // the typecheck is a source file nothing checked.
+    if (!(await runSteps("before", before, root, undefined, quiet))) {
+        return 1;
+    }
+
     const result = await compile({
-        ...config,
+        ...options,
         root,
         // A project's tsconfig sits beside its build script unless it says
         // otherwise, which is true of every layout anybody actually writes.
@@ -305,6 +465,15 @@ async function main(argv: readonly string[]): Promise<number> {
     // audience and worth a different sentence.
     if (result.runtimeImportLibrary !== undefined) {
         process.stdout.write(`  and ${result.runtimeImportLibrary}, which a consumer links\n`);
+    }
+
+    // After the result line, not before it: what the artefact is and where it
+    // landed is the answer somebody is waiting for, and an `after` step that
+    // prints a page of its own should print it under that answer rather than
+    // push it off the screen. A step that fails here does not unsay the line —
+    // the artefact really was built — it only means the build did not finish.
+    if (!(await runSteps("after", after, root, result.output, quiet))) {
+        return 1;
     }
     return 0;
 }
