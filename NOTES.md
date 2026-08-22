@@ -424,10 +424,10 @@ nothing here reimplements or configures any of it.
 
 Three consequences worth knowing before profiling anything.
 
-**`optLevel: "none"` is genuinely unoptimised.** Every local is an `alloca` in
+**`optLevel: "O0"` is genuinely unoptimised.** Every local is an `alloca` in
 the entry block and `mem2reg` is what turns those into registers; at `-O0` it
 does not run, so a debug build really does keep every local in memory. That is
-what `clang -O0` does and it is correct. The harness compiles at `"none"`, so
+what `clang -O0` does and it is correct. The harness compiles at `"O0"`, so
 test binaries are slower than a release build by more than the usual margin.
 
 **Inlining and SROA are the reason the port happened.** DECISIONS §17: Cranelift

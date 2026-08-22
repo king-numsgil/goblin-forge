@@ -15,7 +15,7 @@ const result = await compile({
   type: "bin",
   output: "./bin/hello",
 
-  optLevel: "speed",
+  optLevel: "O2",
   debugInfo: true,
 
   outDir: "./build",

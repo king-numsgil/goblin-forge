@@ -1,7 +1,7 @@
 /**
  * The knobs on `compile()`, each turned and each observed.
  *
- * Every other suite runs with one setting of these — `optLevel: "none"`,
+ * Every other suite runs with one setting of these — `optLevel: "O0"`,
  * `debugInfo: false`, `checked: false` — because that is what the harness
  * defaults to and what makes a failure quickest to read. Which means the other
  * settings are exercised by nothing at all, and an optimiser that miscompiles a
@@ -10,6 +10,12 @@
  *
  * The programs are deliberately the same across settings: what is being tested
  * is that the *answer* does not depend on the setting.
+ *
+ * **Three levels here, not six.** Each level builds its own runtime — mimalloc
+ * included — so an exhaustive sweep would add five cargo builds to a cold run
+ * to check a six-line mapping table. That table is checked exhaustively where
+ * it is cheap instead, by `every_level_maps_to_its_flag` in
+ * `crates/goblin-codegen`. These three are the ends and the middle.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -17,6 +23,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
+import { buildRuntime } from "@goblin-forge/runtime/build";
 import type { BuildEvent } from "goblin-forge";
 
 import { compileSource, run } from "./harness.ts";
@@ -43,7 +50,7 @@ const WORKLOAD = `function collatz(start: i32): i32 {
  }\n`;
 
 describe("optimisation levels", () => {
-    for (const optLevel of ["none", "speed", "size"] as const) {
+    for (const optLevel of ["O0", "O2", "Oz"] as const) {
         test(`\`${optLevel}\` computes the same answer`, async () => {
             const result = await run(`opt-${optLevel}`, WORKLOAD, {optLevel});
             expect(result.stdout).toBe("423\n");
@@ -57,7 +64,7 @@ describe("optimisation levels", () => {
         // the failure has to come from there rather than from a Cranelift panic.
         let message = "";
         try {
-            await compileSource("opt-unknown", WORKLOAD, {optLevel: "fastest" as "speed"});
+            await compileSource("opt-unknown", WORKLOAD, {optLevel: "fastest" as "O2"});
         } catch (error) {
             message = String((error as Error).message);
         }
@@ -65,7 +72,7 @@ describe("optimisation levels", () => {
     });
 
     test("optimisation does not change what an owning program allocates", async () => {
-        for (const optLevel of ["none", "speed", "size"] as const) {
+        for (const optLevel of ["O0", "O2", "Oz"] as const) {
             const result = await run(
                 `opt-owning-${optLevel}`,
                 `export function main(): i32 {
@@ -88,6 +95,31 @@ describe("optimisation levels", () => {
     });
 });
 
+describe("the runtime follows the level", () => {
+    test("each level gets its own library, in its own directory", () => {
+        // The bug this exists to catch is a specific one. cargo writes every
+        // profile to `target/release`, so without a directory per level the
+        // second build overwrites the first — and the first caller's cached
+        // path keeps naming a file that is now somebody else's library, at
+        // whatever level *they* asked for. Nothing downstream can notice: it
+        // links, it runs, and it is simply not the build that was requested.
+        const zero = buildRuntime(undefined, "O0");
+        const small = buildRuntime(undefined, "Os");
+
+        expect(zero.library).not.toBe(small.library);
+        expect(existsSync(zero.library)).toBe(true);
+        expect(existsSync(small.library)).toBe(true);
+        expect(zero.library.replaceAll("\\", "/")).toContain("/opt-O0/");
+        expect(small.library.replaceAll("\\", "/")).toContain("/opt-Os/");
+    });
+
+    test("the same level twice is the cached answer, not a second build", () => {
+        // Same object, not merely an equal one: the cache is what keeps a few
+        // hundred test compiles from paying cargo's startup each time.
+        expect(buildRuntime(undefined, "O0")).toBe(buildRuntime(undefined, "O0"));
+    });
+});
+
 describe("debug information", () => {
     for (const debugInfo of [false, true]) {
         test(`\`debugInfo: ${debugInfo}\` still produces a program that runs`, async () => {
@@ -97,7 +129,7 @@ describe("debug information", () => {
     }
 
     test("debug information does not change the answer at any optimisation level", async () => {
-        for (const optLevel of ["none", "speed"] as const) {
+        for (const optLevel of ["O0", "O2"] as const) {
             const result = await run(`dbg-opt-${optLevel}`, WORKLOAD, {optLevel, debugInfo: true});
             expect({optLevel, stdout: result.stdout}).toEqual({optLevel, stdout: "423\n"});
         }

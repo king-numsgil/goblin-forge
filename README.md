@@ -130,7 +130,7 @@ export default {
   entry: "./src/main.ts",
   output: "./bin/app",
   type: "bin",
-  optLevel: "speed",
+  optLevel: "O2",
 };
 ```
 
@@ -208,7 +208,7 @@ const result = await compile({
   output: "./bin/app",
   outDir: "./build",
 
-  optLevel: "speed",        // "none" | "speed" | "size"
+  optLevel: "O2",           // "O0" | "O1" | "O2" | "O3" | "Os" | "Oz"
   debugInfo: true,
 
   // Relative paths resolve against this rather than the working directory, so

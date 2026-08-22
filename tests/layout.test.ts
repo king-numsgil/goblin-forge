@@ -161,7 +161,7 @@ function goblinLayouts(): Map<string, LayoutReport> {
     shape("OneField", [["only", t.i64]]);
 
     const backend = new Backend({
-        optLevel: "none",
+        optLevel: "O0",
         debugInfo: false,
         checked: false,
         strictInternalErrors: true,

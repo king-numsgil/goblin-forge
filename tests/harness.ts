@@ -74,11 +74,24 @@ export function scratchPath(name: string): string {
 
 let counter = 0;
 
+/**
+ * What the suite compiles at unless a test says otherwise.
+ *
+ * `O0`, and deliberately: at `-O0` LLVM does not run `mem2reg`, so every local
+ * really does live in the stack slot the lowerer gave it and the emitted IR is
+ * the lowering rather than what the optimiser made of it. That is what makes a
+ * golden MIR test and a `.ll` worth reading.
+ *
+ * It is also the level the runtime is now built at for these tests, which
+ * `preload.ts` warms — so this constant is shared rather than written twice.
+ */
+export const HARNESS_OPT_LEVEL = "O0" as const;
+
 export interface ProjectOptions {
     /** Extra `.ts` files beside the entry, keyed by file name. */
     readonly files?: Readonly<Record<string, string>>;
     readonly checked?: boolean;
-    readonly optLevel?: "none" | "speed" | "size";
+    readonly optLevel?: "O0" | "O1" | "O2" | "O3" | "Os" | "Oz";
     readonly debugInfo?: boolean;
     /** Write the MIR out, for the golden snapshots. */
     readonly emitIr?: boolean;
@@ -182,7 +195,7 @@ export async function compileSource(
         root: project.dir,
         outDir: join(project.dir, "build"),
         type: options.type ?? "bin",
-        optLevel: options.optLevel ?? "none",
+        optLevel: options.optLevel ?? HARNESS_OPT_LEVEL,
         debugInfo: options.debugInfo ?? false,
         checked: options.checked ?? false,
         emit: {ir: options.emitIr ?? false},

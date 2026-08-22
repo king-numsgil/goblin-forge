@@ -23,7 +23,7 @@
 import { Backend, encodeModule, type Module } from "../js/index.ts";
 import { buildFixture } from "../test/fixture.ts";
 
-const backend = new Backend({optLevel: "none", debugInfo: false, checked: false});
+const backend = new Backend({optLevel: "O0", debugInfo: false, checked: false});
 
 const SIZES = [1, 16, 128, 512, 2048];
 

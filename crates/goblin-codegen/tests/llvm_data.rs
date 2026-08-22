@@ -34,7 +34,7 @@ const TARGET: TargetInfo = TargetInfo { pointer_bytes: 8 };
 fn options() -> CodegenOptions {
     CodegenOptions {
         target: None,
-        opt_level: OptLevel::None,
+        opt_level: OptLevel::O0,
         debug_info: false,
         checked: false,
     }

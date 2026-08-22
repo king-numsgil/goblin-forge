@@ -22,7 +22,7 @@ import {
 import { buildFixture } from "./fixture.ts";
 
 const options: BackendOptions = {
-    optLevel: "none",
+    optLevel: "O0",
     debugInfo: false,
     checked: false,
 };

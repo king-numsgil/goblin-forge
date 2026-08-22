@@ -27,7 +27,7 @@ import {
 
 import { Checker, checkPreludeIsVisibleToEditors, type Diagnostic, hasErrors } from "@goblin-forge/checker";
 
-import { buildRuntime } from "@goblin-forge/runtime/build";
+import { buildRuntime, type OptLevel } from "@goblin-forge/runtime/build";
 import { copyFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
@@ -37,7 +37,25 @@ import { lower } from "./lower.ts";
 import { checkToolchain } from "./toolchain.ts";
 
 export type OutputKind = "bin" | "static-lib" | "shared-lib";
-export type OptLevel = "none" | "speed" | "size";
+
+/**
+ * Re-exported rather than declared, so there is one of it.
+ *
+ * The runtime package owns the type because the runtime *build* consumes it —
+ * this level is not only what clang is asked for, it is what the runtime crate
+ * is compiled at, and `forge` already depends on that package.
+ */
+export type { OptLevel };
+
+/**
+ * What a build optimises at when nobody says.
+ *
+ * `-O2` rather than `-O3`: `-O3` is not reliably faster, trading size and
+ * compile time for inlining and vectorisation that as often costs as gains. It
+ * is what almost everything ships, and it is one letter away for whoever
+ * measures and disagrees.
+ */
+const DEFAULT_OPT_LEVEL: OptLevel = "O2";
 
 /**
  * A stage of a build, for progress reporting.
@@ -236,7 +254,7 @@ export class Compiler {
         });
 
         const backendOptions: BackendOptions = {
-            optLevel: options.optLevel ?? "speed",
+            optLevel: options.optLevel ?? DEFAULT_OPT_LEVEL,
             debugInfo: options.debugInfo ?? true,
             checked: options.checked ?? false,
             ...(options.target !== undefined ? {target: options.target} : {}),
@@ -384,7 +402,12 @@ export class Compiler {
         const output = this.#outputPath(kind);
         const runtime = this.#phase(
             "runtime",
-            () => buildRuntime(this.#options.target),
+            // The same level the code is compiled at, so `Oz` is a claim about
+            // the whole binary rather than about the half of it this compiler
+            // emitted. It reaches the crate's own `opt-level`; `--release`
+            // still supplies the profile, which is where `lto` and
+            // `panic = "abort"` live.
+            () => buildRuntime(this.#options.target, this.#options.optLevel ?? DEFAULT_OPT_LEVEL),
             this.#options.runtime ?? "static",
         );
         const selfContained = kind !== "static-lib";

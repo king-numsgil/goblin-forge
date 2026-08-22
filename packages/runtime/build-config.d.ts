@@ -106,8 +106,23 @@ declare type GoblinBuild = {
      */
     readonly root?: string;
 
-    /** Optimisation level. Defaults to `"speed"`. */
-    readonly optLevel?: "none" | "speed" | "size";
+    /**
+     * Optimisation level, in the optimiser's own vocabulary. Defaults to
+     * `"O2"`.
+     *
+     * These are clang's, and they mean what they mean there: `"O0"` for a build
+     * you intend to debug, `"O2"` for one you intend to ship, `"Os"` and
+     * `"Oz"` when the size of the binary is what matters. `"O3"` is not
+     * reliably faster than `"O2"` — it trades size and compile time for
+     * inlining and vectorisation that as often costs as gains — so it is worth
+     * measuring rather than assuming.
+     *
+     * **The runtime is built at the same level**, so this is one answer for the
+     * whole program rather than one for your code and another for what it links
+     * against. The first build at each level pays for compiling the runtime and
+     * mimalloc; after that it is cached on disk like any other cargo build.
+     */
+    readonly optLevel?: "O0" | "O1" | "O2" | "O3" | "Os" | "Oz";
 
     /**
      * Target triple, such as `"x86_64-pc-windows-msvc"`. Defaults to the host.

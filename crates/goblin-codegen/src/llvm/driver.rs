@@ -40,9 +40,12 @@ fn clang() -> String {
 
 fn opt_flag(level: OptLevel) -> &'static str {
     match level {
-        OptLevel::None => "-O0",
-        OptLevel::Speed => "-O2",
-        OptLevel::Size => "-Oz",
+        OptLevel::O0 => "-O0",
+        OptLevel::O1 => "-O1",
+        OptLevel::O2 => "-O2",
+        OptLevel::O3 => "-O3",
+        OptLevel::Os => "-Os",
+        OptLevel::Oz => "-Oz",
     }
 }
 
@@ -125,4 +128,42 @@ fn render(command: &Command) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every level, spelled and mapped.
+    ///
+    /// Exhaustive here because here it is free. The end-to-end suite compiles
+    /// and links at three of the six, since each level builds its own runtime —
+    /// mimalloc included — and five extra cargo builds is a great deal to pay
+    /// for a six-line table. This is that table, checked in full.
+    ///
+    /// The name a level is *written* as is checked alongside the flag it
+    /// becomes, because a level that parsed and then mapped somewhere else
+    /// would be a silently slower binary rather than an error.
+    #[test]
+    fn every_level_maps_to_its_flag() {
+        for (written, flag) in [
+            ("O0", "-O0"),
+            ("O1", "-O1"),
+            ("O2", "-O2"),
+            ("O3", "-O3"),
+            ("Os", "-Os"),
+            ("Oz", "-Oz"),
+        ] {
+            let level = OptLevel::parse(written).unwrap_or_else(|| panic!("`{written}` parses"));
+            assert_eq!(opt_flag(level), flag, "{written}");
+        }
+    }
+
+    /// The old Cranelift-era spellings are gone rather than quietly accepted.
+    #[test]
+    fn the_names_that_were_replaced_are_not_still_taken() {
+        for written in ["none", "speed", "size", "", "O", "o2", "-O2"] {
+            assert!(OptLevel::parse(written).is_none(), "{written}");
+        }
+    }
 }

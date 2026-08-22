@@ -38,7 +38,7 @@ static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 pub struct BackendOptions {
     /// Target triple. `None` means the host.
     pub target: Option<String>,
-    /// `"none" | "speed" | "size"`.
+    /// `"O0" | "O1" | "O2" | "O3" | "Os" | "Oz"`.
     pub opt_level: String,
     pub debug_info: bool,
     /// Runtime liveness checks.
@@ -165,7 +165,8 @@ impl Backend {
     pub fn new(options: BackendOptions) -> Result<Self> {
         let opt_level = OptLevel::parse(&options.opt_level).ok_or_else(|| {
             Error::from_reason(format!(
-                "`{}` is not an optimisation level; expected \"none\", \"speed\" or \"size\"",
+                "`{}` is not an optimisation level; expected one of \"O0\", \"O1\", \"O2\", \
+                 \"O3\", \"Os\" or \"Oz\"",
                 options.opt_level
             ))
         })?;

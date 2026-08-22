@@ -25,19 +25,36 @@ pub struct CodegenOptions {
     pub checked: bool,
 }
 
+/// What to ask the optimiser for, in the optimiser's own vocabulary.
+///
+/// These were `none`/`speed`/`size` while the backend was Cranelift, which has
+/// three settings and no more. LLVM has six, and naming them after what they
+/// mean rather than what they are meant two thirds of them had nowhere to live
+/// — `-O1` and `-O3` are both "speed", and differ by more than the gap between
+/// "speed" and "size".
+///
+/// The runtime crate is built at the matching `opt-level`, so this is one
+/// answer for the whole program rather than one for the code and another for
+/// what it links against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OptLevel {
-    None,
-    Speed,
-    Size,
+    O0,
+    O1,
+    O2,
+    O3,
+    Os,
+    Oz,
 }
 
 impl OptLevel {
     pub fn parse(text: &str) -> Option<OptLevel> {
         match text {
-            "none" => Some(OptLevel::None),
-            "speed" => Some(OptLevel::Speed),
-            "size" => Some(OptLevel::Size),
+            "O0" => Some(OptLevel::O0),
+            "O1" => Some(OptLevel::O1),
+            "O2" => Some(OptLevel::O2),
+            "O3" => Some(OptLevel::O3),
+            "Os" => Some(OptLevel::Os),
+            "Oz" => Some(OptLevel::Oz),
             _ => None,
         }
     }
@@ -144,7 +161,7 @@ mod tests {
     fn options(target: Option<&str>) -> CodegenOptions {
         CodegenOptions {
             target: target.map(str::to_owned),
-            opt_level: OptLevel::Speed,
+            opt_level: OptLevel::O2,
             debug_info: false,
             checked: false,
         }

@@ -168,7 +168,7 @@ EXAMPLE
     entry: "./src/main.ts",
     output: "./bin/app",
     type: "bin",              // or "static-lib" / "shared-lib"
-    optLevel: "speed",        // "none" | "speed" | "size"
+    optLevel: "O2",           // "O0" | "O1" | "O2" | "O3" | "Os" | "Oz"
 
     before: "bun run codegen",          // a command, or a function
     after: (output) => strip(output),   // and either may be a list
@@ -622,7 +622,7 @@ export default {
     entry: "./src/main.ts",
     output: "./bin/app",
     type: "bin",
-    optLevel: "speed",
+    optLevel: "O2",
 } satisfies GoblinBuild;
 `,
     );

@@ -58,7 +58,7 @@ fn scratch() -> PathBuf {
 fn options() -> CodegenOptions {
     CodegenOptions {
         target: None,
-        opt_level: OptLevel::None,
+        opt_level: OptLevel::O0,
         debug_info: false,
         checked: false,
     }
@@ -356,7 +356,7 @@ define <4 x double> @vadd(<4 x double> %a, <4 x double> %b) {
     let dir = scratch();
     let object = dir.join("wide.obj");
     let mut options = options();
-    options.opt_level = OptLevel::Speed;
+    options.opt_level = OptLevel::O2;
     driver::compile(WIDE, &options, &object).expect("clang compiles the probe");
 
     let objdump = which_objdump().expect(

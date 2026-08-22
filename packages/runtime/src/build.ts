@@ -19,6 +19,25 @@ import { join } from "node:path";
 
 import { runtimeCrate } from "./paths.ts";
 
+/**
+ * What to ask the optimiser for, in the optimiser's own vocabulary.
+ *
+ * Declared here rather than in `forge` because the runtime build needs it and
+ * `forge` already depends on this package — one definition, and the arrow only
+ * points one way. `forge` re-exports it as part of its public API.
+ */
+export type OptLevel = "O0" | "O1" | "O2" | "O3" | "Os" | "Oz";
+
+/** What cargo calls the same thing. */
+const CARGO_OPT_LEVEL: Readonly<Record<OptLevel, string>> = {
+    O0: "0",
+    O1: "1",
+    O2: "2",
+    O3: "3",
+    Os: "s",
+    Oz: "z",
+};
+
 export interface RuntimeBuild {
     /** Absolute path to the static library. */
     readonly library: string;
@@ -53,20 +72,35 @@ const cache = new Map<string, RuntimeBuild>();
 export const RUNTIME_CRATE = (): string => runtimeCrate();
 
 /**
- * Build the runtime for `target`, or the host when it is omitted.
+ * Build the runtime for `target` at `optLevel`, or the host when omitted.
  *
- * Cached per target for the life of the process. cargo is itself incremental,
- * so a cold cache in a new process is still fast — the cache is here to avoid
- * paying cargo's own startup on every one of a few hundred test compiles.
+ * Cached per target **and level** for the life of the process. Both, because
+ * the artefact is per both: keying on the target alone would hand the second
+ * caller the first caller's library, at whatever level that one asked for, and
+ * a program linked against a runtime built at the wrong level is not something
+ * anything downstream can notice.
+ *
+ * cargo is itself incremental, so a cold cache in a new process is still fast —
+ * this cache is here to avoid paying cargo's own startup on every one of a few
+ * hundred test compiles.
  */
-export function buildRuntime(target?: string): RuntimeBuild {
-    const key = target ?? "<host>";
+export function buildRuntime(target?: string, optLevel: OptLevel = "O2"): RuntimeBuild {
+    const key = `${target ?? "<host>"}|${optLevel}`;
     const cached = cache.get(key);
     if (cached !== undefined) {
         return cached;
     }
 
+    // `--release` stays whatever the level is, and is not a contradiction: the
+    // profile carries `lto` and `panic = "abort"` as well as an optimisation
+    // level, and those two are properties of *how this crate is built at all*
+    // rather than of how hard it is optimised. Only the level is overridden.
     const args = ["rustc", "--release", "--quiet"];
+    // A directory per level, which is the part that cannot be skipped. cargo
+    // writes every profile's output to `target/release`, so two levels would be
+    // the same path — the second build would overwrite the first, and the first
+    // caller's cached path would quietly start naming the other one's library.
+    args.push("--target-dir", targetDir(optLevel));
     if (target !== undefined) {
         args.push("--target", target);
     }
@@ -88,6 +122,12 @@ export function buildRuntime(target?: string): RuntimeBuild {
         cwd: RUNTIME_CRATE(),
         encoding: "utf8",
         shell: process.platform === "win32",
+        // The profile's level, overridden for this build. An environment
+        // variable rather than `-C opt-level` after the `--`, because those
+        // flags reach the *final* crate only: mimalloc, libc and libm would
+        // stay at the profile's `3` while the runtime alone moved, which makes
+        // `Oz` a claim about one of four things in the library.
+        env: {...process.env, CARGO_PROFILE_RELEASE_OPT_LEVEL: CARGO_OPT_LEVEL[optLevel]},
     });
 
     if (result.error) {
@@ -101,15 +141,15 @@ export function buildRuntime(target?: string): RuntimeBuild {
         );
     }
 
-    const library = locateLibrary(target);
+    const library = locateLibrary(target, optLevel);
     if (library === undefined) {
         throw new Error(
             `the Goblin runtime built, but its static library was not where it was ` +
-            `expected under ${join(RUNTIME_CRATE(), "target")}`,
+            `expected under ${targetDir(optLevel)}`,
         );
     }
 
-    const shared = locateShared(target);
+    const shared = locateShared(target, optLevel);
     const build: RuntimeBuild = {
         library,
         systemLibs: parseNativeStaticLibs(result.stderr ?? ""),
@@ -119,12 +159,23 @@ export function buildRuntime(target?: string): RuntimeBuild {
     return build;
 }
 
-function releaseDir(target?: string): string {
-    return join(RUNTIME_CRATE(), "target", ...(target ? [target] : []), "release");
+/**
+ * Where cargo is told to put this level's artefacts.
+ *
+ * Under `target/` so that `cargo clean` still reaches it, and one level down so
+ * that two levels are two directories. Nesting a target directory inside the
+ * default one is not something cargo minds.
+ */
+function targetDir(optLevel: OptLevel): string {
+    return join(RUNTIME_CRATE(), "target", `opt-${optLevel}`);
 }
 
-function locateLibrary(target?: string): string | undefined {
-    const base = releaseDir(target);
+function releaseDir(target: string | undefined, optLevel: OptLevel): string {
+    return join(targetDir(optLevel), ...(target ? [target] : []), "release");
+}
+
+function locateLibrary(target: string | undefined, optLevel: OptLevel): string | undefined {
+    const base = releaseDir(target, optLevel);
     for (const name of ["goblin_runtime.lib", "libgoblin_runtime.a"]) {
         const candidate = join(base, name);
         if (existsSync(candidate)) {
@@ -148,8 +199,8 @@ function locateLibrary(target?: string): string | undefined {
  * the `.dll` in the middle tells them apart, so picking the wrong one links a
  * whole second copy of the runtime into a program that meant to share one.
  */
-function locateShared(target?: string): SharedRuntime | undefined {
-    const base = releaseDir(target);
+function locateShared(target: string | undefined, optLevel: OptLevel): SharedRuntime | undefined {
+    const base = releaseDir(target, optLevel);
     for (const [image, link] of [
         ["goblin_runtime.dll", "goblin_runtime.dll.lib"],
         ["libgoblin_runtime.so", "libgoblin_runtime.so"],

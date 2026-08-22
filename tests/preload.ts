@@ -17,8 +17,16 @@
  * Doing it here puts the cost outside every test's clock, where a fixture
  * belongs. Once the library is built cargo is a fast no-op, so this stays
  * cheap on every run after the first.
+ *
+ * **At the level the harness compiles at**, because the runtime is now built
+ * per optimisation level and warming the wrong one warms nothing: the first
+ * test to compile would pay for the real build, which is the whole failure
+ * described above, arriving again through a fixture that looks like it is
+ * doing its job.
  */
 
 import { buildRuntime } from "@goblin-forge/runtime/build";
 
-buildRuntime();
+import { HARNESS_OPT_LEVEL } from "./harness.ts";
+
+buildRuntime(undefined, HARNESS_OPT_LEVEL);

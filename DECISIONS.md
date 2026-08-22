@@ -1165,6 +1165,49 @@ milestones have been built on top of Cranelift. Which is the ordering argument
 at the head of this section, and the reason the swap precedes the vector work
 rather than following it.
 
+### Amendment: the optimisation levels are LLVM's, and the runtime follows *(2026-08-22)*
+
+`optLevel` was `"none" | "speed" | "size"`, which was the right surface for
+Cranelift — it has three settings and no more. LLVM has six, and naming them
+after what they are *for* rather than what they *are* left two thirds of them
+with nowhere to live: `-O1` and `-O3` are both "speed", and they differ by more
+than the gap between "speed" and "size" does.
+
+So the levels are now `"O0"`, `"O1"`, `"O2"`, `"O3"`, `"Os"`, `"Oz"`, and the
+old names are **gone rather than aliased**. Aliasing would have left two
+vocabularies for one setting and a permanent question about which a reader
+meant; a build script that says `"speed"` now fails to type-check, which is a
+one-line fix at a site the compiler names. `"O2"` is the default, because `-O3`
+is not reliably faster — it trades size and compile time for inlining and
+vectorisation that as often costs as gains.
+
+**The runtime crate is built at the same level, and was not before.** It was
+always `cargo rustc --release`, so a program asking for `Oz` got its own code
+small and linked a runtime built at `opt-level = 3`. That is the case where the
+mismatch contradicted the request rather than merely surprising; `O0` linking an
+optimised runtime was defensible on its own (Rust ships an optimised std for the
+same reason) but not worth keeping as an exception.
+
+`--release` still supplies the *profile* — `lto` and `panic = "abort"` are
+properties of how this crate is built at all, not of how hard it is optimised —
+and only `opt-level` is overridden. Through `CARGO_PROFILE_RELEASE_OPT_LEVEL`
+rather than `-C opt-level` after the `--`, because those flags reach the final
+crate only: mimalloc, libc and libm would have stayed at `3` while the runtime
+alone moved, which makes `Oz` a claim about one of four things in the library.
+
+**The part that had to be got right is the output directory.** cargo writes
+every profile to `target/release` whatever the level, so two levels are one
+path: the second build overwrites the first, and the first caller's cached path
+keeps naming a file that is now somebody else's library. Nothing downstream can
+notice — it links, it runs, and it is simply not the build that was asked for.
+So each level gets `target/opt-<level>/`, and the in-process cache is keyed by
+target *and* level. `build-options.test.ts` builds two levels and requires two
+files, which is the test that would have caught the version without it.
+
+The cost is one cargo build per level per checkout, mimalloc included. That is
+what any toolchain charges for a debug and a release build, and it is cached on
+disk afterwards.
+
 ### Amendment: AVX2 is a baseline requirement *(2026-08-18)*
 
 **The compiler targets `x86-64-v3` and does not run on anything older.** The
