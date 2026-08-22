@@ -40,6 +40,19 @@ afterEach(() => {
 /** A path that cannot exist, for pointing an override at nothing. */
 const NOWHERE = join(tmpdir(), "goblin-no-such-tool");
 
+/**
+ * How this machine finds its linker, asked the way the check asks.
+ *
+ * Not `process.platform`. MSVC and MinGW are both `win32` and want opposite
+ * answers, so a suite that branched on the operating system would be forming
+ * the second opinion the check exists to avoid — and would assert the Unix
+ * answer on a Windows host, which is exactly how these tests were first
+ * written and how they failed. The backend is the authority for the check, so
+ * it is the authority here too; both halves are asserted below, and the half
+ * that runs is the one that is true.
+ */
+const PROBE = locateLinker("bin");
+
 describe("the toolchain check", () => {
     test("says nothing on a machine that can build", () => {
         // This suite compiles real programs, so a machine running it has the
@@ -58,7 +71,11 @@ describe("the toolchain check", () => {
             code: "GF0006",
             severity: "error",
         });
-        for (const tool of ["clang", "cargo", "cc"]) {
+        // The two an empty `PATH` always loses. The linker is the third tool a
+        // build runs and it is deliberately not asserted here: whether `PATH`
+        // is even the right question about it is the platform's to answer, and
+        // that has a test of its own below.
+        for (const tool of ["clang", "cargo"]) {
             expect(diagnostic?.message).toContain(tool);
         }
     });
@@ -80,34 +97,49 @@ describe("the toolchain check", () => {
      * On MSVC the linker is found by probing the registry — installed and not
      * on `PATH` is the normal state there — so the backend answers with the
      * same lookup the link step runs, and the two cannot disagree. Everywhere
-     * else it says so, and `PATH` is the right question.
+     * else, every Unix and MinGW alike, it says so, and `PATH` is the right
+     * question.
      *
-     * Only half of that is assertable here. A Windows host is the other half,
-     * and it is why the answer comes from the backend rather than from a
-     * `process.platform` test in TypeScript: MSVC and MinGW are both `win32`
-     * and want opposite answers, and only the built addon knows which it is.
+     * Each host can only be one of those, so each asserts its own half. The
+     * halves are opposites rather than variations: one requires an empty `PATH`
+     * to lose the linker, the other requires it not to.
      */
-    test.skipIf(process.platform === "win32")(
-        "the backend says how the linker is found, and the check takes its word",
-        () => {
-            const probe = locateLinker("bin");
-            expect({probed: probe.probed, path: probe.path}).toEqual({
-                probed: false,
-                path: undefined,
-            });
+    test("the backend says how the linker is found, and the check takes its word", () => {
+        process.env["PATH"] = "";
+        const message = checkToolchain("bin")[0]?.message ?? "";
 
-            process.env["PATH"] = "";
-            expect(checkToolchain("bin")[0]?.message).toMatch(/\bcc \(not on PATH\)/);
-        },
-    );
+        if (!PROBE.probed) {
+            expect(PROBE.path).toBeUndefined();
+            expect(message).toMatch(/\bcc \(not on PATH\)/);
+            return;
+        }
+
+        // MSVC: `link.exe` is not on `PATH` even on a machine that links fine,
+        // so a check that walked `PATH` for it would fail every build here.
+        // Emptying `PATH` must not shake it loose.
+        expect(PROBE.path).toMatch(/[\\/]link\.exe$/i);
+        expect(message).not.toContain("link.exe");
+    });
 
     test("a static library wants the archiver, not the linker", () => {
         // An archive is not a link: nothing is resolved and no runtime is pulled
         // in, so a machine with no linker can still build one.
         process.env["PATH"] = "";
         const message = checkToolchain("static-lib")[0]?.message ?? "";
-        expect(message).toMatch(/\bar \(not on PATH\)/);
-        expect(message).not.toMatch(/\bcc \(/);
+
+        if (!PROBE.probed) {
+            expect(message).toMatch(/\bar \(not on PATH\)/);
+            expect(message).not.toMatch(/\bcc \(/);
+            return;
+        }
+
+        // On MSVC both tools are found, so neither is missing and the message
+        // names neither — which leaves the kind itself as the thing to assert.
+        // The check hands it straight to the probe, and `lib.exe` and
+        // `link.exe` are different programs: an archiving build that reached
+        // the linker would be asking after a tool it is never going to run.
+        expect(locateLinker("static-lib").path).toMatch(/[\\/]lib\.exe$/i);
+        expect(message).not.toContain("lib.exe");
     });
 
     test("an override that points at nothing is a missing file, not a missing PATH", () => {
