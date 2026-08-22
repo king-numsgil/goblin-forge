@@ -577,7 +577,13 @@ export function add(a: i32, b: i32): i32 { return a + b; }
 
 // main.ts
 import { add } from "./math.ts";
+import * as math from "./math.ts";   // `math.add(1, 2)` — the same call
 ```
+
+A namespace import is a *qualified name*, not an object: `math.add` is resolved
+to its declaration at compile time and emitted as the same direct call `add`
+is, so there is no module object at run time and nothing indirect happens. Both
+spellings may name the same function in one program.
 
 Names are scoped to their modules: two files may each declare a private
 `helper`, and both are right. Exported symbols keep their bare name — that is

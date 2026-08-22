@@ -814,9 +814,33 @@ silently rebound to the runtime's trampoline. `mi_malloc` is only this
 `mi_malloc` when it came from `"std/alloc"`, and that is exactly what an ambient
 module is for.
 
-**Known gap: the namespace import.** `import * as alloc from "std/alloc"` then
-`alloc.mi_malloc(8)` is `GF0001` — the receiver is a module namespace object and
-the call path treats it as an unsupported name. Named imports are unaffected.
+**The namespace import was a gap and is now closed.** `import * as alloc from
+"std/alloc"` then `alloc.mi_malloc(8)` was `GF0001`: the receiver is a module
+namespace object, and every path treated it as a name that resolved to nothing.
+Fixed rather than documented, because it is the idiomatic TypeScript spelling
+and a language that refuses it is surprising for no reason a user can see —
+particularly with namespaced stdlib modules as the direction of travel.
+
+**A namespace is not a receiver, and that is the whole implementation.** `ns.f`
+sits exactly where `C.f` already sat: a qualified *name*, not a property of an
+object, resolved through tsc's symbol at compile time. So it goes beside the
+static-method branch in each of the three places that had one —
+`#propertyWidth`, `#propertyValue` and the two call paths — and emits the same
+**direct** call the bare name does, verified in the text IR rather than assumed:
+`call ptr @gf_mi_malloc(i64 64)`, no load and nothing indirect. There is no
+module object at run time, which is the point rather than the obstacle: nothing
+has to exist for a name to be qualified by it.
+
+It follows that both spellings work in one program, and for a reason worth
+stating rather than testing into existence: they resolve to the same
+declaration, and the extern is registered per declaration. One module may write
+`import * as alloc`, another `import { mi_malloc }`, and there is nothing to
+reconcile because there is nothing per import. A block taken through one and
+released through the other is pinned by a test all the same.
+
+The same change made `import * as m from "./math.ts"` work, which had been
+`GF0001` since multi-module linking landed and is now the positive test it
+replaced.
 
 ---
 

@@ -2784,6 +2784,12 @@ export class BodyLowerer extends BoundaryLowerer {
         if (this.staticAt(expression) !== undefined) {
             return this.functionValue(expression, natural);
         }
+        // `ns.f` — a namespace-qualified function's address. Beside the static
+        // case and for the same reason: `ns` is no more a value than `C` is, so
+        // this has to come before anything asks it for one.
+        if (this.outer.namespaceCallee(expression) !== undefined) {
+            return this.functionValue(expression, natural);
+        }
         // `C.x` where `x` is `static get x()`. Also before, and for the same
         // reason: `C` is a class name and has no value to ask for.
         const staticGet = this.staticAccessorAt(expression, false);
@@ -3326,6 +3332,14 @@ export class BodyLowerer extends BoundaryLowerer {
         }
 
         if (ts.isPropertyAccessExpression(expression.expression)) {
+            // `ns.f(…)` — a namespace-qualified call, which is the same *direct*
+            // call the bare name would have been and not an indirect one through
+            // its address. Before the method paths because a namespace is not a
+            // receiver: there is nothing here to pass as one.
+            const qualified = this.outer.namespaceCallee(expression.expression);
+            if (qualified !== undefined) {
+                return this.#resolvedCall(expression, qualified);
+            }
             const method = this.#methodCall(expression, expression.expression);
             if (method !== "not-a-method") {
                 return method;
@@ -3382,6 +3396,14 @@ export class BodyLowerer extends BoundaryLowerer {
         if (target === undefined) {
             return undefined;
         }
+        return this.#resolvedCall(expression, target);
+    }
+
+    /**
+     * A call to a declaration that has already been resolved, however it was
+     * spelled: a bare name, or a name reached through a module namespace.
+     */
+    #resolvedCall(expression: ts.CallExpression, target: FnRecord): Typed | undefined {
         if (expression.arguments.length !== target.signature.params.length) {
             // tsc has already rejected a genuine arity mismatch, so reaching this
             // means the two disagree, which is a compiler bug rather than a user one.

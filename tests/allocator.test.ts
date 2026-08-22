@@ -294,6 +294,84 @@ describe("mimalloc, by its C name", () => {
         expect(result.leaked).toBe(0);
     });
 
+    test("a namespace import calls through the qualified name", async () => {
+        const result = await run(
+            "mi-namespace",
+            `import * as alloc from "std/alloc";
+
+       export function main(): i32 {
+         const p = alloc.mi_malloc(64);
+         if (p === null) { return 1; }
+         const bytes = p.reify<u8>();
+         bytes[0] = 5;
+         const seen: i32 = cast<i32>(bytes[0]);
+         alloc.mi_free(p);
+         return seen;
+       }\n`,
+        );
+        expect(result.exitCode).toBe(5);
+        expect(result.leaked).toBe(0);
+    });
+
+    test("a qualified name is a code address too", async () => {
+        // The other half of what the bare name can do. `alloc.mi_malloc` has to
+        // reach `#functionValue` as an ordinary extern and come out an address,
+        // or the namespace form is only half a spelling.
+        const result = await run(
+            "mi-namespace-callback",
+            `import * as alloc from "std/alloc";
+
+       function install(
+         m: (size: usize) => Pointer<unknown> | null,
+         f: (mem: Pointer<unknown> | null) => void,
+       ): i32 {
+         const p = m(16);
+         if (p === null) { return 1; }
+         p.reify<u8>()[0] = 7;
+         const seen: i32 = cast<i32>(p.reify<u8>()[0]);
+         f(p);
+         return seen;
+       }
+
+       export function main(): i32 {
+         return install(alloc.mi_malloc, alloc.mi_free);
+       }\n`,
+        );
+        expect(result.exitCode).toBe(7);
+        expect(result.leaked).toBe(0);
+    });
+
+    test("both spellings in one program reach the same extern", async () => {
+        // The case worth pinning rather than assuming: one module importing the
+        // namespace and another importing the name. Both land on the same
+        // declaration in the prelude, so there is one record and one extern —
+        // and the proof is that a block taken through one spelling goes back
+        // through the other without the allocator objecting.
+        const result = await run(
+            "mi-both-spellings",
+            `import * as alloc from "std/alloc";
+       import { release } from "./helper.ts";
+
+       export function main(): i32 {
+         const p = alloc.mi_malloc(48);
+         if (p === null) { return 1; }
+         release(p);
+         return 0;
+       }\n`,
+            {
+                files: {
+                    "helper.ts": `import { mi_free } from "std/alloc";
+
+       export function release(mem: Pointer<unknown> | null): void {
+         mi_free(mem);
+       }\n`,
+                },
+            },
+        );
+        expect(result.exitCode).toBe(0);
+        expect(result.leaked).toBe(0);
+    });
+
     test("the program's own allocations still balance beside them", async () => {
         // The two bookkeeping systems are separate: `LIVE` counts what the
         // runtime handed out, and a raw `mi_malloc` block is not that. A leak

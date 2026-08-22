@@ -306,19 +306,47 @@ describe("import and export forms", () => {
         expect(result.exitCode).toBe(12);
     });
 
-    test("a namespace import is GF0001", async () => {
+    test("a namespace import calls what a named import would", async () => {
         // `import * as m` makes the call target a property access on a module
-        // object, and there is no module object at runtime here.
-        await expectRejected(
+        // object, and there is no module object at runtime here — which turns
+        // out to be the point rather than the obstacle. `m.add` is resolved to
+        // its declaration through tsc's symbol at compile time and emitted as
+        // the same direct call `add(1, 2)` is; nothing is loaded, and no object
+        // has to exist for a name to be qualified by it.
+        const result = await run(
             "mod-namespace-import",
             `import * as math from "./math.ts";
 
        export function main(): i32 {
          return math.add(1, 2);
        }\n`,
-            "GF0001",
             {files: {"math.ts": `export function add(a: i32, b: i32): i32 { return a + b; }\n`}},
         );
+        expect(result.exitCode).toBe(3);
+    });
+
+    test("a namespace import and a named one may name the same function", async () => {
+        // Both spellings in one program, which is the case worth pinning: they
+        // resolve to one declaration and therefore one record, so `math.add`
+        // here and `add` in `other.ts` are the same call to the same symbol.
+        const result = await run(
+            "mod-namespace-and-named",
+            `import * as math from "./math.ts";
+       import { viaNamed } from "./other.ts";
+
+       export function main(): i32 {
+         return math.add(1, 2) * 10 + viaNamed();
+       }\n`,
+            {
+                files: {
+                    "math.ts": `export function add(a: i32, b: i32): i32 { return a + b; }\n`,
+                    "other.ts": `import { add } from "./math.ts";
+
+       export function viaNamed(): i32 { return add(3, 4); }\n`,
+                },
+            },
+        );
+        expect(result.exitCode).toBe(37);
     });
 
     test("an exported `const` is GF0001, as a top-level binding is anywhere", async () => {

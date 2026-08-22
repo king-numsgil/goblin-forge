@@ -273,6 +273,14 @@ export abstract class WidthPass extends Emitter {
             return this.#erasedWidth(expression);
         }
 
+        // `ns.f` as a value — a namespace-qualified function's address, which is
+        // the same code address the bare name gives and therefore the same
+        // width. Beside the static-method case above rather than below the class
+        // path, because `ns` here is no more an object than `C` is.
+        if (this.outer.namespaceCallee(expression) !== undefined) {
+            return this.#erasedWidth(expression);
+        }
+
         // `C.x` where `x` is `static get x()`: a call, and its type is what the
         // accessor returns.
         const staticGet = this.staticAccessorAt(expression, false);
@@ -647,6 +655,13 @@ export abstract class WidthPass extends Emitter {
         }
 
         if (ts.isPropertyAccessExpression(expression.expression)) {
+            // `ns.f(…)` — the declared return type, exactly as for the bare name,
+            // and found the same way. Before the method paths for the reason
+            // {@link BodyLowerer} gives: a namespace is not a receiver.
+            const qualified = this.outer.namespaceCallee(expression.expression);
+            if (qualified !== undefined) {
+                return typed(qualified.signature.returns);
+            }
             const method = this.#methodWidth(expression, expression.expression);
             if (method !== "not-a-method") {
                 return method;

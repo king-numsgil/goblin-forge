@@ -213,9 +213,58 @@ export class Lowerer {
         if (ts.isPropertyAccessExpression(expression) && ts.isIdentifier(expression.expression)) {
             const info = this.#classes.get(expression.expression.text);
             const method = info?.statics.get(expression.name.text);
-            return method === undefined ? undefined : this.#functions.get(method.symbol);
+            if (method !== undefined) {
+                return this.#functions.get(method.symbol);
+            }
+            // Not a class name, so it may be a module namespace. Falling through
+            // rather than answering "no" here is what lets `alloc.mi_malloc` be
+            // handed to `SDL_SetMemoryFunctions` the way the bare name can.
+            return this.namespaceCallee(expression);
         }
         return this.resolveCallee(expression);
+    }
+
+    /**
+     * `ns.f` where `ns` is a module namespace — `import * as ns from "…"`.
+     *
+     * The same function a named import reaches, and that is a fact about tsc
+     * rather than an arrangement here: the property access resolves to the
+     * *export's* own symbol, so both spellings land on one declaration and
+     * therefore one record. Which is what lets one module write
+     * `import * as alloc from "std/alloc"` and another
+     * `import { mi_malloc } from "std/alloc"` in the same program, and reach the
+     * same extern — there is nothing per import to reconcile because there is
+     * nothing per import.
+     *
+     * Only a top-level `function` answers. A method is a `MethodDeclaration`
+     * whichever way it is written, so `C.f()` and `obj.m()` fall past this to
+     * the paths that know how to find a receiver — which a namespace does not
+     * have and never needs.
+     */
+    namespaceCallee(access: ts.PropertyAccessExpression): FnRecord | undefined {
+        if (!this.#isModuleNamespace(access.expression)) {
+            return undefined;
+        }
+        return this.resolveCallee(access);
+    }
+
+    /**
+     * Whether an expression names a module rather than a value.
+     *
+     * Through the alias, because `import * as ns` binds a local alias *to* the
+     * module: the alias itself carries `Alias`, and only what it points at
+     * carries `Module`.
+     */
+    #isModuleNamespace(expression: ts.Expression): boolean {
+        const symbol = this.#checker.getSymbolAtLocation(expression);
+        if (symbol === undefined) {
+            return false;
+        }
+        const resolved =
+            (symbol.flags & ts.SymbolFlags.Alias) !== 0
+                ? this.#checker.getAliasedSymbol(symbol)
+                : symbol;
+        return (resolved.flags & ts.SymbolFlags.Module) !== 0;
     }
 
     run(): LowerResult {
