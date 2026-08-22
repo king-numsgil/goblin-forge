@@ -13,13 +13,19 @@ how the thing is put together and which mistakes it is designed to prevent.
 - [`DECISIONS.md`](DECISIONS.md) — the answers to the questions the plan left
   open, recorded as they land.
 - [`NOTES.md`](NOTES.md) — working notes.
-- [`LLVM-PORT.md`](LLVM-PORT.md) — the staged plan for replacing Cranelift,
+- [`LLVM-PORT.md`](LLVM-PORT.md) — the staged plan that replaced Cranelift,
   decided by DECISIONS §17. §17 is the reasoning; this is the order of
-  operations and the checkpoint each stage ends at.
+  operations and the checkpoint each stage ended at. All seven stages are done.
+- [`LINKING.md`](LINKING.md) — what a program links and how, including the
+  allocator surface and `runtime: "shared"`.
 - [`POINTER-ERASURE.md`](POINTER-ERASURE.md) — how `void *` was arrived at,
   including the design that was probed and rejected. Answered by DECISIONS §13;
   worth reading before changing anything about `erase()` / `reify<U>()`, because
   the obvious answer to both halves is wrong in a way that is silent.
+
+These describe what the compiler *is*. What it used to be is in the git history,
+which is the right place for it — so a document that disagrees with the code is
+a document to fix, not a record to preserve.
 
 Read the relevant section before changing behaviour it describes. Where the
 code and a document disagree, that is a bug in one of them, and which one is a
@@ -72,7 +78,11 @@ previous build. This has cost real debugging time: an indexing fix appeared to
 do nothing, and the reason was a stale addon.
 
 Changing the runtime (`packages/runtime/native`) needs no manual step; it is
-built on demand by `cargo rustc` for the user's target and cached per process.
+built on demand by `cargo rustc` for the user's target, at the build's
+optimisation level, and cached per process by target *and* level. Each level
+gets its own `target/opt-<level>/`, because cargo writes every profile to
+`target/release` and two levels sharing a path is one silently overwriting the
+other.
 
 **The runtime is its own cargo workspace**, deliberately — it is built for the
 *user's* target, not the host. So `cargo build --workspace`, `cargo test
@@ -122,6 +132,39 @@ that nothing checked is how `locateLinker` reached the bundle as a
 
 The `.ll` is written beside every object and kept. When the backend is
 suspected, read it first — that is half of what text IR was chosen for.
+
+## The standard library
+
+`std/alloc`, `std/io` and `std/math` are **ambient modules**: `declare module
+"std/alloc"` in `packages/runtime/global.d.ts`, resolving to no file. There is
+no package to install and no `paths` entry — tsc matches the specifier against
+the declaration, and the declaration is the whole of it. DECISIONS §15, §20 and
+§21 are the reasoning.
+
+Adding a name to one takes four steps, and missing any of them fails in a
+different place:
+
+1. **Declare it** in the module block in `global.d.ts`. Miss this and it is a
+   `TS2305` from tsc.
+2. **Map it** in `STD_MODULES` (`packages/forge/src/lower/tables.ts`), name to
+   the `gf_*` symbol. Miss this and it is `GF0001` with a caret under the name.
+3. **Define it** in `packages/runtime/native/src/lib.rs`. Miss this and it is an
+   unresolved external from the linker, with no file and no line — which is the
+   failure the allowlist exists to keep rare, so it is worth a test that calls
+   the name.
+4. **`bun run build:cli`** if you are testing through the CLI, which embeds its
+   own copy of `global.d.ts`. `tests/cli.test.ts` regenerates it, so the suite
+   covers this on its own.
+
+`STD_MODULES` is keyed by **specifier first, then name**. A flat table of names
+would match a same-named declaration in any `.d.ts` the project happens to
+include, and silently rebind a user's own `extern` to the runtime's.
+
+Two things a std module cannot export today. A **top-level `const`**, because
+nothing lowers one — the constants in `std/math` are functions (`dpi()`) for
+that reason. And a **class with members**: an ambient class is an opaque handle,
+`collectClasses` skips it, and its statics and methods are never lowered. That
+is why `std/io` is `fileOpen(path)` rather than `File.open(path)`.
 
 ## The wire format
 

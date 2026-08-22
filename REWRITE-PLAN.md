@@ -211,7 +211,7 @@ const result = await compile({
   manifests: ["./native.manifest.json"],
 
   target: "x86_64-pc-windows-msvc",   // default: host
-  optLevel: "speed",                  // "none" | "speed" | "size"
+  optLevel: "O2",                     // "O0" | "O1" | "O2" | "O3" | "Os" | "Oz"
   checked: false,                     // runtime liveness checks
   debugInfo: true,
 

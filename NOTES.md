@@ -73,23 +73,24 @@ Line counts are a rough guide to where the weight is, not a promise.
 | `crates/goblin-mir/src/schema.rs` | 172 | reflection over the type graph, wire fingerprint |
 | `crates/goblin-codegen/src/layout.rs` | 459 | `Layout` (bytes), `Repr`/`Scalar` (registers) — §5.2's two questions |
 | `crates/goblin-codegen/src/abi.rs` | 734 | Win64 + System V classification, with unit tests |
-| `crates/goblin-codegen/src/llvm/func.rs` | 2467 | MIR bodies → LLVM IR. The big one. |
+| `crates/goblin-codegen/src/llvm/func/` | 2524 | MIR bodies → LLVM IR. The big one; `mod.rs` and `ownership.rs`. |
 | `crates/goblin-codegen/src/llvm/sig.rs` | 225 | a signature as `declare`/`define`/`call` want it |
 | `crates/goblin-codegen/src/llvm/ty.rs` | 242 | MIR types → LLVM types, packed with padding spelled out |
 | `crates/goblin-codegen/src/llvm/vtable.rs` | 218 | per-class descriptor, vtable and itabs, as constants |
 | `crates/goblin-codegen/src/llvm/data.rs` | 207 | constants with relocations; string literals |
 | `crates/goblin-codegen/src/llvm/debug.rs` | 239 | `DIFile`/`DISubprogram`/`DILocation` — CodeView or DWARF |
-| `crates/goblin-codegen/src/llvm/driver.rs` | 128 | write the `.ll`, run clang |
+| `crates/goblin-codegen/src/llvm/driver.rs` | 169 | write the `.ll`, run clang, the `-O` levels |
 | `crates/goblin-codegen/src/runtime.rs` | 130 | runtime symbols, string literal data layout |
-| `crates/goblin-codegen/src/link.rs` | 468 | linker discovery, lifted from v1 and never ported |
-| `packages/forge/src/lower/body.ts` | 4395 | statements and expressions → MIR. The other big one. |
-| `packages/forge/src/lower/module.ts` | 2210 | declarations, signatures, the module shell |
-| `packages/forge/src/lower/width.ts` | 1167 | §7's width rules |
+| `crates/goblin-codegen/src/link.rs` | 523 | linker discovery, lifted from v1 and never ported |
+| `packages/forge/src/lower/body.ts` | 4417 | statements and expressions → MIR. The other big one. |
+| `packages/forge/src/lower/module.ts` | 2281 | declarations, signatures, the module shell |
+| `packages/forge/src/lower/width.ts` | 1182 | §7's width rules |
+| `packages/forge/src/lower/tables.ts` | 327 | prelude symbols, `STD_MODULES`, the operator maps |
 | `packages/forge/src/lower/intrinsics.ts` | 1077 | `alloc`, `sizeOf`, `cstring`, and the rest |
 | `packages/forge/src/classes.ts` | 717 | class discovery, field/vtable flattening, slot assignment |
 | `packages/forge/src/drop-elaboration.ts` | 501 | §5.1's pass: initialisedness dataflow, drop flags |
-| `packages/runtime/native/src/lib.rs` | 1328 | string runtime, `console`, live-allocation counter |
-| `packages/runtime/global.d.ts` | 1066 | **the entire language surface** |
+| `packages/runtime/native/src/lib.rs` | 1966 | strings, `console`, files, maths, live-allocation counter |
+| `packages/runtime/global.d.ts` | 1392 | **the entire language surface**, globals and `std/*` |
 | `packages/runtime/build-config.d.ts` | 126 | what a build script exports, for the editor |
 
 ## Commands
@@ -150,6 +151,19 @@ allocation and destroys nothing, and captures are read *and written* through.
 Written as an argument — `each(xs, (x) => { total += x; })` — and nowhere else.
 DECISIONS §18, and the section under "What it does not have yet" for the rest.
 
+**The standard library** — `std/alloc`, `std/io`, `std/math` — is the only part
+of the language that is imported rather than global. They are **ambient
+modules**: `declare module "std/…"` in `global.d.ts`, resolving to no file, with
+`STD_MODULES` in `lower/tables.ts` mapping each name to its `gf_*` symbol. Named
+imports, `as` renames, re-exports and `import * as ns` all reach the same
+extern, because the extern is registered per declaration rather than per import.
+DECISIONS §15, §20 and §21.
+
+Two things a std module cannot export: a top-level `const` (nothing lowers one,
+so `std/math`'s constants are `dpi()` and friends) and a class with members (an
+ambient class is an opaque handle, so `std/io` is `fileOpen(path)` rather than
+`File.open(path)`).
+
 ## What it does not have yet
 
 Grep for these markers — each is a `GF0001` with a file and a line, never a
@@ -164,16 +178,16 @@ backend failure:
 | static **fields** | `classes.ts`, the `isStatic` branch over property declarations — needs module-level storage the backend has never emitted; see below | later |
 | **escaping closures — `HeapFn<F>`** | nothing declares the type. DECISIONS §18 step 2: captures by move into an owning environment, reusing `GF0235` for contention. Not started, and deliberately after `LocalFn` | later |
 | **`RefCount<T>`** | nothing declares the type. DECISIONS §18 step 3, and its own feature rather than part of closures — shared ownership does not exist anywhere in the value model yet | later |
-| generic functions, optional/rest/defaulted/destructured parameters | `lower.ts`, `#classFnParams` and `#signature` | later |
+| generic functions, optional/rest/defaulted/destructured parameters | `lower/module.ts`, `#signature`; `classes.ts`, `#classFnParams` | later |
 | two classes with the same name in two modules | `classes.ts`, `collectClasses` — a stated restriction, see DECISIONS §11.8 | later |
 | incremental builds | `CompileOptions.incremental` is reserved and unread | later |
 | `throw` / unwinding | `Terminator::Resume` errors | later |
-| a binding with no initialiser — `let e: SDL_Event;` | `lower.ts` — tsc wants `let e!: T` for its own definite-assignment rule, and the lowerer refuses either spelling. `zeroed<T>()` is the way to write it meanwhile | later |
+| a binding with no initialiser — `let e: SDL_Event;` | `lower/body.ts` — tsc wants `let e!: T` for its own definite-assignment rule, and the lowerer refuses either spelling. `zeroed<T>()` is the way to write it meanwhile | later |
 | **taking the address of a local** — C's `&x` | nothing produces one: `alloc` and `allocArray` are the only sources of a `Pointer<T>`, and both are heap. So a C function that fills a struct or union out-parameter needs `alloc<T>()` and a `.free()`, where C would have used a stack slot. Wants a decision about escape analysis before it can be safe | later |
-| a namespace holding anything but `type Underlying` | `lower.ts`, `#checkEnumNamespace` — a rule, not a gap: there is no module-level storage for one to hold | — |
+| a namespace holding anything but `type Underlying` | `lower/module.ts`, `#checkEnumNamespace` — a rule, not a gap: there is no module-level storage for one to hold | — |
 | **string enums** | `checker/src/types.ts`, `enumUnderlying` — implementable and cheap (the members are string constants), and currently the only way to write named string constants, since module-level `const` is unsupported | later |
-| `>>>`, the comma operator, `&&=` / `\|\|=` / `??=`, `??` | `lower.ts` — `>>>` also wants a decision, since an explicit unsigned width already spells a logical shift as `>>` | later |
-| the **value** of `a++` / `++a` / `(a += 1)` | `lower.ts`, `#unary` — they update as statements; only the value is missing, which is the half where prefix and postfix differ | later |
+| `>>>`, the comma operator, `&&=` / `\|\|=` / `??=`, `??` | `lower/tables.ts` has no token for them, so `lower/body.ts` refuses. `>>>` also wants a decision, since an explicit unsigned width already spells a logical shift as `>>` | later |
+| the **value** of `a++` / `++a` / `(a += 1)` | `lower/body.ts`, `#unary` — they update as statements; only the value is missing, which is the half where prefix and postfix differ | later |
 
 `Rvalue::Ref` and `Rvalue::AddrOf` **are** implemented now — the lowerer emits a
 `Ref` for every `this`, every method receiver and every `p.deref()`, and an
@@ -191,7 +205,7 @@ why they are done and this is not.
 **`Reference<T>` for a struct is the next real gap in the value model.** Today
 every struct parameter copies and there is no way to say otherwise. Erasing it
 is one branch in `checker/src/types.ts`; making it work is roughly six sites in
-`lower.ts` — `#propertyWidth` and `#property` (which unwrap a pointer to a
+`lower/` — `#propertyWidth` and `#property` (which unwrap a pointer to a
 struct but not a reference to one), `#fieldAssignment`, `#coerce` and
 `#toClassReference`, and argument passing — and each missed site is a wrong
 answer rather than a diagnostic.
@@ -452,7 +466,7 @@ value's width is *poison* in LLVM where Cranelift and the hardware both mask it.
 
 ## Classes, as built
 
-Read this before touching `classes.ts` or the class paths in `llvm/func.rs` and
+Read this before touching `classes.ts` or the class paths in `llvm/func/` and
 `llvm/vtable.rs`.
 
 **Fields and vtables are flattened at lowering, base entries first.** A
@@ -636,7 +650,7 @@ frontend check is a loud panic instead of a silent wrong answer.
 
 Which matters, because **nothing here refuses itself**. Eleven operations
 reached the backend and panicked before the checks existed. They are now
-`GF0302`, from two guards in `lower.ts`:
+`GF0302`, from two guards in `lower/module.ts`:
 
 - `requireKnownLayout` — `p[i]`, `p.offset(n)`, `p.deref()`, `p.free()`,
   `p.freeArray()`, `alloc`, `allocArray`, `sizeOf`, `alignOf`.
@@ -687,7 +701,7 @@ never noticed. It is not a Linux bug — Linux is only where it stopped being
 silent, which is exactly the argument §6 makes for running the second platform.
 
 The fix is that an assignment builds the new value **before** destroying the old
-one. `Statement::Assign` in `llvm/func.rs` does that unconditionally rather than
+one. `Statement::Assign` in `llvm/func/mod.rs` does that unconditionally rather than
 testing for overlap: an aggregate is written into a scratch slot and then moved
 home, and a one-word handle is already a separate value by the time the old one
 is released. Paying for a temporary is the better half of the trade — the other

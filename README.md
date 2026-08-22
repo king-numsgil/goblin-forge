@@ -37,7 +37,7 @@ the same files this compiler does — your editor underlines what the compiler
 will reject, while you type, with no extension installed.
 
 > **Status: experimental.** The language is real and the test suite is large
-> (660 tests, including programs checked against a C compiler and against
+> (over 950 tests, including programs checked against a C compiler and against
 > equivalent C++), but this is a young project. Expect gaps — they are reported
 > as diagnostics with a file and a line, never as a crash.
 
@@ -52,22 +52,32 @@ links it.
 |---|---|---|
 | **Bun** ≥ 1.3 | [bun.sh](https://bun.sh) | Runs the compiler frontend and the tests |
 | **Rust** ≥ 1.88 | [rustup.rs](https://rustup.rs) | Builds the backend and the runtime library |
+| **clang** | see below | The backend emits LLVM IR as text and compiles it with `clang -c` |
 | **A C toolchain** | see below | Links the executables this produces |
 | **CMake** ≥ 3.20 | [cmake.org](https://cmake.org) | Only for the test suite — builds the C and C++ programs it checks against |
+
+All of them are checked **before** the type-check, so a machine missing one is
+told which by a `GF0006` rather than by a failure inside the compiler after it
+has done all the work.
 
 ### The C toolchain, per platform
 
 - **Windows** — [Visual Studio Build Tools](https://visualstudio.microsoft.com/downloads/)
-  with the "Desktop development with C++" workload. The compiler finds
-  `link.exe` and `lib.exe` through the registry, so you do **not** need a
-  Developer Command Prompt.
-- **Linux** — `cc` and `ar`, plus a C++ compiler for the tests.
-  `sudo apt install build-essential cmake` covers it on Debian and Ubuntu.
-- **macOS** — the Xcode Command Line Tools: `xcode-select --install`. CMake
-  separately, via `brew install cmake`.
+  with the "Desktop development with C++" workload, **plus the "C++ Clang tools
+  for Windows" component**, which that workload does not install by default. The
+  compiler finds `link.exe` and `lib.exe` through the registry, so you do
+  **not** need a Developer Command Prompt.
+- **Linux** — `clang`, `cc` and `ar`, plus a C++ compiler for the tests.
+  `sudo apt install build-essential clang cmake` covers it on Debian and Ubuntu.
+- **macOS** — the Xcode Command Line Tools: `xcode-select --install`, which
+  bring clang with them. CMake separately, via `brew install cmake`.
 
 Set `CC` if you want a specific compiler driver on Linux or macOS; the default
-is `cc`.
+is `cc`. `GOBLIN_CLANG` names a specific clang, for a machine with several or
+with none on `PATH`.
+
+LLVM itself is **not** a separate dependency: the backend emits IR as text and
+hands it to clang, which is the only piece of LLVM a build ever touches.
 
 ## Getting started
 
@@ -606,7 +616,25 @@ either direction. A `static` method is what a callback written inside a class
 looks like — an *instance* method needs a receiver and a function pointer has
 nowhere to put one.
 
-**There are no closures yet.** `(a) => a * n` is a `GF0001`.
+A lambda that **captures** is a different type, and has to say so:
+
+```ts
+function each(xs: i32[], f: LocalFn<(x: i32) => void>): void {
+  for (const x of xs) { f(x); }
+}
+
+let total: i32 = 0;
+each(xs, (x) => { total = total + x; });   // no allocation; `total` is the frame's
+```
+
+`LocalFn<F>` is a **borrow**: its captures live in the frame that created it, so
+it costs nothing to make and may not outlive the call it was passed to.
+Returning one, storing one in a field or an array, or capturing one inside a
+closure that escapes are refused. The escaping form — a closure you can keep —
+is `HeapFn<F>` and does not exist yet.
+
+A capturing lambda assigned to a plain `(a: i32) => i32` is an error, and that
+is the point: one machine word has nowhere to put an environment.
 
 ### Calling C
 
@@ -665,12 +693,16 @@ on two machines.
 
 ### Not there yet
 
-`String.substring`/`indexOf`/`codePointAt`, closures, generics, `switch`,
-`do`/`while`, `for…of`, exceptions, static fields, top-level statements and
-top-level `const`.
+`String.substring`/`indexOf`/`codePointAt`, generics, exceptions (`try`/`catch`
+and `throw`), escaping closures (`HeapFn`), static fields, top-level statements
+and top-level `const`.
 
 All of them are declared or valid TypeScript, and all of them produce a
 `GF0001` diagnostic naming the construct and pointing at it.
+
+`switch`, `do`/`while`, `for…of` and capturing lambdas are **not** on this list
+any more — they are implemented, and `tests/control-flow.test.ts` and
+`tests/closures.test.ts` run them.
 
 ---
 

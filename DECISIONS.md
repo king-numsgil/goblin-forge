@@ -96,11 +96,16 @@ through turned up a better split, and the reason is worth keeping: C++ has
 `char buf[128]`, `std::vector<char>`, and `new char[n]`, and they are three
 different things rather than one thing with options.
 
-| C++ | Goblin | storage | status |
-|---|---|---|---|
-| `char buf[128]` | `FixedArray<T, N>` | **Inline** — no allocation | type, layout and destruction in; construction and indexing still to lower |
-| `std::vector<char>` | `T[]` | Owning handle, runtime length | declared, deliberately not implemented |
-| `new char[n]` / `delete[]` | `allocArray<T>(n)` / `p.freeArray()` | raw `Pointer<T>` | declared |
+| C++ | Goblin | storage |
+|---|---|---|
+| `char buf[128]` | `FixedArray<T, N>` | **Inline** — no allocation |
+| `std::vector<char>` | `T[]` | Owning handle, runtime length, growable |
+| `new char[n]` / `delete[]` | `allocArray<T>(n)` / `p.freeArray()` | raw `Pointer<T>` |
+
+All three are built. `T[]` grows by doubling from a floor of four, copies
+element-wise with each element's own copy operation, and is released by the
+scope that holds it; `tests/vector.test.ts` is its suite and the C++ oracle is
+the arbiter for the value semantics.
 
 The correction that drove it: **a C array is not a pointer.** `char buf[128]`
 *is* the 128 bytes; `sizeof` says 128, it cannot be reassigned, and as a struct
@@ -151,16 +156,9 @@ many are the same thing.
 The distinction that *is* worth having is `free` versus `freeArray` — the one
 place C++ genuinely needs to know whether one destructor runs or `n` of them.
 
-### Superseded: fixed length, mutable elements
+### The array header, and what growth costs
 
-**Answer: fixed length, mutable elements.**
-
-`a[i] = x` works. The length never changes, so there is no capacity word, no
-reallocation, and no iterator invalidation to reason about — a reference or
-pointer into an array stays valid for the array's lifetime, which is a property
-worth more than `push` is.
-
-The header is the same shape a `string` has:
+`T[]`'s header is the shape a `string` has, with a capacity word behind it:
 
 ```text
   [ len: u64 ][ owned: u64 ][ elements … ]
@@ -171,9 +169,11 @@ Elements are **inline**: an element occupies its stride, not a pointer to
 itself. An element of an owning type is destroyed by the array as part of
 destroying itself.
 
-`push` and growth stay `GF0001`. Adding them later changes the header and the
-runtime, but not the language's semantics for anything that exists today, which
-is why deferring them is cheap and getting invalidation wrong would not be.
+Growth reallocates, which **moves the elements** — so a `Pointer<T>` into an
+array is dangling after a `push`, exactly as it is with
+`std::vector::push_back`. That is the property the fixed-length design was
+protecting, and it was given up knowingly: a growable vector is worth more than
+an invalidation rule that holds only because nothing can grow.
 
 ## §11.3 — `instanceof` across a library boundary *(provisional)*
 
@@ -275,10 +275,10 @@ inferred from a type. Three things support it:
   great deal of C API surface is shaped, and it stays a plain struct here,
   layout-compatible, crossing the boundary unchanged.
 
-An interface with only data members is what exists today and does not change:
-a struct, C-compatible, copied by value. So adding classes retroactively changes
-the meaning of no existing declaration — the apparatus switches on only when
-someone writes a method signature, which is a `GF0001` right now anyway.
+An interface with only data members is a struct: C-compatible, copied by value,
+and unchanged by any of this. The apparatus switches on only when someone writes
+a method signature, which is what makes the interface a *contract* — so adding
+classes changed the meaning of no declaration that already existed.
 
 ### An interface type has no layout
 
@@ -767,80 +767,58 @@ original claim rather than in place of it.
 
 **Sharing the heap is opt-in and needs no override machinery.** `mi_malloc`,
 `mi_calloc`, `mi_realloc`, `mi_free`, `mi_zalloc`, `mi_malloc_aligned`,
-`mi_realloc_aligned` and `mi_usable_size` are declared in the prelude as
-ordinary `extern "C"` imports, so `SDL_SetMemoryFunctions(mi_malloc, mi_calloc,
-mi_realloc, mi_free)` is a line that compiles — the signatures match C's
-exactly. No `mimalloc-override` feature and no redirect DLL: that machinery
-exists for *unqualified* `malloc()` calls in third-party code, which a library's
-own hook sidesteps.
+`mi_realloc_aligned` and `mi_usable_size` are published from `"std/alloc"` as
+ordinary `extern "C"` imports, so
 
-These eight are the only prelude declarations that are not intrinsics, and they
-are an **allowlist** in `lower.ts` rather than a general "any prelude
-declaration nothing else claims is an extern" rule. The fallback matters when it
-is wrong: a new intrinsic added to the prelude and not yet lowered should be
-`GF0001` with a caret under it, not an unresolved external from the linker with
-no file and no line.
+```ts
+import { mi_calloc, mi_free, mi_malloc, mi_realloc } from "std/alloc";
 
-### Amendment: the eight moved into an ambient module *(2026-08-22)*
+SDL_SetMemoryFunctions(mi_malloc, mi_calloc, mi_realloc, mi_free);
+```
 
-**They are imported now, from `"std/alloc"`, and are no longer global.** Run as
-an experiment first, because the question it answers is not really about
-mimalloc: a standard library has to arrive *somehow*, and the global surface has
-room for `console` and the twelve widths and not for a hundred functions per
-module. These eight were the only candidate already in the tree — ordinary
-`extern "C"` declarations rather than intrinsics — so they were the cheapest
-thing to move and the most honest test of the mechanism.
+is a pair of lines that compiles — the signatures match C's exactly. No
+`mimalloc-override` feature and no redirect DLL: that machinery exists for
+*unqualified* `malloc()` calls in third-party code, which a library's own hook
+sidesteps.
 
-**The mechanism works, and cost almost nothing.** No tsconfig change of any
-kind: tsc matches the specifier against the ambient declaration directly, with
-no `paths` entry, no package, and nothing on disk to resolve to. And
-`resolveCallee` already followed `ts.SymbolFlags.Alias` to the aliased symbol,
-which turned out to cover more than it was written for — a named import, an `as`
-rename, and a re-export through a user module all worked unchanged, because each
-one lands on the same declaration in the prelude whichever file did the
-importing.
+These eight are not intrinsics, and they are an **allowlist** in
+`lower/tables.ts` rather than a general "any std declaration nothing else claims
+is an extern" rule. The fallback matters when it is wrong: a new intrinsic added
+to the prelude and not yet lowered should be `GF0001` with a caret under it, not
+an unresolved external from the linker with no file and no line.
 
-**One thing broke, and it was the registration walk.** `#declarePreludeExterns`
-scanned only the top-level statements of each declaration file, so declarations
-nested inside `declare module` were invisible and every use cascaded into
-`GF0001`. Worth recording that the failure landed in the right category: a
-caret under the name, not an unresolved external from the linker, which is the
-allowlist above doing its job under a change nobody wrote it for.
+### The standard library arrives as ambient modules
 
-**`PRELUDE_EXTERNS` is now `STD_MODULES`, keyed by specifier before name.** Not
-cosmetic. A flat table of names matched a declaration in *any* `.d.ts` the
-project included, so a user's own `declare function mi_malloc` would have been
-silently rebound to the runtime's trampoline. `mi_malloc` is only this
-`mi_malloc` when it came from `"std/alloc"`, and that is exactly what an ambient
-module is for.
+This is where that mechanism was settled, and these eight are what settled it —
+ordinary `extern "C"` declarations rather than intrinsics, and so the honest
+test of whether a std module could carry anything at all. The global surface has
+room for `console` and the twelve widths, and not for a hundred functions per
+module.
 
-**The namespace import was a gap and is now closed.** `import * as alloc from
-"std/alloc"` then `alloc.mi_malloc(8)` was `GF0001`: the receiver is a module
-namespace object, and every path treated it as a name that resolved to nothing.
-Fixed rather than documented, because it is the idiomatic TypeScript spelling
-and a language that refuses it is surprising for no reason a user can see —
-particularly with namespaced stdlib modules as the direction of travel.
+**It needs no configuration.** tsc matches the specifier against the ambient
+declaration directly: no `paths` entry, no package, and nothing on disk to
+resolve to. The declaration in the prelude is the whole of it.
 
-**A namespace is not a receiver, and that is the whole implementation.** `ns.f`
-sits exactly where `C.f` already sat: a qualified *name*, not a property of an
-object, resolved through tsc's symbol at compile time. So it goes beside the
-static-method branch in each of the three places that had one —
-`#propertyWidth`, `#propertyValue` and the two call paths — and emits the same
-**direct** call the bare name does, verified in the text IR rather than assumed:
-`call ptr @gf_mi_malloc(i64 64)`, no load and nothing indirect. There is no
-module object at run time, which is the point rather than the obstacle: nothing
-has to exist for a name to be qualified by it.
+**`STD_MODULES` is keyed by specifier before name**, which is not cosmetic. A
+flat table of names would match a declaration in *any* `.d.ts` the project
+included, so a user's own `declare function mi_malloc` would be silently
+rebound to the runtime's trampoline. `mi_malloc` is only this `mi_malloc` when
+it came from `"std/alloc"`, and that is exactly what an ambient module is for.
 
-It follows that both spellings work in one program, and for a reason worth
-stating rather than testing into existence: they resolve to the same
-declaration, and the extern is registered per declaration. One module may write
-`import * as alloc`, another `import { mi_malloc }`, and there is nothing to
-reconcile because there is nothing per import. A block taken through one and
-released through the other is pinned by a test all the same.
+The externs are registered per *declaration*, not per import, which is what
+makes every spelling reach the same symbol: a named import, an `as` rename, a
+re-export through a user module, and a namespace import all land on the one
+declaration in the prelude, whichever file did the importing. So one module may
+write `import * as alloc` and another `import { mi_malloc }` in the same
+program, and there is nothing to reconcile because there is nothing per import.
 
-The same change made `import * as m from "./math.ts"` work, which had been
-`GF0001` since multi-module linking landed and is now the positive test it
-replaced.
+**A namespace is not a receiver.** `ns.f` sits exactly where `C.f` sits: a
+qualified *name* rather than a property of an object, resolved through tsc's
+symbol before anything asks the thing on the left for a value. It emits the same
+**direct** call the bare name does — `call ptr @gf_mi_malloc(i64 64)`, no load
+and nothing indirect — so there is no module object at run time. That is the
+point rather than the obstacle: nothing has to exist for a name to be qualified
+by it.
 
 ---
 
@@ -886,8 +864,8 @@ this was written on.
 So the runtime defines eight one-line `gf_mi_*` wrappers instead. A Rust symbol
 exports from a staticlib and a cdylib identically on all three platforms with no
 linker argument anywhere. The prelude still spells them `mi_malloc` — the name
-has to type-check against a signature C wrote — and `STD_MODULES` (`PRELUDE_EXTERNS`
-when this was written; see §15's amendment) maps the declaration to the symbol. The secondary benefit is the one likely to matter
+has to type-check against a signature C wrote — and `STD_MODULES` maps the
+declaration to the symbol. The secondary benefit is the one likely to matter
 later: the published surface is now *ours*, so the allocator underneath it can
 change again without it moving.
 
@@ -914,7 +892,7 @@ three different sentences, and a test that they are different.
 
 ---
 
-## §17 — The backend becomes LLVM *(settled 2026-08-18, not yet built)*
+## §17 — The backend becomes LLVM *(settled and built, 2026-08-18)*
 
 **Answer: LLVM replaces Cranelift, and it happens before any vector work
 lands.** The requirement that forces it is f64 linear algebra at speed, for a
@@ -1165,48 +1143,38 @@ milestones have been built on top of Cranelift. Which is the ordering argument
 at the head of this section, and the reason the swap precedes the vector work
 rather than following it.
 
-### Amendment: the optimisation levels are LLVM's, and the runtime follows *(2026-08-22)*
+### The optimisation levels are LLVM's, and the runtime is built at yours
 
-`optLevel` was `"none" | "speed" | "size"`, which was the right surface for
-Cranelift — it has three settings and no more. LLVM has six, and naming them
-after what they are *for* rather than what they *are* left two thirds of them
-with nowhere to live: `-O1` and `-O3` are both "speed", and they differ by more
-than the gap between "speed" and "size" does.
+`optLevel` is `"O0"`, `"O1"`, `"O2"`, `"O3"`, `"Os"` or `"Oz"` — clang's own
+vocabulary, because it is clang's own set. Naming them for what they are *for*
+rather than what they *are* leaves two thirds of them nowhere to live: `-O1` and
+`-O3` are both "speed", and they differ by more than the gap between "speed" and
+"size" does. `"O2"` is the default, because `-O3` is not reliably faster — it
+trades size and compile time for inlining and vectorisation that as often costs
+as gains.
 
-So the levels are now `"O0"`, `"O1"`, `"O2"`, `"O3"`, `"Os"`, `"Oz"`, and the
-old names are **gone rather than aliased**. Aliasing would have left two
-vocabularies for one setting and a permanent question about which a reader
-meant; a build script that says `"speed"` now fails to type-check, which is a
-one-line fix at a site the compiler names. `"O2"` is the default, because `-O3`
-is not reliably faster — it trades size and compile time for inlining and
-vectorisation that as often costs as gains.
+**The runtime crate is built at the same level.** Otherwise a program asking for
+`Oz` gets its own code small and links a runtime at `opt-level = 3`, which is
+the case where the mismatch contradicts the request rather than merely
+surprising it. `--release` still supplies the *profile* — `lto` and
+`panic = "abort"` are properties of how this crate is built at all, not of how
+hard it is optimised — and only `opt-level` is overridden, through
+`CARGO_PROFILE_RELEASE_OPT_LEVEL` rather than `-C opt-level` after the `--`.
+Those flags reach the final crate only, so mimalloc, libc and libm would stay at
+`3` while the runtime alone moved, which makes `Oz` a claim about one of four
+things in the library.
 
-**The runtime crate is built at the same level, and was not before.** It was
-always `cargo rustc --release`, so a program asking for `Oz` got its own code
-small and linked a runtime built at `opt-level = 3`. That is the case where the
-mismatch contradicted the request rather than merely surprising; `O0` linking an
-optimised runtime was defensible on its own (Rust ships an optimised std for the
-same reason) but not worth keeping as an exception.
-
-`--release` still supplies the *profile* — `lto` and `panic = "abort"` are
-properties of how this crate is built at all, not of how hard it is optimised —
-and only `opt-level` is overridden. Through `CARGO_PROFILE_RELEASE_OPT_LEVEL`
-rather than `-C opt-level` after the `--`, because those flags reach the final
-crate only: mimalloc, libc and libm would have stayed at `3` while the runtime
-alone moved, which makes `Oz` a claim about one of four things in the library.
-
-**The part that had to be got right is the output directory.** cargo writes
+**The part that has to be got right is the output directory.** cargo writes
 every profile to `target/release` whatever the level, so two levels are one
-path: the second build overwrites the first, and the first caller's cached path
+path: a second build overwrites the first, and the first caller's cached path
 keeps naming a file that is now somebody else's library. Nothing downstream can
 notice — it links, it runs, and it is simply not the build that was asked for.
 So each level gets `target/opt-<level>/`, and the in-process cache is keyed by
 target *and* level. `build-options.test.ts` builds two levels and requires two
-files, which is the test that would have caught the version without it.
+distinct files.
 
-The cost is one cargo build per level per checkout, mimalloc included. That is
-what any toolchain charges for a debug and a release build, and it is cached on
-disk afterwards.
+The cost is one cargo build per level per checkout, mimalloc included — what any
+toolchain charges for a debug and a release build, cached on disk afterwards.
 
 ### Amendment: AVX2 is a baseline requirement *(2026-08-18)*
 
@@ -1586,170 +1554,6 @@ written is worse than the plain move error.
 
 ---
 
-## §21 — `std/math`, and why there are two of everything *(settled and built, 2026-08-22)*
-
-`dsin` takes an `f64` and `fsin` an `f32`. There is no unprefixed `sin`, and
-that is not a naming preference — it is what fixed widths cost when they are
-taken seriously.
-
-**A single `sin` would have to pick a width for every caller who did not.** Take
-an `f64` and every `f32` call is either refused, leaving the programmer to write
-the conversion the module was supposed to spare them, or promoted silently —
-which is the thing REWRITE-PLAN §7's whole width design exists to prevent, back
-again through the standard library's front door. Overloading on the argument
-type is the answer a language with implicit conversions gives, and this is not
-one: `f32` is not a smaller `f64` here, and `dsin(x)` on an `f32` costs a
-widening that ought to be visible at the call.
-
-So the prefix is the choice, written down where it is read. It is C's answer
-(`sinf`), with the letter moved to the front so the family sorts together.
-
-### The implementation is Rust's `libm`, and the first reason is a link error
-
-**Nothing adds `-lm` to a Goblin link.** `system_libs` is the user's list, from
-their build config. A runtime that called the platform's `sin` would therefore
-fail to link on every Linux program that had not thought to ask for a library it
-never mentioned — and the failure would be an unresolved external with no file
-and no line, about a function the program did call. The alternative is for the
-compiler to pass `-lm` on every Unix link forever, which is a permanent tax for
-a module most programs do not import.
-
-**The second reason is that the platforms disagree.** The three libms differ in
-the last ulp on the transcendentals, and this project asserts on printed output
-— so a shared implementation is the difference between one expected string and
-three, on a suite whose CI already has a "passes on Windows, fails on Linux"
-history. The `libm` crate is a MUSL port and gives the same bits everywhere.
-
-The cost is the obvious one: it is not the platform's hand-tuned version. That
-is the right trade for a language whose tests compare output, and it is
-reversible — the surface is `gf_dsin`, so what is underneath can change without
-a program noticing, exactly as §16 arranged for the allocator.
-
-### Everything is total, and the constants are calls
-
-No function here traps, raises, or returns an error. `dsqrt(-1)` is a NaN,
-`dlog(0)` is negative infinity, `dfmod(x, 0)` is a NaN. This is C's behaviour
-and the only one available: there is no exception mechanism to raise into and no
-error type to return, and a checked variant would double a surface that is
-already seventy-two functions.
-
-`disnan` therefore has to exist and is not a convenience: a NaN is not equal to
-itself, so `x === dnan()` is always false and there is no other way to ask.
-
-**The constants are functions** — `dpi()`, not `dpi` — because the language has
-no top-level `const` to bind one to, ambient or otherwise. They are calls into
-the runtime, which is a real if tiny cost, and the alternative is an extern
-*data* symbol: new lowering, a relocation, and a second kind of thing a std
-module can export. Not worth it for five values per width.
-
-`STD_MODULES` derives the math half of its table from a name list rather than
-spelling out seventy-two pairs, because the rule — the symbol is `gf_` and the
-name — is the thing that is actually true, and seventy-two hand-written pairs
-are seventy-two chances for one to quietly say something else.
-
----
-
-## §20 — `std/io`, and what a standard library is here *(settled and built, 2026-08-22)*
-
-§15's amendment moved the allocator into `"std/alloc"` to find out whether an
-ambient module could carry a standard library. It could, for *functions*. This
-is the section where the rest of the question gets answered, because a file
-needs a type as well.
-
-**A `File` is an opaque handle, and the API is C's.** `fileOpen` returns
-`Pointer<File> | null`, `fileClose` is `fclose`, and nothing is released by a
-scope. That is a deliberate departure from everything else in the language,
-where ownership is written down and a binding's scope releases what it holds,
-and the user's call rather than a default: the alternative designs are recorded
-below because each was live and each was rejected for a reason worth keeping.
-
-**A file nobody closes is a *detected* leak, which is what pays for the
-handle.** `gf_file_open` allocates through the same allocator every other
-allocation goes through, so the live-allocation check counts it — and the
-harness's automatic check, which no test opts into, fails the run. A bare
-integer descriptor would have been cheaper by one allocation and would have
-leaked in silence, which is the trade the whole project keeps refusing.
-
-### The three designs, and why this one
-
-* **A stdlib written in Goblin**, resolved from a real `.ts` shipped with the
-  runtime. This was the recommendation, and it works *today*: a class with a
-  constructor, a static and a method, imported from a bare `std/io` specifier,
-  compiles and runs with no compiler change at all. It would have given `File`
-  a destructor, so a file would close at the end of its scope like a `string`
-  releases its buffer. Rejected in favour of the C shape; it remains the
-  obvious answer the day a stdlib wants a *value* type, and the one defect
-  found on the way is recorded below.
-* **An ambient `declare class` with statics and methods**, so that `File.open()`
-  is the spelling. This is the largest of the three and the only one that
-  invents a concept: a class with no layout but with callable members lowered
-  to externs, `this` marshalled as a first argument. Nothing in the compiler has
-  a precedent for it.
-* **Ambient functions over an opaque handle**, which is what was built. Zero new
-  concepts, and the honest consequence is that there is no `File.open()`
-  syntax — an ambient class gets no lowered members, so it is `fileOpen(path)`.
-
-### Two things the language was missing, both small
-
-**An ambient class inside `declare module` was not ambient.**
-`ambientClassNameOf` tested `ModifierFlags.Ambient`, which is the `declare`
-keyword — and `declare` is illegal on a member of an already-ambient block, so
-`class File` inside `declare module "std/io"` carried no such flag and erased as
-`GF0001`. It now accepts a declaration file as well as the modifier, which makes
-it the exact complement of what `collectClasses` skips. A class that falls down
-the gap between those two sets is refused as unsupported while being perfectly
-well formed, which is the failure this closes.
-
-**A module outside the project root gets an absolute-path symbol tag.**
-`#relative` falls back to the whole path when a file is not under the root
-(`module.ts:1090`), so an internal function in a shipped stdlib would be
-`twice$<hash of C:/Users/…>` — different on every machine, against the stated
-goal that the same sources produce the same symbols in two checkouts. Nothing
-built today reaches it, because `std/io` is ambient and has no Goblin source.
-It is the first thing to fix if the stdlib ever becomes real source.
-
-### The standard streams are not `FILE *`, and that is not an optimisation
-
-`stdout()` and `stderr()` route through the same unbuffered path `console.log`
-uses rather than through a C stream. On Windows the CRT opens its descriptors in
-text mode and turns every `\n` on the way out into `\r\n` — invisible in a
-terminal, and it broke every test that asserts on exact output the last time it
-happened (§16's neighbourhood). Reading is the same arrangement in reverse.
-
-The three are `static`, so nothing counts them and `fileClose(stdout())` is a
-no-op rather than a way to take `console.log` down three calls later. That means
-a function taking "a file" and closing it when it is done does not have to ask
-which kind it was handed.
-
-**End of input is an empty read, and there is no `feof`.** One rule rather than
-two: a `feof` would answer for a `FILE *` and have nothing to say about
-`stdin()`, which has no such flag to read.
-
-### Seeking, and the 32-bit trap that is not visible from Goblin
-
-`fseek` takes a `long`, and a `long` is **32 bits on Windows**. The obvious
-spelling therefore caps every offset at 2 GB on one of the three platforms this
-is built for, silently, with no diagnostic at any layer — the Goblin signature
-says `isize`, the Rust signature says `i64`, and the truncation happens inside
-the C prototype where nothing is looking. So each platform's 64-bit spelling is
-used instead: `_fseeki64` on MSVC, `fseeko` elsewhere.
-
-**`Seek`'s values are ours, not C's.** `Seek.Set` is 0 because this language
-says so, and `whence_of` maps it to whatever `SEEK_SET` happens to be. A
-constant declared in Goblin that has to agree with a C macro is a constant that
-will eventually disagree with it, on the one platform nobody built for.
-
-**`fileSize` restores the position, including when it fails.** It is asked by
-seeking to the end and back, so a size that also moved the file would be a size
-you could not ask for in the middle of reading — and the restore happens on the
-error path too, because a failed question must not have an effect.
-
-This is also the first ambient **enum**, which works and is worth recording as
-working: an ambient `const enum` does not, because `isolatedModules` refuses it
-(`TS2748`). The plain one folds to its constant at the use site like any other.
-
----
-
 ## §19 — `alloc<T>({ … })`, the struct initialiser *(settled and built, 2026-08-20)*
 
 A C create-info struct is mostly nesting and mostly zero.
@@ -1871,6 +1675,172 @@ already hands the reader `zeroed<SDL_Event>()` plus an assignment as the
 workaround. Relaxing the rule from "no literal" to "at most one member" is a
 small change and a separate one, and it should be made where `GF0304` lives
 rather than as a side effect of this.
+
+---
+
+## §20 — `std/io`, and what a standard library is here *(settled and built, 2026-08-22)*
+
+The standard library arrives as **ambient modules**: `declare module "std/io"`
+in the prelude, resolving to no file, with `STD_MODULES` in `lower/tables.ts`
+mapping each declared name to the `extern "C"` symbol behind it. §15 established
+that shape for functions. `std/io` is where it had to carry a *type* as well.
+
+**A `File` is an opaque handle, and the API is C's.** `fileOpen` returns
+`Pointer<File> | null`, `fileClose` is `fclose`, and nothing is released by a
+scope. That is a deliberate departure from everything else in the language,
+where ownership is written down and a binding's scope releases what it holds.
+The alternatives are recorded below because each was live, and the reason each
+lost is worth keeping.
+
+**A file nobody closes is a *detected* leak, which is what pays for the
+handle.** `gf_file_open` allocates through the same allocator every other
+allocation goes through, so the live-allocation check counts it — and the
+harness's automatic check, which no test opts into, fails the run. A bare
+integer descriptor would have been cheaper by one allocation and would have
+leaked in silence, which is the trade this project keeps refusing.
+
+### The three designs, and why this one
+
+* **A stdlib written in Goblin**, resolved from a real `.ts` shipped with the
+  runtime. It works *today*: a class with a constructor, a static and a method,
+  imported from a bare `std/io` specifier, compiles and runs with no compiler
+  change at all. It would have given `File` a destructor, so a file would close
+  at the end of its scope as a `string` releases its buffer. It remains the
+  obvious answer the day a stdlib wants a *value* type, and the defect standing
+  in its way is below.
+* **An ambient `declare class` with statics and methods**, so that `File.open()`
+  is the spelling. The largest of the three, and the only one that invents a
+  concept: a class with no layout but with callable members lowered to externs,
+  `this` marshalled as a first argument. Nothing in the compiler has a precedent
+  for it.
+* **Ambient functions over an opaque handle**, which is what is built. No new
+  concepts, and the honest consequence is that there is no `File.open()`
+  syntax — an ambient class gets no lowered members, so it is `fileOpen(path)`.
+
+### An ambient class is one in a declaration file, not one with `declare`
+
+`ambientClassNameOf` accepts either the modifier or a declaration file, and it
+has to accept both: `declare` is illegal on a member of an already-ambient
+block, so `class File` inside `declare module "std/io"` carries no such flag and
+is no less ambient for it.
+
+The rule that makes this the right test rather than a patch is that the set of
+classes this build lays out and the set that erases to a handle must be exact
+complements. `collectClasses` skips on two conditions; this accepts on the same
+two. A class falling down the gap between them is refused as unsupported while
+being perfectly well formed.
+
+### A module outside the project root gets an absolute-path symbol tag
+
+`#relative` falls back to the whole path when a file is not under the root, so
+an internal function in a shipped stdlib would be `twice$<hash of C:/Users/…>` —
+different on every machine, against the stated goal that the same sources
+produce the same symbols in two checkouts. Nothing reaches it today, because
+every std module is ambient and has no Goblin source. It is the first thing to
+fix if one ever becomes real source.
+
+### The standard streams are not `FILE *`, and that is not an optimisation
+
+`stdout()` and `stderr()` route through the same unbuffered path `console.log`
+uses rather than through a C stream. On Windows the CRT opens its descriptors in
+text mode and turns every `\n` on the way out into `\r\n` — invisible in a
+terminal, and it breaks every test that asserts on exact output. Reading is the
+same arrangement in reverse.
+
+The three are `static`, so nothing counts them and `fileClose(stdout())` is a
+no-op rather than a way to take `console.log` down three calls later. A function
+taking "a file" and closing it when it is done does not have to ask which kind
+it was handed.
+
+**End of input is an empty read, and there is no `feof`.** One rule rather than
+two: a `feof` would answer for a `FILE *` and have nothing to say about
+`stdin()`, which has no such flag to read.
+
+### Seeking, and the 32-bit trap that is not visible from Goblin
+
+`fseek` takes a `long`, and a `long` is **32 bits on Windows**. The obvious
+spelling therefore caps every offset at 2 GB on one of the three platforms this
+is built for, silently, with no diagnostic at any layer — the Goblin signature
+says `isize`, the Rust signature says `i64`, and the truncation happens inside
+the C prototype where nothing is looking. Each platform's 64-bit spelling is
+used instead: `_fseeki64` on MSVC, `fseeko` elsewhere.
+
+**`Seek`'s values are ours, not C's.** `Seek.Set` is 0 because this language
+says so, and `whence_of` maps it to whatever `SEEK_SET` happens to be. A
+constant declared in Goblin that has to agree with a C macro is a constant that
+will eventually disagree with it, on the one platform nobody built for.
+
+**`fileSize` restores the position, including when it fails.** It is asked by
+seeking to the end and back, so a size that also moved the file would be a size
+you could not ask for in the middle of reading — and the restore happens on the
+error path too, because a failed question must not have an effect.
+
+`Seek` is also the first ambient **enum**, and it folds to its constant at the
+use site like any other. An ambient `const enum` does not work: `isolatedModules`
+refuses it (`TS2748`).
+
+---
+
+## §21 — `std/math`, and why there are two of everything *(settled and built, 2026-08-22)*
+
+`dsin` takes an `f64` and `fsin` an `f32`. There is no unprefixed `sin`, and
+that is not a naming preference — it is what fixed widths cost when they are
+taken seriously.
+
+**A single `sin` would have to pick a width for every caller who did not.** Take
+an `f64` and every `f32` call is either refused, leaving the programmer to write
+the conversion the module was supposed to spare them, or promoted silently —
+which is the thing REWRITE-PLAN §7's whole width design exists to prevent, back
+again through the standard library's front door. Overloading on the argument
+type is the answer a language with implicit conversions gives, and this is not
+one: `f32` is not a smaller `f64` here, and `dsin(x)` on an `f32` costs a
+widening that ought to be visible at the call.
+
+So the prefix is the choice, written down where it is read. It is C's answer
+(`sinf`), with the letter moved to the front so the family sorts together.
+
+### The implementation is Rust's `libm`, and the first reason is a link error
+
+**Nothing adds `-lm` to a Goblin link.** `system_libs` is the user's list, from
+their build config. A runtime that called the platform's `sin` would therefore
+fail to link on every Linux program that had not thought to ask for a library it
+never mentioned — and the failure would be an unresolved external with no file
+and no line, about a function the program did call. The alternative is for the
+compiler to pass `-lm` on every Unix link forever, which is a permanent tax for
+a module most programs do not import.
+
+**The second reason is that the platforms disagree.** The three libms differ in
+the last ulp on the transcendentals, and this project asserts on printed output
+— so a shared implementation is the difference between one expected string and
+three, on a suite whose CI already has a "passes on Windows, fails on Linux"
+history. The `libm` crate is a MUSL port and gives the same bits everywhere.
+
+The cost is the obvious one: it is not the platform's hand-tuned version. That
+is the right trade for a language whose tests compare output, and it is
+reversible — the surface is `gf_dsin`, so what is underneath can change without
+a program noticing, exactly as §16 arranged for the allocator.
+
+### Everything is total, and the constants are calls
+
+No function here traps, raises, or returns an error. `dsqrt(-1)` is a NaN,
+`dlog(0)` is negative infinity, `dfmod(x, 0)` is a NaN. This is C's behaviour
+and the only one available: there is no exception mechanism to raise into and no
+error type to return, and a checked variant would double a surface that is
+already seventy-two functions.
+
+`disnan` therefore has to exist and is not a convenience: a NaN is not equal to
+itself, so `x === dnan()` is always false and there is no other way to ask.
+
+**The constants are functions** — `dpi()`, not `dpi` — because the language has
+no top-level `const` to bind one to, ambient or otherwise. They are calls into
+the runtime, which is a real if tiny cost, and the alternative is an extern
+*data* symbol: new lowering, a relocation, and a second kind of thing a std
+module can export. Not worth it for five values per width.
+
+`STD_MODULES` derives the math half of its table from a name list rather than
+spelling out seventy-two pairs, because the rule — the symbol is `gf_` and the
+name — is the thing that is actually true, and seventy-two hand-written pairs
+are seventy-two chances for one to quietly say something else.
 
 ---
 

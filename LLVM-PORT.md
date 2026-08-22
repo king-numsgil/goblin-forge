@@ -334,11 +334,10 @@ mem2reg builds the SSA.** `LocalSlot::{Register, Indirect, Memory}` collapses to
 one case, `Indirect` becoming simply an alloca that holds a pointer.
 
 The consequence, said out loud so it is not discovered as a regression: at
-`optLevel: "O0"` — `"none"` when this was written, see DECISIONS §17's second
-amendment — LLVM does not run mem2reg, so every local really does live in
-memory. That is exactly what `clang -O0` does, it is correct, and it will make
-test binaries slower than today, because that is the harness's default. It is
-not a problem and it is not worth fixing.
+`optLevel: "O0"` LLVM does not run mem2reg, so every local really does live in
+memory. That is exactly what `clang -O0` does, it is correct, and it makes test
+binaries slower than they were, because that is the harness's default. It is not
+a problem and it is not worth fixing.
 
 Then the opcode transcription. `Switch` → `switch`. `trap` → `call void
 @llvm.trap()` followed by `unreachable`. `fcvt_to_sint_sat` →
