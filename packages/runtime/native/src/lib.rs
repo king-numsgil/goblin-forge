@@ -74,6 +74,47 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
     unsafe { libc::abort() }
 }
 
+/// The personality routine, which a `no_std` crate owes the way it owes
+/// [`panic_handler`].
+///
+/// Not a workaround for a link error — the same obligation as the panic handler
+/// three lines up. `core`'s own documentation lists this beside
+/// `#[panic_handler]` as a symbol the crate must supply once it opts out of
+/// `std`, and adds that "crates which do not trigger a panic can be assured
+/// that this function is never called".
+///
+/// It has to exist because `compiler_builtins` ships precompiled in the
+/// sysroot, built to unwind, and its objects carry
+/// `.data.DW.ref.rust_eh_personality` slots naming this symbol; one
+/// `core::fmt` monomorphisation here carries another. Nothing cargo does
+/// reaches them: `compiler_builtins` is not in the build graph and cargo never
+/// invokes rustc for it, so a `panic` setting in a profile — or in
+/// `CARGO_PROFILE_*_PANIC` — propagates to every dependency cargo builds and to
+/// none of the sysroot. Only `-Z build-std` rebuilds those, at the price of a
+/// pinned nightly across every target a user might build for, which is the
+/// trade this crate already declined when it went `no_std`.
+///
+/// It aborts rather than returning because that is what `std` itself does where
+/// the routine is required to exist and never runs (`sys/personality/mod.rs`,
+/// the MSVC and wasm arm). A no-op returns whatever is in the return register,
+/// which an unwinder reads as a disposition and acts on — and exceptions are
+/// planned, so the day something unwinds through a `core` or
+/// `compiler_builtins` frame the choice is a loud stop or a silent wrong turn.
+/// Aborting is also what DECISIONS §11.5 specifies for unwinding past a frame
+/// that cannot carry it. Nothing reaches it today: no `throw`, every
+/// `UnwindAction` is `Unreachable`, no `invoke` or `landingpad` is built.
+///
+/// Deliberately not `cfg`-gated to ELF. `DW.ref.*` is the DWARF-EH spelling and
+/// MSVC emits no such reference, which is why the break was total on Linux and
+/// invisible on Windows — but MinGW is `windows` and wants the Unix answer, and
+/// a definition nothing calls costs a symbol. One unconditional definition
+/// beats a second opinion about which targets unwind how.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+extern "C" fn rust_eh_personality() -> ! {
+    abort()
+}
+
 /// `abort`, spelled once.
 ///
 /// `libc::abort` rather than a trap instruction because that is precisely what
