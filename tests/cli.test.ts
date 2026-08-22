@@ -109,6 +109,33 @@ describe("`init`", () => {
     });
 
     /**
+     * Two configs, because one cannot be right for both files.
+     *
+     * An editor gives a file the nearest `tsconfig.json` above it and looks for
+     * nothing else, so a single config at the root is the answer for the program
+     * *and* for the build script. The program is checked under `noLib` against
+     * the Goblin prelude; a build script is ordinary TypeScript. Sharing one
+     * leaves whichever lost underlined in red while the build succeeds — the
+     * failure `.goblin/` exists to prevent, arrived at from the other side.
+     */
+    test("the program and the build script each get a config that suits them", () => {
+        const program = JSON.parse(readFileSync(join(dir, "src", "tsconfig.json"), "utf8"));
+        expect(program.extends).toBe("../.goblin/tsconfig.base.json");
+        // Named in `files`, not just `include`: nothing imports the prelude, so
+        // `include` alone would never find it and every global would go
+        // unresolved in the editor while the compiler added it anyway.
+        expect(program.files).toEqual(["../.goblin/global.d.ts"]);
+
+        const script = JSON.parse(readFileSync(join(dir, "tsconfig.json"), "utf8"));
+        expect(script.compilerOptions.noLib).toBeUndefined();
+        expect(script.include).toEqual(["*.ts"]);
+        // The one thing a fresh project cannot do for itself: `@types/bun` is not
+        // installed, and TypeScript does not pick it up without being told even
+        // once it is. The note is the only place that says so.
+        expect(JSON.stringify(script["//"])).toContain("@types/bun");
+    });
+
+    /**
      * A build script is the one file in a project tsserver otherwise knows
      * nothing about: the tsconfig covers `src/`, and a build script is not
      * source. So the type it is checked against has to arrive some other way,
@@ -272,6 +299,30 @@ describe("building", () => {
         expect(result.stdout).toContain("dynamic");
     }, TIMEOUT);
 
+    test("a project whose config is still at the root builds unchanged", () => {
+        // The layout every project written before `src/tsconfig.json` existed
+        // has. The default looks there first and falls back here, so an upgrade
+        // does not require moving a file — and a project whose sources are not
+        // under `src/` never has to.
+        const old = project("old-layout");
+        run(old, "init");
+        rmSync(join(old, "src", "tsconfig.json"), {force: true});
+        writeFileSync(
+            join(old, "tsconfig.json"),
+            `${JSON.stringify({
+                extends: "./.goblin/tsconfig.base.json",
+                files: ["./.goblin/global.d.ts"],
+                include: ["src/**/*.ts"],
+            })}\n`,
+        );
+        writeFileSync(join(old, "src", "main.ts"), "export function main(): i32 { return 5; }\n");
+
+        const result = run(old, "build.ts");
+        expect({status: result.status, stderr: result.stderr}).toEqual({status: 0, stderr: ""});
+        const exe = join(old, "bin", process.platform === "win32" ? "app.exe" : "app");
+        expect(spawnSync(exe, [], {encoding: "utf8"}).status).toBe(5);
+    }, TIMEOUT);
+
     test("a script with no default export says what the shape is", () => {
         const bad = project("no-default");
         run(bad, "init");
@@ -289,6 +340,71 @@ describe("building", () => {
         const result = run(bad, "build.ts");
         expect(result.status).toBe(2);
         expect(result.stderr).toContain("entry");
+    });
+});
+
+/**
+ * `systemLib`, from inside a build script.
+ *
+ * A global rather than an import, because a project has no `node_modules` for an
+ * import to resolve against — the executable is the toolchain. The unit tests in
+ * `system-lib.test.ts` cover what it finds; these two cover that a build script
+ * can reach it at all, and that a failure to find something is reported as a
+ * build script problem rather than as a crash.
+ */
+describe("`systemLib`", () => {
+    test("a build script can call it, and it finds what is there", () => {
+        const dir = project("system-lib");
+        run(dir, "init");
+
+        const shared = process.platform === "win32"
+            ? "fake.lib"
+            : process.platform === "darwin"
+              ? "libfake.dylib"
+              : "libfake.so";
+        mkdirSync(join(dir, "libs"), {recursive: true});
+        writeFileSync(join(dir, "libs", shared), "");
+
+        // Written out rather than linked: an empty file is a library the linker
+        // would reject, and what is being tested is the lookup rather than the
+        // link.
+        writeFileSync(
+            join(dir, "build.ts"),
+            `import { writeFileSync } from "node:fs";
+       import { join } from "node:path";
+
+       writeFileSync(
+         join(import.meta.dir, "found.txt"),
+         systemLib("fake", { search: [join(import.meta.dir, "libs")] }),
+       );
+
+       export default { entry: "./src/main.ts", output: "./bin/app" };\n`,
+        );
+
+        const result = run(dir, "build.ts");
+        expect({status: result.status, stderr: result.stderr}).toEqual({status: 0, stderr: ""});
+        expect(readFileSync(join(dir, "found.txt"), "utf8")).toBe(join(dir, "libs", shared));
+    }, TIMEOUT);
+
+    test("a library that is not there fails the build script, with what it tried", () => {
+        const dir = project("system-lib-missing");
+        run(dir, "init");
+        writeFileSync(
+            join(dir, "build.ts"),
+            `export default {
+         entry: "./src/main.ts",
+         output: "./bin/app",
+         nativeLibs: [systemLib("nonesuch-xyz")],
+       };\n`,
+        );
+
+        const result = run(dir, "build.ts");
+        // A config that cannot be built is a usage failure, not a compile one,
+        // and the message has to be enough to fix it without reading the source.
+        expect(result.status).toBe(2);
+        expect(result.stderr).toContain("nonesuch-xyz");
+        expect(result.stderr).toContain("GOBLIN_LIB_PATH");
+        expect(result.stdout).not.toContain("checking types");
     });
 });
 

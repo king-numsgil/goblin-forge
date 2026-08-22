@@ -101,7 +101,9 @@ Then a project needs nothing else installed:
 ```console
 $ goblin-forge init
   .goblin/global.d.ts
+  .goblin/build.d.ts
   .goblin/tsconfig.base.json
+  src/tsconfig.json
   tsconfig.json
   build.ts
   src/main.ts
@@ -163,6 +165,17 @@ nothing compiled. `after` runs once the artefact exists and is handed its
 absolute path — as an argument to a function, as `$GOBLIN_OUTPUT` to a command —
 because `output` above has no extension and which one gets added is the target's
 business.
+
+**Two tsconfigs, and which is which.** `src/tsconfig.json` is the program's: it
+names the prelude and turns the JavaScript standard library off. The root
+`tsconfig.json` is the build script's, which is ordinary TypeScript. They are
+separate because an editor gives a file the nearest `tsconfig.json` above it and
+looks for nothing else, so one config would have to be right for both — and a
+config that suits a `noLib` Goblin program leaves `import { join } from
+"node:path"` underlined in a build script. If your build script does use Bun or
+node APIs, `bun add -d @types/bun` and add `"types": ["bun"]` to the root config;
+TypeScript does not pick those up on its own. A build script that only exports a
+config needs neither, and neither does `systemLib`.
 
 `init` writes the prelude into `.goblin/` so your **editor** can read it —
 tsserver reads the project's tsconfig and nothing else, so a prelude that lives
@@ -539,7 +552,9 @@ C program can `#include` it and link the archive.
 
 [`LINKING.md`](LINKING.md) is the practical half: which linker actually runs,
 how to put a C library on the link line, what `nativeLibs` does and does not
-accept, and what a consumer of a Goblin `static-lib` has to link alongside it.
+accept — it takes paths, and `systemLib("SDL3")` is how you get one for a
+library the machine already has, on any platform — and what a consumer of a
+Goblin `static-lib` has to link alongside it.
 
 ### Modules
 

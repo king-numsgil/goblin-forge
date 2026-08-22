@@ -25,6 +25,53 @@
 // `packages/cli/src/main.ts` — so a field added on one side and not the other
 // fails `bun run typecheck` rather than drifting.
 
+/**
+ * The path to a system library, for {@link GoblinBuild.nativeLibs}.
+ *
+ * ```ts
+ * export default {
+ *     entry: "./src/main.ts",
+ *     output: "./bin/game",
+ *     nativeLibs: [systemLib("SDL3")],
+ * } satisfies GoblinBuild;
+ * ```
+ *
+ * The name is the library's own, without the platform's decoration: `SDL3`, not
+ * `libSDL3.so` and not `SDL3.lib`. What it looks for and where is the platform's
+ * business — `libSDL3.so` under Arch's `/usr/lib` and Debian's multiarch
+ * directory, `libSDL3.dylib` under Homebrew's prefix, `SDL3.lib` under vcpkg or
+ * whatever `LIB` names — and pkg-config and the C compiler driver are asked
+ * before any of that is guessed at.
+ *
+ * A global rather than an import, because a build script has no `node_modules`
+ * to import from: this executable *is* the toolchain. `goblin-forge` the
+ * library exports the same function under the same name, for a build script
+ * that calls `compile` itself.
+ *
+ * Throws when nothing matches, naming what it tried. `GOBLIN_LIB_PATH` — a
+ * `PATH`-shaped list of directories — is the override that always works.
+ */
+declare function systemLib(
+    name: string,
+    options?: {
+        /**
+         * The pkg-config package name, when it is not the library's own.
+         * SDL3's is `sdl3`; OpenSSL's library is `ssl` and its package is
+         * `libssl`, which no rule would have guessed.
+         */
+        readonly pkgConfig?: string;
+
+        /** Directories to look in before anywhere else. */
+        readonly search?: readonly string[];
+
+        /**
+         * Which spelling wins where a machine has both. Defaults to `"shared"`,
+         * because that is what a package manager installs.
+         */
+        readonly prefer?: "shared" | "static";
+    },
+): string;
+
 /** What a build script's default export describes. */
 declare type GoblinBuild = {
     /**

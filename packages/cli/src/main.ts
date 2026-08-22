@@ -34,6 +34,7 @@ import {
     compile,
     type CompileOptions,
     formatAll,
+    systemLib,
     useRuntimeFiles,
 } from "goblin-forge";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
@@ -126,6 +127,23 @@ type _BuildConfigShapesMatch = Assert<
     GoblinBuild extends BuildConfig ? (BuildConfig extends GoblinBuild ? true : false) : false
 >;
 
+/**
+ * And the same for the one *value* the declaration promises.
+ *
+ * `systemLib` is a global as far as a build script is concerned, so the editor
+ * learns it from the same hand-written file — and a global that is declared and
+ * not injected, or injected with a different signature, is a build script that
+ * type-checks and then fails at run time. The import shadows the global inside
+ * this module, which is what makes the two nameable in one expression.
+ */
+type _SystemLibShapeMatches = Assert<
+    typeof systemLib extends typeof globalThis.systemLib
+        ? typeof globalThis.systemLib extends typeof systemLib
+            ? true
+            : false
+        : false
+>;
+
 /** A build script may export the config, or a function that produces it. */
 type BuildModule = {
     default?: BuildConfig | (() => BuildConfig | Promise<BuildConfig>);
@@ -155,6 +173,11 @@ EXAMPLE
     before: "bun run codegen",          // a command, or a function
     after: (output) => strip(output),   // and either may be a list
   } satisfies GoblinBuild;
+
+\`systemLib("SDL3")\` is available to a build script without an import, and gives
+\`nativeLibs\` the path to a library the machine already has — asking pkg-config
+and the C compiler before guessing at directories, and spelling the file the way
+the platform spells it.
 
 A \`before\` step runs before the compiler and a failing one stops the build; an
 \`after\` step runs once the artefact exists and is handed its absolute path, as
@@ -353,6 +376,23 @@ function describe(step: AfterStep): string {
     return step.name === "" ? "an inline function" : `${step.name}()`;
 }
 
+/**
+ * Which config the *program* is checked against, when the script does not say.
+ *
+ * `src/tsconfig.json` first, because that is where `init` puts it and why: a
+ * build script and a Goblin program cannot share one config, an editor gives a
+ * file the nearest `tsconfig.json` above it, and so the root has to belong to
+ * the build script.
+ *
+ * The root is still the answer when there is nothing under `src/` — a project
+ * written before that was true keeps building, and one whose sources are
+ * somewhere else names its config itself.
+ */
+function defaultTsconfig(root: string): string {
+    const beside = join(root, "src", "tsconfig.json");
+    return existsSync(beside) ? beside : join(root, "tsconfig.json");
+}
+
 function cacheRoot(): string {
     const base =
         process.env["GOBLIN_CACHE"] ??
@@ -442,9 +482,7 @@ async function main(argv: readonly string[]): Promise<number> {
     const result = await compile({
         ...options,
         root,
-        // A project's tsconfig sits beside its build script unless it says
-        // otherwise, which is true of every layout anybody actually writes.
-        tsconfig: config.tsconfig ?? join(root, "tsconfig.json"),
+        tsconfig: config.tsconfig ?? defaultTsconfig(root),
         ...(quiet ? {} : {onProgress: reportProgress}),
     });
 
@@ -502,22 +540,74 @@ function init(root: string): number {
         written.push(relative);
     };
 
+    // **The program's config lives under `src/`, not at the root**, and the
+    // reason is the file that is *not* a Goblin program: the build script.
+    //
+    // An editor picks a file's config by walking up from the file, and it does
+    // not look for anything but `tsconfig.json`. With one config at the root it
+    // is the only answer for both files, and it cannot be right for both: the
+    // program is checked under `noLib` against the Goblin prelude, and a build
+    // script is ordinary TypeScript that may import `node:path`. A root config
+    // that suits the program leaves a build script's imports underlined, which
+    // is the same "editor disagrees with the compiler" failure `.goblin/` exists
+    // to prevent, arrived at from the other side.
+    //
+    // Two configs, each owning the directory it is in, is the arrangement that
+    // needs no editor feature — no project references, no solution file — and
+    // therefore works in every editor rather than in the ones that implement
+    // that part of the protocol.
+    seed(
+        join("src", "tsconfig.json"),
+        `${JSON.stringify(
+            {
+                extends: `../${PROJECT_DIR}/tsconfig.base.json`,
+                // The prelude in `files`, unconditionally: it is not reached by any
+                // import, so `include` alone would never find it and the globals would
+                // go unresolved in the editor. `include` covers the rest — every file
+                // beside it, not just the entry point — so a helper module gets
+                // tsserver coverage as soon as it exists, not only once `main.ts`
+                // imports it.
+                files: [
+                    `../${PROJECT_DIR}/global.d.ts`,
+                ],
+                include: [
+                    "**/*.ts",
+                ],
+            },
+            null,
+            4,
+        )}\n`,
+    );
+
     seed(
         "tsconfig.json",
         `${JSON.stringify(
             {
-                extends: `./${PROJECT_DIR}/tsconfig.base.json`,
-                // The prelude in `files`, unconditionally: it is not reached by any
-                // import, so `include` alone would never find it and the globals would
-                // go unresolved in the editor. `include` covers the rest — every file
-                // under `src/`, not just the entry point — so a helper module gets
-                // tsserver coverage as soon as it exists, not only once `main.ts`
-                // imports it.
-                files: [
-                    `./${PROJECT_DIR}/global.d.ts`,
+                "//": [
+                    "For the build script, which is ordinary TypeScript rather than",
+                    "Goblin — the program's own config is src/tsconfig.json.",
+                    "",
+                    "A build script that uses Bun or node APIs needs their types:",
+                    "  bun add -d @types/bun",
+                    "and then add \"types\": [\"bun\"] below. Without that line the",
+                    "types are not picked up even once they are installed.",
+                    "",
+                    "`systemLib` needs neither — it is declared by .goblin/build.d.ts",
+                    "and provided by the compiler itself.",
                 ],
+                compilerOptions: {
+                    target: "esnext",
+                    lib: ["esnext"],
+                    module: "preserve",
+                    moduleResolution: "bundler",
+                    moduleDetection: "force",
+                    strict: true,
+                    allowImportingTsExtensions: true,
+                    skipLibCheck: true,
+                    noEmit: true,
+                },
                 include: [
-                    "src/**/*.ts",
+                    "*.ts",
                 ],
             },
             null,
@@ -556,6 +646,15 @@ export default {
 
 /** Import a build script and take its default export. */
 async function load(script: string): Promise<BuildConfig | undefined> {
+    // What a build script may reach for, put where it can reach it. There is no
+    // `node_modules` in a project — this executable is the toolchain — so an
+    // import would have nothing to resolve against, and a global is what
+    // `.goblin/build.d.ts` already describes to the editor.
+    //
+    // Before the import rather than after: a config is often computed at the
+    // script's top level, and `nativeLibs: [systemLib("SDL3")]` runs there.
+    globalThis.systemLib = systemLib;
+
     let module: BuildModule;
     try {
         module = (await import(pathToFileURL(script).href)) as BuildModule;

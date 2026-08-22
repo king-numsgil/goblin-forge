@@ -622,6 +622,60 @@ of that name next to your build script, and says so:
 /usr/bin/ld: cannot find /your/project/-lmylib: No such file or directory
 ```
 
+### `systemLib`, for a library the machine installed
+
+For anything a package manager put there, the path is not worth writing by
+hand — it differs per platform, per distribution and per package manager, and a
+build script that hardcodes `/usr/lib/libSDL3.so` works on exactly one machine.
+
+```ts
+// build.ts
+export default {
+  entry: "./src/main.ts",
+  output: "./bin/game",
+  nativeLibs: [systemLib("SDL3")],
+};
+```
+
+The name is the library's own, with no platform decoration: `SDL3`, never
+`libSDL3.so` and never `SDL3.lib`. What gets looked for, and where, is the
+platform's business:
+
+| | Looks for | Then in |
+|---|---|---|
+| Linux, BSD | `libSDL3.so`, `libSDL3.a` | pkg-config's `libdir`, `/usr/local/lib`, `/usr/lib`, `/usr/lib64`, the multiarch directory, then `cc --print-file-name` |
+| macOS | `libSDL3.dylib`, `libSDL3.a` | pkg-config, `$HOMEBREW_PREFIX/lib`, `/opt/homebrew/lib`, `/usr/local/lib`, then `cc --print-file-name` |
+| Windows | `SDL3.lib`, `libSDL3.dll.a`, `libSDL3.a` | pkg-config (MSYS2 has one), every directory in `LIB`, `%VCPKG_ROOT%/installed/x64-windows/lib` |
+
+All three spellings are tried on Windows rather than the toolchain being
+detected, because MSVC and MinGW disagree about all of them and a wrong guess
+would be a confusing miss rather than an error. `SDL3.lib` is MSVC's name for
+*both* an import library and a static archive, so `prefer` has nothing to choose
+between there; on the other platforms it defaults to `"shared"`, which is what a
+package manager installs, and `prefer: "static"` flips it.
+
+`systemLib` is a **global** in a build script — a project has no `node_modules`
+for an import to resolve against, and `.goblin/build.d.ts` declares it so the
+editor knows it too. A build script that calls `compile` itself imports the same
+function from `goblin-forge`.
+
+Two options for the cases the defaults miss: `pkgConfig` names the package when
+it is not the library's own (`systemLib("ssl", { pkgConfig: "libssl" })`), and
+`search` names directories to try first. When nothing matches it throws, listing
+what it looked for and where — and `GOBLIN_LIB_PATH`, a `PATH`-shaped list of
+directories, is the override that always works:
+
+```console
+$ GOBLIN_LIB_PATH=/opt/sdl/lib goblin-forge
+```
+
+Verified on this machine against Arch's `sdl3` package: `systemLib("SDL3")`
+answers `/usr/lib/libSDL3.so` through pkg-config, and the binary records the
+SONAME `libSDL3.so.0`, so it runs anywhere SDL3 is installed. The Windows row is
+from the toolchains' own documentation rather than from a machine sitting here.
+
+### Doing it by hand
+
 Three ways out, in order of how much you should like them.
 
 **Give it the archive's path.** The compiler driver knows where its own

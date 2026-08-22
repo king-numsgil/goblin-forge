@@ -32,6 +32,12 @@ export {
 
 export { lower, type LowerResult } from "./lower.ts";
 
+// `nativeLibs` takes paths, so something has to turn "SDL3" into one. Here
+// rather than in the CLI because a build script that calls `compile` has the
+// same problem as one that exports a config, and the answer should not depend
+// on which of the two it is.
+export { systemLib, type SystemLibOptions } from "./system-lib.ts";
+
 // Diagnostics are the checker's model, and re-exported here so that a build
 // script needs one import rather than two.
 export {
