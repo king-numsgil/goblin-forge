@@ -42,19 +42,26 @@ export const STRING_FROM_BYTES = "stringFromBytes";
 export const POINTER_ADDRESS = "address";
 
 /**
- * The prelude declarations that are ordinary `extern "C"` imports.
+ * The prelude's ambient modules, and the `extern "C"` symbol behind each name.
  *
- * Everything else the prelude declares is a name this file recognises and lowers
- * itself. These eight are the exception: mimalloc's own entry points, already in
- * every binary because the runtime allocates through them, published under their
- * C names so a library that lets its allocator be replaced can be handed the
- * program's own heap.
+ * Everything the prelude declares *globally* is a name this file recognises and
+ * lowers itself. These eight are the exception: mimalloc's own entry points,
+ * already in every binary because the runtime allocates through them, published
+ * under their C names so a library that lets its allocator be replaced can be
+ * handed the program's own heap.
  *
- * An **allowlist**, rather than "any prelude declaration no intrinsic claims",
- * because what matters is how the rule fails. A new intrinsic added to the
- * prelude and not yet lowered should be `GF0001` with a caret under it; under a
- * general fallback it would instead be an unresolved external from the linker,
- * with no file and no line — the shape of error REWRITE-PLAN §8 exists to stop.
+ * Keyed by **module specifier first**, because that is what an ambient module
+ * buys over a global: `mi_malloc` is only this `mi_malloc` when it came from
+ * `"std/alloc"`. A flat table of names would match a declaration of the same
+ * name in any `.d.ts` the project happens to include, and quietly redirect a
+ * user's own `extern` to the runtime's trampoline.
+ *
+ * An **allowlist**, rather than "any declaration in the module that no
+ * intrinsic claims", because what matters is how the rule fails. A new name
+ * added to the prelude and not yet lowered should be `GF0001` with a caret
+ * under it; under a general fallback it would instead be an unresolved external
+ * from the linker, with no file and no line — the shape of error
+ * REWRITE-PLAN §8 exists to stop.
  *
  * The value is the symbol actually called, and it is deliberately not the name
  * written. `mi_malloc` is the spelling because it has to type-check against a
@@ -64,15 +71,20 @@ export const POINTER_ADDRESS = "address";
  * that has three per-platform workarounds, one of which is a hard link error
  * on Mach-O. A Rust symbol needs no workaround on any of them.
  */
-export const PRELUDE_EXTERNS: ReadonlyMap<string, string> = new Map([
-    ["mi_malloc", "gf_mi_malloc"],
-    ["mi_calloc", "gf_mi_calloc"],
-    ["mi_realloc", "gf_mi_realloc"],
-    ["mi_free", "gf_mi_free"],
-    ["mi_zalloc", "gf_mi_zalloc"],
-    ["mi_malloc_aligned", "gf_mi_malloc_aligned"],
-    ["mi_realloc_aligned", "gf_mi_realloc_aligned"],
-    ["mi_usable_size", "gf_mi_usable_size"],
+export const STD_MODULES: ReadonlyMap<string, ReadonlyMap<string, string>> = new Map([
+    [
+        "std/alloc",
+        new Map([
+            ["mi_malloc", "gf_mi_malloc"],
+            ["mi_calloc", "gf_mi_calloc"],
+            ["mi_realloc", "gf_mi_realloc"],
+            ["mi_free", "gf_mi_free"],
+            ["mi_zalloc", "gf_mi_zalloc"],
+            ["mi_malloc_aligned", "gf_mi_malloc_aligned"],
+            ["mi_realloc_aligned", "gf_mi_realloc_aligned"],
+            ["mi_usable_size", "gf_mi_usable_size"],
+        ]),
+    ],
 ]);
 
 /**

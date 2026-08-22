@@ -448,6 +448,8 @@ Many libraries let you replace theirs, and the prelude publishes mimalloc under
 its own C names so you can hand them the program's:
 
 ```ts
+import { mi_calloc, mi_free, mi_malloc, mi_realloc } from "std/alloc";
+
 declare function SDL_SetMemoryFunctions(
   malloc_fn: (size: usize) => Pointer<unknown> | null,
   calloc_fn: (count: usize, size: usize) => Pointer<unknown> | null,
@@ -467,7 +469,13 @@ is the point — there is no shim and no wrapper, only four addresses. Eight
 functions are declared in all: those four, plus `mi_zalloc`,
 `mi_malloc_aligned`, `mi_realloc_aligned` and `mi_usable_size`.
 
-Four things to know:
+Five things to know:
+
+- **They are imported, not global.** `"std/alloc"` is an ambient module — it
+  resolves to no file, so there is no package to install and no path to
+  configure, and the declaration in the prelude is the whole of it. These eight
+  are the only names in the language that arrive this way; a program that
+  forgets the import is told so by tsc, as `TS2304`.
 
 - **Write the parameter types exactly as above.** A function pointer is checked
   one level in, so a `(size: usize) => Pointer<unknown>` that drops the `| null`

@@ -781,6 +781,43 @@ is wrong: a new intrinsic added to the prelude and not yet lowered should be
 `GF0001` with a caret under it, not an unresolved external from the linker with
 no file and no line.
 
+### Amendment: the eight moved into an ambient module *(2026-08-22)*
+
+**They are imported now, from `"std/alloc"`, and are no longer global.** Run as
+an experiment first, because the question it answers is not really about
+mimalloc: a standard library has to arrive *somehow*, and the global surface has
+room for `console` and the twelve widths and not for a hundred functions per
+module. These eight were the only candidate already in the tree — ordinary
+`extern "C"` declarations rather than intrinsics — so they were the cheapest
+thing to move and the most honest test of the mechanism.
+
+**The mechanism works, and cost almost nothing.** No tsconfig change of any
+kind: tsc matches the specifier against the ambient declaration directly, with
+no `paths` entry, no package, and nothing on disk to resolve to. And
+`resolveCallee` already followed `ts.SymbolFlags.Alias` to the aliased symbol,
+which turned out to cover more than it was written for — a named import, an `as`
+rename, and a re-export through a user module all worked unchanged, because each
+one lands on the same declaration in the prelude whichever file did the
+importing.
+
+**One thing broke, and it was the registration walk.** `#declarePreludeExterns`
+scanned only the top-level statements of each declaration file, so declarations
+nested inside `declare module` were invisible and every use cascaded into
+`GF0001`. Worth recording that the failure landed in the right category: a
+caret under the name, not an unresolved external from the linker, which is the
+allowlist above doing its job under a change nobody wrote it for.
+
+**`PRELUDE_EXTERNS` is now `STD_MODULES`, keyed by specifier before name.** Not
+cosmetic. A flat table of names matched a declaration in *any* `.d.ts` the
+project included, so a user's own `declare function mi_malloc` would have been
+silently rebound to the runtime's trampoline. `mi_malloc` is only this
+`mi_malloc` when it came from `"std/alloc"`, and that is exactly what an ambient
+module is for.
+
+**Known gap: the namespace import.** `import * as alloc from "std/alloc"` then
+`alloc.mi_malloc(8)` is `GF0001` — the receiver is a module namespace object and
+the call path treats it as an unsupported name. Named imports are unaffected.
+
 ---
 
 ## §16 — The runtime may be linked shared *(settled and built, 2026-08-18)*
@@ -825,8 +862,8 @@ this was written on.
 So the runtime defines eight one-line `gf_mi_*` wrappers instead. A Rust symbol
 exports from a staticlib and a cdylib identically on all three platforms with no
 linker argument anywhere. The prelude still spells them `mi_malloc` — the name
-has to type-check against a signature C wrote — and `PRELUDE_EXTERNS` maps the
-declaration to the symbol. The secondary benefit is the one likely to matter
+has to type-check against a signature C wrote — and `STD_MODULES` (`PRELUDE_EXTERNS`
+when this was written; see §15's amendment) maps the declaration to the symbol. The secondary benefit is the one likely to matter
 later: the published surface is now *ours*, so the allocator underneath it can
 change again without it moving.
 

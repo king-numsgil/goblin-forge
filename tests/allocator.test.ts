@@ -8,6 +8,13 @@
  * whole point, because a name nothing recognises can be called, passed and
  * stored like any other C function.
  *
+ * They are also the only ones that are **imported** rather than global, from
+ * the ambient module `"std/alloc"` — a specifier that resolves to no file, so
+ * the declaration in the prelude is the whole of it. Every program below
+ * carries the import, which is the part being tested as much as the calls are:
+ * a name that arrives through an alias has to reach the same extern the
+ * lowerer registered.
+ *
  * That last part is the reason the surface exists. A C library that lets its
  * allocator be replaced wants function pointers, so `mi_malloc` has to work as
  * a *value* and not only as a call — which is what makes
@@ -28,7 +35,9 @@ describe("mimalloc, by its C name", () => {
     test("a block round-trips through mi_malloc and mi_free", async () => {
         const result = await run(
             "mi-round-trip",
-            `export function main(): i32 {
+            `import { mi_free, mi_malloc } from "std/alloc";
+
+       export function main(): i32 {
          const raw = mi_malloc(64);
          if (raw === null) { return 1; }
          const bytes = raw.reify<u8>();
@@ -49,7 +58,9 @@ describe("mimalloc, by its C name", () => {
         // than on a fresh page that would read zero either way.
         const result = await run(
             "mi-zeroed",
-            `export function main(): i32 {
+            `import { mi_calloc, mi_free, mi_malloc, mi_zalloc } from "std/alloc";
+
+       export function main(): i32 {
          const scratch = mi_malloc(256);
          if (scratch === null) { return 1; }
          const dirty = scratch.reify<u8>();
@@ -80,7 +91,9 @@ describe("mimalloc, by its C name", () => {
     test("mi_realloc keeps the bytes that were already there", async () => {
         const result = await run(
             "mi-realloc",
-            `export function main(): i32 {
+            `import { mi_free, mi_malloc, mi_realloc } from "std/alloc";
+
+       export function main(): i32 {
          const first = mi_malloc(8);
          if (first === null) { return 1; }
          const before = first.reify<u8>();
@@ -108,7 +121,9 @@ describe("mimalloc, by its C name", () => {
         // undefined; there is no second free here to pair wrongly.
         const result = await run(
             "mi-aligned",
-            `export function main(): i32 {
+            `import { mi_free, mi_malloc_aligned, mi_realloc_aligned } from "std/alloc";
+
+       export function main(): i32 {
          let misaligned: i32 = 0;
          let i: usize = 0;
          while (i < 8) {
@@ -131,7 +146,9 @@ describe("mimalloc, by its C name", () => {
     test("mi_usable_size is at least what was asked for", async () => {
         const result = await run(
             "mi-usable-size",
-            `export function main(): i32 {
+            `import { mi_free, mi_malloc, mi_usable_size } from "std/alloc";
+
+       export function main(): i32 {
          const p = mi_malloc(100);
          if (p === null) { return 1; }
          const usable = mi_usable_size(p);
@@ -149,7 +166,9 @@ describe("mimalloc, by its C name", () => {
     test("mi_free of null is a no-op, as it is in C", async () => {
         const result = await run(
             "mi-free-null",
-            `export function main(): i32 {
+            `import { mi_free } from "std/alloc";
+
+       export function main(): i32 {
          mi_free(null);
          console.log("survived");
          return 0;
@@ -166,7 +185,9 @@ describe("mimalloc, by its C name", () => {
         // ordinary extern and come out a code address.
         const result = await run(
             "mi-as-callbacks",
-            `function install(
+            `import { mi_calloc, mi_free, mi_malloc, mi_realloc } from "std/alloc";
+
+       function install(
          m: (size: usize) => Pointer<unknown> | null,
          c: (count: usize, size: usize) => Pointer<unknown> | null,
          r: (mem: Pointer<unknown> | null, size: usize) => Pointer<unknown> | null,
@@ -206,7 +227,9 @@ describe("mimalloc, by its C name", () => {
         // failure once the four are ordinary declarations.
         const diagnostic = await expectRejected(
             "mi-callback-not-null",
-            `function install(m: (size: usize) => Pointer<unknown>): usize {
+            `import { mi_malloc } from "std/alloc";
+
+       function install(m: (size: usize) => Pointer<unknown>): usize {
          const p = m(8);
          return p.address;
        }
@@ -219,6 +242,58 @@ describe("mimalloc, by its C name", () => {
         expect(diagnostic.message).toContain("null");
     });
 
+    test("the bare name is not in scope without the import", async () => {
+        // The half of the move that is the whole point: the global surface got
+        // *smaller*. A program that forgets the import is told so by tsc, in
+        // tsc's own terms, rather than by a lowerer that half-recognises a name
+        // nothing declared.
+        await expectRejected(
+            "mi-not-global",
+            `export function main(): i32 {
+         const p = mi_malloc(8);
+         if (p === null) { return 1; }
+         mi_free(p);
+         return 0;
+       }\n`,
+            "TS2304",
+        );
+    });
+
+    test("two modules import the same name and reach the same extern", async () => {
+        // `resolveCallee` follows the alias to the declaration in the prelude,
+        // so which file did the importing does not matter — and the extern is
+        // registered once for the build rather than once per import. If it were
+        // per import, the second would find the entry already there and the
+        // block allocated in `helper.ts` would go back through a different
+        // symbol than the one that handed it out.
+        const result = await run(
+            "mi-two-modules",
+            `import { mi_free, mi_malloc } from "std/alloc";
+       import { grab } from "./helper.ts";
+
+       export function main(): i32 {
+         const mine = mi_malloc(16);
+         if (mine === null) { return 1; }
+         const theirs = grab();
+         if (theirs === null) { mi_free(mine); return 2; }
+         mi_free(mine);
+         mi_free(theirs);
+         return 0;
+       }\n`,
+            {
+                files: {
+                    "helper.ts": `import { mi_malloc } from "std/alloc";
+
+       export function grab(): Pointer<unknown> | null {
+         return mi_malloc(32);
+       }\n`,
+                },
+            },
+        );
+        expect(result.exitCode).toBe(0);
+        expect(result.leaked).toBe(0);
+    });
+
     test("the program's own allocations still balance beside them", async () => {
         // The two bookkeeping systems are separate: `LIVE` counts what the
         // runtime handed out, and a raw `mi_malloc` block is not that. A leak
@@ -226,7 +301,9 @@ describe("mimalloc, by its C name", () => {
         // own.
         const result = await run(
             "mi-beside-owned",
-            `class Rect { w: i32; h: i32; constructor(w: i32, h: i32) { this.w = w; this.h = h; } }
+            `import { mi_free, mi_malloc } from "std/alloc";
+
+       class Rect { w: i32; h: i32; constructor(w: i32, h: i32) { this.w = w; this.h = h; } }
 
        export function main(): i32 {
          const raw = mi_malloc(32);

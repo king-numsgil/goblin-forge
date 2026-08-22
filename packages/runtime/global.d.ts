@@ -958,8 +958,18 @@ declare function cstringFree(value: CString): void;
 // Every Goblin program links mimalloc, because the runtime allocates through
 // it: `new`, `alloc`, a `string`, a `T[]` — all of it is `mi_malloc` underneath.
 // These eight are that same allocator under its own C names, and they are the
-// only names in this prelude that are **not** intrinsics: each one is an
+// only names this prelude declares that are **not** intrinsics: each one is an
 // ordinary `extern "C"` call to a symbol already in the binary.
+//
+// **They are the first thing that is not global.** Everything above is in scope
+// in every file whether or not it is wanted; these are imported, which is what
+// a standard library has to be if it is going to grow — a global surface has
+// room for `console` and the widths and not for a hundred functions per module.
+// The specifier is a bare `std/…` name that resolves to nothing on disk, which
+// is what makes it an *ambient* module: it is this declaration, and there is no
+// package to install and no path to configure.
+//
+//     import { mi_malloc, mi_free } from "std/alloc";
 //
 // They exist for one job. A C library that lets its allocator be replaced —
 // SDL's `SDL_SetMemoryFunctions`, and it is far from alone — wants four
@@ -969,6 +979,8 @@ declare function cstringFree(value: CString): void;
 // address space into one:
 //
 // ```ts
+// import { mi_calloc, mi_free, mi_malloc, mi_realloc } from "std/alloc";
+//
 // declare function SDL_SetMemoryFunctions(
 //   malloc_fn: (size: usize) => Pointer<unknown> | null,
 //   calloc_fn: (count: usize, size: usize) => Pointer<unknown> | null,
@@ -995,50 +1007,56 @@ declare function cstringFree(value: CString): void;
 //     it to `mi_free` afterwards is heap corruption rather than a leak.
 // ---------------------------------------------------------------------------
 
-/** C's `malloc`. Null when the allocation fails. */
-declare function mi_malloc(size: usize): Pointer<unknown> | null;
+declare module "std/alloc" {
+    /** C's `malloc`. Null when the allocation fails. */
+    export function mi_malloc(size: usize): Pointer<unknown> | null;
 
-/** C's `calloc`: `count * size` bytes, zeroed. */
-declare function mi_calloc(count: usize, size: usize): Pointer<unknown> | null;
+    /** C's `calloc`: `count * size` bytes, zeroed. */
+    export function mi_calloc(count: usize, size: usize): Pointer<unknown> | null;
 
-/**
- * C's `realloc`. Null on failure, and the original block is **still live** —
- * assigning the result over the only copy of the pointer leaks it, exactly as
- * it does in C.
- */
-declare function mi_realloc(mem: Pointer<unknown> | null, size: usize): Pointer<unknown> | null;
+    /**
+     * C's `realloc`. Null on failure, and the original block is **still live** —
+     * assigning the result over the only copy of the pointer leaks it, exactly
+     * as it does in C.
+     */
+    export function mi_realloc(
+        mem: Pointer<unknown> | null,
+        size: usize,
+    ): Pointer<unknown> | null;
 
-/** C's `free`. A null pointer is a no-op, as it is in C. */
-declare function mi_free(mem: Pointer<unknown> | null): void;
+    /** C's `free`. A null pointer is a no-op, as it is in C. */
+    export function mi_free(mem: Pointer<unknown> | null): void;
 
-/** `size` bytes, zeroed. `mi_calloc` without the multiplication. */
-declare function mi_zalloc(size: usize): Pointer<unknown> | null;
+    /** `size` bytes, zeroed. `mi_calloc` without the multiplication. */
+    export function mi_zalloc(size: usize): Pointer<unknown> | null;
 
-/**
- * `size` bytes on an `align` boundary, where `align` is a power of two.
- *
- * The reason this family is worth having at all: a block from here goes back
- * through the same one-argument `mi_free`, whatever its alignment. Windows'
- * `_aligned_malloc` needs `_aligned_free` and pairing them wrongly is
- * undefined; there is no second free here to pair wrongly.
- */
-declare function mi_malloc_aligned(size: usize, align: usize): Pointer<unknown> | null;
+    /**
+     * `size` bytes on an `align` boundary, where `align` is a power of two.
+     *
+     * The reason this family is worth having at all: a block from here goes
+     * back through the same one-argument `mi_free`, whatever its alignment.
+     * Windows' `_aligned_malloc` needs `_aligned_free` and pairing them wrongly
+     * is undefined; there is no second free here to pair wrongly.
+     */
+    export function mi_malloc_aligned(size: usize, align: usize): Pointer<unknown> | null;
 
-/** `mi_realloc`, keeping the block on an `align` boundary. */
-declare function mi_realloc_aligned(
-    mem: Pointer<unknown> | null,
-    size: usize,
-    align: usize,
-): Pointer<unknown> | null;
+    /** `mi_realloc`, keeping the block on an `align` boundary. */
+    export function mi_realloc_aligned(
+        mem: Pointer<unknown> | null,
+        size: usize,
+        align: usize,
+    ): Pointer<unknown> | null;
 
-/**
- * How many bytes are actually usable at `mem` — at least what was asked for,
- * and often more, because a request is rounded up to a size class.
- *
- * Zero for a null pointer. Undefined for anything this allocator did not hand
- * out, which includes a pointer from a C library that never took the swap.
- */
-declare function mi_usable_size(mem: Pointer<unknown> | null): usize;
+    /**
+     * How many bytes are actually usable at `mem` — at least what was asked
+     * for, and often more, because a request is rounded up to a size class.
+     *
+     * Zero for a null pointer. Undefined for anything this allocator did not
+     * hand out, which includes a pointer from a C library that never took the
+     * swap.
+     */
+    export function mi_usable_size(mem: Pointer<unknown> | null): usize;
+}
 
 // ---------------------------------------------------------------------------
 // console

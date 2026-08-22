@@ -40,7 +40,7 @@ import {
     type MethodBody,
     type StaticMethod,
 } from "../classes.ts";
-import { INT_TY, PRELUDE_EXTERNS } from "./tables.ts";
+import { INT_TY, STD_MODULES } from "./tables.ts";
 import {
     type ClassBody,
     type FnRecord,
@@ -1606,7 +1606,7 @@ export class Lowerer {
             return;
         }
         // The symbol, which is the name written unless a caller says otherwise.
-        // Only {@link PRELUDE_EXTERNS} does, and only because the runtime
+        // Only {@link STD_MODULES} does, and only because the runtime
         // trampolines those under `gf_` names it can export from a shared
         // library on every platform.
         const name = symbol ?? node.name.text;
@@ -1648,13 +1648,20 @@ export class Lowerer {
     }
 
     /**
-     * {@link PRELUDE_EXTERNS}, registered so that a call site resolves to one.
+     * {@link STD_MODULES}, registered so that a call site resolves to one.
      *
      * They go through {@link #declareImport} like any other body-less
      * declaration, which is the whole point: an `mi_malloc` call is an ordinary
      * C call and `mi_malloc` written as a *value* is an ordinary code address,
      * because neither goes down a path that knows the name. That is what lets
      * the four SDL wants be passed to `SDL_SetMemoryFunctions` directly.
+     *
+     * Registered eagerly for the whole module rather than at the import that
+     * names them, because {@link resolveCallee} looks the *declaration* up: an
+     * imported name is an alias, and following it lands on the declaration in
+     * the prelude whichever file did the importing. So there is nothing per
+     * import to do, and a second module importing the same name finds the entry
+     * already there.
      */
     #declarePreludeExterns(): void {
         for (const file of this.#program.getSourceFiles()) {
@@ -1662,12 +1669,27 @@ export class Lowerer {
                 continue;
             }
             for (const statement of file.statements) {
-                if (!ts.isFunctionDeclaration(statement) || statement.name === undefined) {
+                // `declare module "std/alloc" { … }` — an ambient module, whose
+                // members are nested a level down rather than at the top of the
+                // file the way a global `declare function` is.
+                if (!ts.isModuleDeclaration(statement) || !ts.isStringLiteral(statement.name)) {
                     continue;
                 }
-                const symbol = PRELUDE_EXTERNS.get(statement.name.text);
-                if (symbol !== undefined) {
-                    this.#declareImport(statement, symbol);
+                const members = STD_MODULES.get(statement.name.text);
+                if (members === undefined || statement.body === undefined) {
+                    continue;
+                }
+                if (!ts.isModuleBlock(statement.body)) {
+                    continue;
+                }
+                for (const declaration of statement.body.statements) {
+                    if (!ts.isFunctionDeclaration(declaration) || declaration.name === undefined) {
+                        continue;
+                    }
+                    const symbol = members.get(declaration.name.text);
+                    if (symbol !== undefined) {
+                        this.#declareImport(declaration, symbol);
+                    }
                 }
             }
         }

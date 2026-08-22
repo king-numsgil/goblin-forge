@@ -322,8 +322,15 @@ six more — so a library that lets its allocator be replaced can be handed the
 program's own heap instead of running a second one beside it:
 
 ```ts
+import { mi_calloc, mi_free, mi_malloc, mi_realloc } from "std/alloc";
+
 SDL_SetMemoryFunctions(mi_malloc, mi_calloc, mi_realloc, mi_free);
 ```
+
+`"std/alloc"` is an **ambient module**: it resolves to no file and there is
+nothing to install, because the declaration in the prelude is the whole of it.
+It is also the only part of the language that is imported rather than global —
+everything else, the widths and `console` and `alloc<T>()`, is simply in scope.
 
 [`LINKING.md`](LINKING.md) has the rules that come with that.
 
