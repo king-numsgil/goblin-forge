@@ -577,7 +577,7 @@ export function classNameOf(type: ts.Type): string | null {
 }
 
 /**
- * The name of an **ambient** class — one written `declare class` — or `null`.
+ * The name of an **ambient** class — one whose layout is elsewhere — or `null`.
  *
  * `declare` is TypeScript's word for "the implementation is elsewhere", and for
  * a class that means the layout is elsewhere too: there are no method bodies to
@@ -586,6 +586,15 @@ export function classNameOf(type: ts.Type): string | null {
  * compiler lays out, and that is the whole rule — the `private _opaque: never`
  * in the idiom is what makes *tsc* keep two handles apart, and this compiler
  * never reads it.
+ *
+ * **Two conditions, because `collectClasses` skips on two.** A `declare class`
+ * has the modifier; a class inside `declare module "std/io" { … }` does not,
+ * because `declare` is illegal on a member of an already-ambient block — and it
+ * is no less ambient for that. The set of classes this build lays out and the
+ * set that erases to a handle have to be exact complements, or a class falls
+ * down the gap between them: skipped by the collector as having no body, then
+ * refused by erasure as a class it has never heard of, which is `GF0001` about
+ * a declaration that was perfectly well formed.
  */
 export function ambientClassNameOf(type: ts.Type): string | null {
     const symbol = type.getSymbol();
@@ -596,8 +605,11 @@ export function ambientClassNameOf(type: ts.Type): string | null {
     if (declaration === undefined || declaration.name === undefined) {
         return null;
     }
-    const ambient = ts.getCombinedModifierFlags(declaration) & ts.ModifierFlags.Ambient;
-    return ambient === 0 ? null : declaration.name.text;
+    const declared = (ts.getCombinedModifierFlags(declaration) & ts.ModifierFlags.Ambient) !== 0;
+    if (!declared && !declaration.getSourceFile().isDeclarationFile) {
+        return null;
+    }
+    return declaration.name.text;
 }
 
 /**

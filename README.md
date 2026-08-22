@@ -329,10 +329,39 @@ SDL_SetMemoryFunctions(mi_malloc, mi_calloc, mi_realloc, mi_free);
 
 `"std/alloc"` is an **ambient module**: it resolves to no file and there is
 nothing to install, because the declaration in the prelude is the whole of it.
-It is also the only part of the language that is imported rather than global —
-everything else, the widths and `console` and `alloc<T>()`, is simply in scope.
+The standard library arrives this way, and it is the only part of the language
+that is imported rather than global — everything else, the widths and `console`
+and `alloc<T>()`, is simply in scope.
 
 [`LINKING.md`](LINKING.md) has the rules that come with that.
+
+### Files
+
+`std/io` is stdio, and it is deliberately shaped like C rather than like the
+rest of this language:
+
+```ts
+import { fileClose, fileOpen, fileRead, fileWrite, stdout } from "std/io";
+
+export function main(): i32 {
+  const f = fileOpen("notes.txt", "r");
+  if (f === null) { return 1; }
+  fileWrite(stdout(), fileRead(f, 4096));
+  fileClose(f);
+  return 0;
+}
+```
+
+A `File` is an opaque handle behind a `Pointer<File>`, and **no scope closes
+it** — `fileClose` is `fclose`, releasing the descriptor and the handle in one
+call. A file nobody closes is a leak, and it is a *detected* one: the handle
+comes from the same allocator everything else does, so the live-allocation check
+counts it and a test that forgets fails without having asked.
+
+`stdout()`, `stderr()` and `stdin()` are functions rather than constants, and
+they are not closable: `fileClose(stdout())` is a no-op rather than a way to
+lose `console.log`. An empty read means end of input, for a file and for
+`stdin()` alike.
 
 A program is one self-contained file, runtime included. The exception is opt-in
 and exists for exactly one situation — a Goblin `shared-lib` loaded by a Goblin

@@ -50,11 +50,11 @@
 #![cfg_attr(not(test), no_std)]
 #![allow(clippy::missing_safety_doc)]
 
-use core::mem::align_of;
+use core::mem::{align_of, size_of};
 use core::sync::atomic::{AtomicI64, AtomicBool, Ordering};
 use core::fmt::Write;
 
-use core::ffi::{c_void, CStr};
+use core::ffi::{c_char, c_void, CStr};
 
 use libmimalloc_sys::{
     mi_calloc, mi_free, mi_malloc, mi_malloc_aligned, mi_malloc_aligned_at, mi_realloc,
@@ -138,6 +138,7 @@ fn env_is_set(name: &CStr) -> bool {
 /// Not a file descriptor. It was one, and on unix it still is — but the
 /// Windows half of [`write_some`] does not go through the CRT at all, so this
 /// is a choice of stream that each platform spells its own way.
+const STDIN: i32 = 0;
 const STDOUT: i32 = 1;
 const STDERR: i32 = 2;
 
@@ -163,6 +164,51 @@ unsafe extern "system" {
         written: *mut u32,
         overlapped: *mut c_void,
     ) -> i32;
+
+    fn ReadFile(
+        handle: *mut c_void,
+        buffer: *mut c_void,
+        len: u32,
+        read: *mut u32,
+        overlapped: *mut c_void,
+    ) -> i32;
+}
+
+/// One read from a standard stream, returning how many bytes arrived.
+///
+/// The mirror of [`write_some`], and it goes around the CRT for the same
+/// reason: descriptor 0 opened in text mode would rewrite the bytes on the way
+/// in, and a program reading its own input should see what was sent.
+///
+/// Zero means end of input. It is not distinguished from a failed read, for the
+/// reason [`stdio`] gives about `errno`: there is no portable spelling, and
+/// nothing here could act differently on the answer.
+#[cfg(not(windows))]
+fn read_some(stream: i32, bytes: &mut [u8]) -> isize {
+    // `as _` on the count and the result: `size_t` and `ssize_t` here.
+    unsafe { libc::read(stream, bytes.as_mut_ptr() as *mut c_void, bytes.len() as _) as isize }
+}
+
+#[cfg(windows)]
+fn read_some(stream: i32, bytes: &mut [u8]) -> isize {
+    // `STD_INPUT_HANDLE` is -10. Only stdin is ever read from, so the other two
+    // are not mapped: asking to read stdout is a question with no answer, and
+    // giving it one would be inventing behaviour rather than reporting it.
+    if stream != STDIN {
+        return 0;
+    }
+    let len = if bytes.len() > u32::MAX as usize { u32::MAX } else { bytes.len() as u32 };
+    let mut moved: u32 = 0;
+    let ok = unsafe {
+        ReadFile(
+            GetStdHandle(-10i32 as u32),
+            bytes.as_mut_ptr() as *mut c_void,
+            len,
+            &mut moved,
+            core::ptr::null_mut(),
+        )
+    };
+    if ok == 0 { 0 } else { moved as isize }
 }
 
 /// `WriteFile` on the raw handle, and *not* the CRT's `write`.
@@ -218,7 +264,10 @@ fn write_some(stream: i32, bytes: &[u8]) -> isize {
 ///
 /// A write that fails for real is dropped in silence, because a runtime that
 /// cannot write has nowhere to report that it could not write.
-fn stdio(stream: i32, bytes: &[u8]) {
+///
+/// The count it returns is what `gf_file_write` reports; `console.log` has
+/// nothing to do with it and ignores it, as it did when there was none.
+fn stdio(stream: i32, bytes: &[u8]) -> usize {
     let mut written = 0;
     let mut fruitless = 0;
     while written < bytes.len() && fruitless < 16 {
@@ -230,6 +279,7 @@ fn stdio(stream: i32, bytes: &[u8]) {
             fruitless += 1;
         }
     }
+    written
 }
 
 /// A line, written in one `write` so that two of them cannot interleave.
@@ -1109,6 +1159,223 @@ pub unsafe extern "C" fn gf_print(s: GfStr) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gf_eprint(s: GfStr) {
     stdio_line(STDERR, unsafe { bytes_of(s) });
+}
+
+// ---------------------------------------------------------------------------
+// Files — `std/io`, from the runtime side
+//
+// A `File` is an **opaque handle**: the language never sees inside one, so
+// everything it can be asked lives here and the layout below is free to change
+// without anything recompiling against it.
+//
+// **The standard streams are not C streams here, and that is deliberate.**
+// Writing to stdout through the CRT on Windows turns every `\n` into `\r\n` —
+// the bug `write_some` above exists to avoid, and the one that broke every test
+// asserting on exact output. So `gf_stdout` and `gf_stderr` route through the
+// same unbuffered path `console.log` uses, and only a file opened by name is a
+// `FILE *`. Reading is the same arrangement in the other direction.
+//
+// Two consequences worth stating, because both are what a caller will notice:
+//
+//   * **A handle from `gf_file_open` is counted** by the live-allocation check,
+//     like every other allocation this runtime hands out. So a program that
+//     forgets to close a file fails the harness's automatic check rather than
+//     leaking a descriptor quietly — which is the whole argument for spending an
+//     allocation on a handle that could have been an integer.
+//   * **The three standard streams are static** and therefore counted by
+//     nothing. Closing one is a no-op rather than an error: they are the
+//     platform's, they outlive the program, and a `close` that worked would take
+//     `console.log` down with it.
+// ---------------------------------------------------------------------------
+
+/// An open file, behind the language's `Pointer<File>`.
+#[repr(C)]
+pub struct GfFile {
+    /// The C stream, or null when this is one of the standard streams.
+    stream: *mut libc::FILE,
+    /// Which standard stream, when `stream` is null.
+    standard: i32,
+    /// Whether closing this is ours to do. Zero for the standard streams.
+    owned: i32,
+}
+
+/// A standard stream, which is `static` and therefore shared.
+///
+/// `Sync` is the claim that sharing it is safe, and here it is true in the
+/// strongest way available: every field is written once, by the `const`
+/// constructor below, and nothing ever writes one again.
+#[repr(transparent)]
+struct StandardFile(GfFile);
+
+// SAFETY: immutable after construction, and construction is a `const fn`.
+unsafe impl Sync for StandardFile {}
+
+const fn standard_stream(which: i32) -> StandardFile {
+    StandardFile(GfFile { stream: core::ptr::null_mut(), standard: which, owned: 0 })
+}
+
+static STDIN_FILE: StandardFile = standard_stream(STDIN);
+static STDOUT_FILE: StandardFile = standard_stream(STDOUT);
+static STDERR_FILE: StandardFile = standard_stream(STDERR);
+
+/// The address of a standard stream's handle.
+///
+/// `cast_mut` on something that is genuinely immutable, which is sound because
+/// nothing writes through the result: every path below reads the fields and
+/// `gf_file_close` returns early on `owned == 0` before it could do anything
+/// else. The pointer is `*mut` only because that is what the language's
+/// `Pointer<File>` is.
+fn standard_handle(file: &'static StandardFile) -> *mut GfFile {
+    core::ptr::from_ref(file).cast_mut().cast::<GfFile>()
+}
+
+/// Standard input.
+#[unsafe(no_mangle)]
+pub extern "C" fn gf_stdin() -> *mut GfFile {
+    standard_handle(&STDIN_FILE)
+}
+
+/// Standard output — the same stream, and the same bytes, as `console.log`.
+#[unsafe(no_mangle)]
+pub extern "C" fn gf_stdout() -> *mut GfFile {
+    standard_handle(&STDOUT_FILE)
+}
+
+/// Standard error.
+#[unsafe(no_mangle)]
+pub extern "C" fn gf_stderr() -> *mut GfFile {
+    standard_handle(&STDERR_FILE)
+}
+
+/// Open a file by name. Null when it could not be opened.
+///
+/// Both arguments are Goblin strings, which are nul-terminated by construction
+/// — so they are already the `const char *` `fopen` wants, with no conversion
+/// and no copy.
+///
+/// # Safety
+///
+/// `path` and `mode` must be strings this runtime produced, or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gf_file_open(path: GfStr, mode: GfStr) -> *mut GfFile {
+    if path.is_null() || mode.is_null() {
+        return core::ptr::null_mut();
+    }
+    let stream = unsafe { libc::fopen(path.cast::<c_char>(), mode.cast::<c_char>()) };
+    if stream.is_null() {
+        return core::ptr::null_mut();
+    }
+    // Counted, like every other allocation, so that a file nobody closed is a
+    // failing leak check rather than a descriptor nobody notices.
+    let handle = unsafe { gf_alloc(size_of::<GfFile>(), align_of::<GfFile>()) }.cast::<GfFile>();
+    unsafe { handle.write(GfFile { stream, standard: 0, owned: 1 }) };
+    handle
+}
+
+/// Close a file and release its handle — C's `fclose`, and just as final.
+///
+/// One call, not two: the descriptor and the handle go together, so there is no
+/// order for a caller to get wrong. A standard stream is a no-op.
+///
+/// # Safety
+///
+/// `file` must be a handle from [`gf_file_open`] or a standard stream, and must
+/// not be used again afterwards.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gf_file_close(file: *mut GfFile) {
+    if file.is_null() {
+        return;
+    }
+    let handle = unsafe { &*file };
+    if handle.owned == 0 {
+        return;
+    }
+    if !handle.stream.is_null() {
+        unsafe { libc::fclose(handle.stream) };
+    }
+    unsafe { gf_free(file.cast::<u8>()) };
+}
+
+/// Write a string's bytes, returning how many moved.
+///
+/// The string is **borrowed**: the caller still owns it and this never frees
+/// it, which is the same rule every other parameter of this runtime follows.
+///
+/// # Safety
+///
+/// `file` must be an open handle and `text` a string this runtime produced.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gf_file_write(file: *mut GfFile, text: GfStr) -> usize {
+    if file.is_null() {
+        return 0;
+    }
+    let handle = unsafe { &*file };
+    let bytes = unsafe { bytes_of(text) };
+    if bytes.is_empty() {
+        return 0;
+    }
+    if handle.stream.is_null() {
+        stdio(handle.standard, bytes)
+    } else {
+        unsafe { libc::fwrite(bytes.as_ptr().cast::<c_void>(), 1, bytes.len(), handle.stream) }
+    }
+}
+
+/// Read at most `max` bytes, as a string the caller owns.
+///
+/// **An empty result means there is no more input.** That is the whole
+/// end-of-file story, and it is one rule rather than two: a `feof` to go with it
+/// would answer for a `FILE *` and have nothing to say about a standard stream,
+/// which has no such flag to read.
+///
+/// The allocation is made at full size and then *shortened*, rather than copied
+/// into a right-sized second one. The block remembers its own size, so the
+/// header's `len` is the only thing that has to agree with the bytes — which
+/// makes a short read one allocation rather than two.
+///
+/// # Safety
+///
+/// `file` must be an open handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gf_file_read(file: *mut GfFile, max: usize) -> GfStr {
+    if file.is_null() || max == 0 {
+        return unsafe { from_bytes(b"") };
+    }
+    let handle = unsafe { &*file };
+    let text = unsafe { allocate(max) };
+    let buffer = unsafe { core::slice::from_raw_parts_mut(text, max) };
+
+    let read = if handle.stream.is_null() {
+        let moved = read_some(handle.standard, buffer);
+        if moved < 0 { 0 } else { moved as usize }
+    } else {
+        unsafe { libc::fread(buffer.as_mut_ptr().cast::<c_void>(), 1, max, handle.stream) }
+    };
+
+    let read = read.min(max);
+    unsafe {
+        (*header_of(text)).len = read as u64;
+        // The nul moves with the length: this is still a valid C string.
+        text.add(read).write(0);
+    }
+    text
+}
+
+/// Flush whatever is buffered. The standard streams are unbuffered here, so
+/// this is a no-op on them rather than a lie.
+///
+/// # Safety
+///
+/// `file` must be an open handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gf_file_flush(file: *mut GfFile) {
+    if file.is_null() {
+        return;
+    }
+    let handle = unsafe { &*file };
+    if !handle.stream.is_null() {
+        unsafe { libc::fflush(handle.stream) };
+    }
 }
 
 /// `strlen`, for a `CString`.

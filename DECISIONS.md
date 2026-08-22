@@ -1543,6 +1543,84 @@ written is worse than the plain move error.
 
 ---
 
+## §20 — `std/io`, and what a standard library is here *(settled and built, 2026-08-22)*
+
+§15's amendment moved the allocator into `"std/alloc"` to find out whether an
+ambient module could carry a standard library. It could, for *functions*. This
+is the section where the rest of the question gets answered, because a file
+needs a type as well.
+
+**A `File` is an opaque handle, and the API is C's.** `fileOpen` returns
+`Pointer<File> | null`, `fileClose` is `fclose`, and nothing is released by a
+scope. That is a deliberate departure from everything else in the language,
+where ownership is written down and a binding's scope releases what it holds,
+and the user's call rather than a default: the alternative designs are recorded
+below because each was live and each was rejected for a reason worth keeping.
+
+**A file nobody closes is a *detected* leak, which is what pays for the
+handle.** `gf_file_open` allocates through the same allocator every other
+allocation goes through, so the live-allocation check counts it — and the
+harness's automatic check, which no test opts into, fails the run. A bare
+integer descriptor would have been cheaper by one allocation and would have
+leaked in silence, which is the trade the whole project keeps refusing.
+
+### The three designs, and why this one
+
+* **A stdlib written in Goblin**, resolved from a real `.ts` shipped with the
+  runtime. This was the recommendation, and it works *today*: a class with a
+  constructor, a static and a method, imported from a bare `std/io` specifier,
+  compiles and runs with no compiler change at all. It would have given `File`
+  a destructor, so a file would close at the end of its scope like a `string`
+  releases its buffer. Rejected in favour of the C shape; it remains the
+  obvious answer the day a stdlib wants a *value* type, and the one defect
+  found on the way is recorded below.
+* **An ambient `declare class` with statics and methods**, so that `File.open()`
+  is the spelling. This is the largest of the three and the only one that
+  invents a concept: a class with no layout but with callable members lowered
+  to externs, `this` marshalled as a first argument. Nothing in the compiler has
+  a precedent for it.
+* **Ambient functions over an opaque handle**, which is what was built. Zero new
+  concepts, and the honest consequence is that there is no `File.open()`
+  syntax — an ambient class gets no lowered members, so it is `fileOpen(path)`.
+
+### Two things the language was missing, both small
+
+**An ambient class inside `declare module` was not ambient.**
+`ambientClassNameOf` tested `ModifierFlags.Ambient`, which is the `declare`
+keyword — and `declare` is illegal on a member of an already-ambient block, so
+`class File` inside `declare module "std/io"` carried no such flag and erased as
+`GF0001`. It now accepts a declaration file as well as the modifier, which makes
+it the exact complement of what `collectClasses` skips. A class that falls down
+the gap between those two sets is refused as unsupported while being perfectly
+well formed, which is the failure this closes.
+
+**A module outside the project root gets an absolute-path symbol tag.**
+`#relative` falls back to the whole path when a file is not under the root
+(`module.ts:1090`), so an internal function in a shipped stdlib would be
+`twice$<hash of C:/Users/…>` — different on every machine, against the stated
+goal that the same sources produce the same symbols in two checkouts. Nothing
+built today reaches it, because `std/io` is ambient and has no Goblin source.
+It is the first thing to fix if the stdlib ever becomes real source.
+
+### The standard streams are not `FILE *`, and that is not an optimisation
+
+`stdout()` and `stderr()` route through the same unbuffered path `console.log`
+uses rather than through a C stream. On Windows the CRT opens its descriptors in
+text mode and turns every `\n` on the way out into `\r\n` — invisible in a
+terminal, and it broke every test that asserts on exact output the last time it
+happened (§16's neighbourhood). Reading is the same arrangement in reverse.
+
+The three are `static`, so nothing counts them and `fileClose(stdout())` is a
+no-op rather than a way to take `console.log` down three calls later. That means
+a function taking "a file" and closing it when it is done does not have to ask
+which kind it was handed.
+
+**End of input is an empty read, and there is no `feof`.** One rule rather than
+two: a `feof` would answer for a `FILE *` and have nothing to say about
+`stdin()`, which has no such flag to read.
+
+---
+
 ## §19 — `alloc<T>({ … })`, the struct initialiser *(settled and built, 2026-08-20)*
 
 A C create-info struct is mostly nesting and mostly zero.

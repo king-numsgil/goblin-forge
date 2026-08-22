@@ -1059,6 +1059,105 @@ declare module "std/alloc" {
 }
 
 // ---------------------------------------------------------------------------
+// Files, by their C shape
+//
+// `std/io` is stdio with the names spelled out, and it is deliberately the
+// shape C has rather than the shape the rest of this language has:
+//
+//     import { fileClose, fileOpen, fileWrite } from "std/io";
+//
+//     const f = fileOpen("notes.txt", "w");
+//     if (f === null) { return 1; }
+//     fileWrite(f, "hello\n");
+//     fileClose(f);
+//
+// **A `File` is not a value and no scope releases it.** It is an opaque handle
+// behind a `Pointer<File>`, closed by the call you write and by nothing else —
+// the same bargain `alloc` and `free` strike, and the opposite of the one a
+// `string` strikes. A file nobody closes is a leak, and it is a *detected* one:
+// the handle comes from the same allocator everything else does, so the
+// live-allocation check counts it and a test that forgets fails.
+//
+// `fileClose` is C's `fclose`: it closes the descriptor **and** releases the
+// handle, in one call, so there is no order to get wrong. Which means
+// `file.free()` is never right on one of these — it would release the handle
+// and leave the descriptor open. The pointer methods are inherited and cannot
+// be taken away, exactly as they are on a `FixedArray`, and this is the same
+// kind of mistake `free(buf)` is in C.
+//
+// The three standard streams are functions rather than constants, and they are
+// **not** closable: `fileClose(stdout())` is a no-op rather than a way to take
+// `console.log` down with it. `stdout()` writes the same bytes `console.log`
+// does, through the same unbuffered path — on Windows that means going around
+// the CRT, which would otherwise turn every `\n` into `\r\n`.
+// ---------------------------------------------------------------------------
+
+declare module "std/io" {
+    /**
+     * An open file.
+     *
+     * Opaque: this build has no layout for one and there is nothing to read
+     * through the pointer. Everything a file can be asked is a function below,
+     * which is what makes the handle free to change without a program noticing.
+     */
+    export class File {
+        private _file: never;
+    }
+
+    /**
+     * Open a file by name, in the `mode` C's `fopen` takes — `"r"`, `"w"`,
+     * `"a"`, and the `"b"` and `"+"` spellings.
+     *
+     * `null` when it could not be opened, which is the only thing this reports:
+     * *why* is C's `errno` and there is no portable way to ask it from here.
+     */
+    export function fileOpen(path: string, mode: string): Pointer<File> | null;
+
+    /**
+     * Close a file and release its handle — C's `fclose`.
+     *
+     * Both halves, in one call. A standard stream is a no-op, so a function
+     * that takes "a file" and closes it when it is done does not have to ask
+     * which kind it was given.
+     */
+    export function fileClose(file: Pointer<File>): void;
+
+    /**
+     * Write a string's bytes. The count is how many actually moved, which on a
+     * full disk or a closed pipe is less than the string's length.
+     *
+     * The string is **borrowed**, like every other string handed to a function:
+     * the caller still owns it and its scope still releases it.
+     */
+    export function fileWrite(file: Pointer<File>, text: string): usize;
+
+    /**
+     * Read at most `max` bytes, as a `string` the calling scope owns.
+     *
+     * **An empty string means there is no more input**, and that is the whole
+     * end-of-file story — one rule for a file and for `stdin()` alike, where a
+     * `feof` would have had nothing to read.
+     *
+     * The bytes are whatever was in the file. A read that stops in the middle
+     * of a multi-byte character produces a string that is not valid UTF-8, in
+     * exactly the way `substring` through one does.
+     */
+    export function fileRead(file: Pointer<File>, max: usize): string;
+
+    /** Flush what is buffered. The standard streams are unbuffered already. */
+    export function fileFlush(file: Pointer<File>): void;
+
+    /** Standard input. Not closable. */
+    export function stdin(): Pointer<File>;
+
+    /** Standard output — the same stream `console.log` writes. Not closable. */
+    export function stdout(): Pointer<File>;
+
+    /** Standard error — the same stream `console.error` writes. Not closable. */
+    export function stderr(): Pointer<File>;
+}
+
+// ---------------------------------------------------------------------------
 // console
 //
 // The output methods, and only those. `log`, `info` and `debug` write to

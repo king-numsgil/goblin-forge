@@ -85,6 +85,22 @@ export const STD_MODULES: ReadonlyMap<string, ReadonlyMap<string, string>> = new
             ["mi_usable_size", "gf_mi_usable_size"],
         ]),
     ],
+    [
+        // stdio. Unlike the allocator's, these names are *ours* rather than a
+        // C library's, so the written name and the symbol differ only by the
+        // `gf_` that every runtime entry point carries.
+        "std/io",
+        new Map([
+            ["fileOpen", "gf_file_open"],
+            ["fileClose", "gf_file_close"],
+            ["fileWrite", "gf_file_write"],
+            ["fileRead", "gf_file_read"],
+            ["fileFlush", "gf_file_flush"],
+            ["stdin", "gf_stdin"],
+            ["stdout", "gf_stdout"],
+            ["stderr", "gf_stderr"],
+        ]),
+    ],
 ]);
 
 /**
