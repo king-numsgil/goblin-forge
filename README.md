@@ -363,6 +363,21 @@ they are not closable: `fileClose(stdout())` is a no-op rather than a way to
 lose `console.log`. An empty read means end of input, for a file and for
 `stdin()` alike.
 
+Files seek, and the offsets are `isize` rather than C's `long` — so past 2 GB
+works everywhere, including on the platform whose `fseek` would have capped it
+in silence:
+
+```ts
+fileSeek(f, 0, Seek.Set);       // Set, Current, End
+const at = fileTell(f);         // -1 if there is no position
+const bytes = fileSize(f);      // -1 if it cannot be known; does not move `at`
+const rest = fileReadAll(f);    // from the position to the end
+```
+
+`fileReadAll` works on `stdin()` too, where there is no size to ask for. Modes
+are `fopen`'s, so `"a"` appends and `"r+"`, `"wb"` and the rest mean what they
+mean in C.
+
 A program is one self-contained file, runtime included. The exception is opt-in
 and exists for exactly one situation — a Goblin `shared-lib` loaded by a Goblin
 `bin`, where two private runtimes would mean two heaps:

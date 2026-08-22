@@ -433,6 +433,25 @@ unsafe fn allocate(len: usize) -> GfStr {
     }
 }
 
+/// Grow an owned string's block to hold `capacity` bytes, keeping what is in it.
+///
+/// **Not counted**, because nothing was allocated: this is the same allocation
+/// with a different size, so touching `LIVE` here would report a leak on every
+/// buffer that had to grow. `mi_realloc` rather than `raw_alloc` for the same
+/// reason [`allocate`] uses `mi_malloc` — the header is two machine words, so
+/// the block is naturally aligned and no over-aligned path is involved.
+///
+/// The caller owns keeping the header's `len` truthful; this only moves bytes.
+unsafe fn reallocate(s: GfStr, capacity: usize) -> GfStr {
+    unsafe {
+        let raw = mi_realloc(header_of(s).cast(), HEADER + capacity + 1).cast::<u8>();
+        if raw.is_null() {
+            abort();
+        }
+        raw.add(HEADER)
+    }
+}
+
 unsafe fn header_of(s: GfStr) -> *mut Header {
     unsafe { s.sub(HEADER) as *mut Header }
 }
@@ -1376,6 +1395,187 @@ pub unsafe extern "C" fn gf_file_flush(file: *mut GfFile) {
     if !handle.stream.is_null() {
         unsafe { libc::fflush(handle.stream) };
     }
+}
+
+// -- seeking ----------------------------------------------------------------
+//
+// `fseek` takes a `long`, which is **32 bits on Windows** — so the obvious
+// spelling silently caps every offset at 2 GB on one of the three platforms
+// this is built for, and does it without a diagnostic anywhere. Each platform's
+// 64-bit spelling is used instead: `_fseeki64` on MSVC, `fseeko` elsewhere.
+//
+// The `Seek` values crossing from Goblin are **ours**, not C's. They are mapped
+// to `SEEK_SET` and friends here rather than being declared as whatever the
+// platform's headers happen to number them, because a constant that has to
+// agree with a C macro is a constant that will eventually disagree with it.
+
+#[cfg(windows)]
+unsafe extern "C" {
+    fn _fseeki64(stream: *mut libc::FILE, offset: i64, whence: i32) -> i32;
+    fn _ftelli64(stream: *mut libc::FILE) -> i64;
+}
+
+#[cfg(windows)]
+unsafe fn seek_stream(stream: *mut libc::FILE, offset: i64, whence: i32) -> i32 {
+    unsafe { _fseeki64(stream, offset, whence) }
+}
+
+#[cfg(windows)]
+unsafe fn tell_stream(stream: *mut libc::FILE) -> i64 {
+    unsafe { _ftelli64(stream) }
+}
+
+#[cfg(not(windows))]
+unsafe fn seek_stream(stream: *mut libc::FILE, offset: i64, whence: i32) -> i32 {
+    unsafe { libc::fseeko(stream, offset as libc::off_t, whence) }
+}
+
+#[cfg(not(windows))]
+unsafe fn tell_stream(stream: *mut libc::FILE) -> i64 {
+    unsafe { libc::ftello(stream) as i64 }
+}
+
+/// `Seek.Set`, `Seek.Current`, `Seek.End` — the language's own numbering.
+const SEEK_FROM_START: i32 = 0;
+const SEEK_FROM_CURRENT: i32 = 1;
+const SEEK_FROM_END: i32 = 2;
+
+fn whence_of(from: i32) -> i32 {
+    match from {
+        SEEK_FROM_START => libc::SEEK_SET,
+        SEEK_FROM_CURRENT => libc::SEEK_CUR,
+        SEEK_FROM_END => libc::SEEK_END,
+        // Unreachable rather than lenient: the frontend has already limited
+        // this to the enum's three members. "From the start" is simply the
+        // answer that loses least if that ever stops being true.
+        _ => libc::SEEK_SET,
+    }
+}
+
+/// Move the read/write position. False when the file could not be moved.
+///
+/// A standard stream is not seekable and answers false rather than pretending.
+///
+/// # Safety
+///
+/// `file` must be an open handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gf_file_seek(file: *mut GfFile, offset: i64, from: i32) -> u8 {
+    if file.is_null() {
+        return 0;
+    }
+    let handle = unsafe { &*file };
+    if handle.stream.is_null() {
+        return 0;
+    }
+    u8::from(unsafe { seek_stream(handle.stream, offset, whence_of(from)) } == 0)
+}
+
+/// Where the position is now, in bytes from the start. `-1` when there is none.
+///
+/// # Safety
+///
+/// `file` must be an open handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gf_file_tell(file: *mut GfFile) -> i64 {
+    if file.is_null() {
+        return -1;
+    }
+    let handle = unsafe { &*file };
+    if handle.stream.is_null() {
+        return -1;
+    }
+    unsafe { tell_stream(handle.stream) }
+}
+
+/// How many bytes the file holds. `-1` when that cannot be known.
+///
+/// Asked by seeking to the end and back rather than by `stat`: the position is
+/// restored exactly, so this is an observation rather than a side effect. A
+/// standard stream has no size and says so.
+///
+/// # Safety
+///
+/// `file` must be an open handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gf_file_size(file: *mut GfFile) -> i64 {
+    if file.is_null() {
+        return -1;
+    }
+    let handle = unsafe { &*file };
+    if handle.stream.is_null() {
+        return -1;
+    }
+    unsafe {
+        let here = tell_stream(handle.stream);
+        if here < 0 || seek_stream(handle.stream, 0, libc::SEEK_END) != 0 {
+            return -1;
+        }
+        let end = tell_stream(handle.stream);
+        // Put it back whatever the answer was, including when there was none:
+        // a failed size must not also have moved the file.
+        if seek_stream(handle.stream, here, libc::SEEK_SET) != 0 {
+            return -1;
+        }
+        end
+    }
+}
+
+/// Read from the position to the end, as a `string` the calling scope owns.
+///
+/// **From the position, not from the start.** So it composes with
+/// `gf_file_seek`, and reading a whole file is `seek(0, Set)` away when
+/// something has already been read.
+///
+/// The buffer starts at what is left of a seekable file and doubles otherwise,
+/// which is what makes this work on `stdin()` — a stream with no size to ask
+/// for. One byte of slack is deliberate: it lets the read that reports the end
+/// happen without another growth, so the exact-size case allocates once.
+///
+/// # Safety
+///
+/// `file` must be an open handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gf_file_read_all(file: *mut GfFile) -> GfStr {
+    if file.is_null() {
+        return unsafe { from_bytes(b"") };
+    }
+    let handle = unsafe { &*file };
+
+    let mut capacity = 4096;
+    if !handle.stream.is_null() {
+        let here = unsafe { tell_stream(handle.stream) };
+        let end = unsafe { gf_file_size(file) };
+        if here >= 0 && end > here {
+            capacity = (end - here) as usize + 1;
+        }
+    }
+
+    let mut text = unsafe { allocate(capacity) };
+    let mut len = 0usize;
+    loop {
+        if len == capacity {
+            capacity = capacity.saturating_mul(2);
+            text = unsafe { reallocate(text, capacity) };
+        }
+        let room = unsafe { core::slice::from_raw_parts_mut(text.add(len), capacity - len) };
+        let read = if handle.stream.is_null() {
+            let moved = read_some(handle.standard, room);
+            if moved < 0 { 0 } else { moved as usize }
+        } else {
+            unsafe { libc::fread(room.as_mut_ptr().cast::<c_void>(), 1, room.len(), handle.stream) }
+        };
+        if read == 0 {
+            break;
+        }
+        len += read.min(room.len());
+    }
+
+    unsafe {
+        (*header_of(text)).len = len as u64;
+        text.add(len).write(0);
+    }
+    text
 }
 
 /// `strlen`, for a `CString`.

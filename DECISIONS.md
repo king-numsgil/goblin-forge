@@ -1619,6 +1619,29 @@ which kind it was handed.
 two: a `feof` would answer for a `FILE *` and have nothing to say about
 `stdin()`, which has no such flag to read.
 
+### Seeking, and the 32-bit trap that is not visible from Goblin
+
+`fseek` takes a `long`, and a `long` is **32 bits on Windows**. The obvious
+spelling therefore caps every offset at 2 GB on one of the three platforms this
+is built for, silently, with no diagnostic at any layer — the Goblin signature
+says `isize`, the Rust signature says `i64`, and the truncation happens inside
+the C prototype where nothing is looking. So each platform's 64-bit spelling is
+used instead: `_fseeki64` on MSVC, `fseeko` elsewhere.
+
+**`Seek`'s values are ours, not C's.** `Seek.Set` is 0 because this language
+says so, and `whence_of` maps it to whatever `SEEK_SET` happens to be. A
+constant declared in Goblin that has to agree with a C macro is a constant that
+will eventually disagree with it, on the one platform nobody built for.
+
+**`fileSize` restores the position, including when it fails.** It is asked by
+seeking to the end and back, so a size that also moved the file would be a size
+you could not ask for in the middle of reading — and the restore happens on the
+error path too, because a failed question must not have an effect.
+
+This is also the first ambient **enum**, which works and is worth recording as
+working: an ambient `const enum` does not, because `isolatedModules` refuses it
+(`TS2748`). The plain one folds to its constant at the use site like any other.
+
 ---
 
 ## §19 — `alloc<T>({ … })`, the struct initialiser *(settled and built, 2026-08-20)*

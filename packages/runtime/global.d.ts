@@ -1144,6 +1144,57 @@ declare module "std/io" {
      */
     export function fileRead(file: Pointer<File>, max: usize): string;
 
+    /**
+     * Read from the position to the end, as a `string` the calling scope owns.
+     *
+     * **From the position, not from the start**, so it composes with
+     * {@link fileSeek}: after reading a header, this is the rest, and reading a
+     * whole file that has already been read from is `fileSeek(f, 0, Seek.Set)`
+     * away.
+     *
+     * Works on `stdin()` too, where there is no size to ask for — the buffer
+     * doubles instead. That is the case a `fileSize`-then-`fileRead` pair
+     * cannot serve, and the reason this exists rather than being written out at
+     * each call site.
+     */
+    export function fileReadAll(file: Pointer<File>): string;
+
+    /** Where {@link fileSeek} measures from. */
+    export enum Seek {
+        /** The start of the file. `offset` is an absolute position. */
+        Set = 0,
+        /** Where the position is now. `offset` may be negative. */
+        Current = 1,
+        /** The end of the file. `offset` is usually zero or negative. */
+        End = 2,
+    }
+
+    /**
+     * Move the read/write position. `false` when it could not be moved.
+     *
+     * The offset is an `isize`, not a `long` — seeking past 2 GB works on every
+     * platform, including the one whose `fseek` would silently have capped it.
+     *
+     * A standard stream is not seekable and answers `false` rather than
+     * pretending to have moved.
+     */
+    export function fileSeek(file: Pointer<File>, offset: isize, from: Seek): boolean;
+
+    /**
+     * Where the position is now, in bytes from the start, or `-1` if the file
+     * has no position — which a standard stream does not.
+     */
+    export function fileTell(file: Pointer<File>): isize;
+
+    /**
+     * How many bytes the file holds, or `-1` when that cannot be known.
+     *
+     * Asked by seeking to the end and back, and the position is restored
+     * exactly — including when the answer is `-1`, so a failed size never also
+     * moves the file.
+     */
+    export function fileSize(file: Pointer<File>): isize;
+
     /** Flush what is buffered. The standard streams are unbuffered already. */
     export function fileFlush(file: Pointer<File>): void;
 

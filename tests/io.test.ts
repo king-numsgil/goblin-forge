@@ -169,6 +169,177 @@ describe("std/io", () => {
         expect(result.leaked).toBe(0);
     });
 
+    test("seeking moves the position, and `fileTell` reports it", async () => {
+        const path = scratchPath("seeking.txt");
+        const result = await run(
+            "io-seek",
+            `import { fileClose, fileOpen, fileRead, fileSeek, fileTell, fileWrite, Seek } from "std/io";
+
+       export function main(): i32 {
+         const w = fileOpen("${path}", "w");
+         if (w === null) { return 1; }
+         fileWrite(w, "abcdefgh");
+         fileClose(w);
+
+         const r = fileOpen("${path}", "r");
+         if (r === null) { return 2; }
+
+         if (!fileSeek(r, 4, Seek.Set)) { fileClose(r); return 3; }
+         const fromFour = fileRead(r, 2);
+         const afterRead = fileTell(r);
+
+         if (!fileSeek(r, -1, Seek.End)) { fileClose(r); return 4; }
+         const last = fileRead(r, 8);
+
+         if (!fileSeek(r, 0, Seek.Set)) { fileClose(r); return 5; }
+         const first = fileRead(r, 1);
+         fileClose(r);
+
+         console.log(\`\${fromFour} \${afterRead} \${last} \${first}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("ef 6 h a\n");
+        expect(result.exitCode).toBe(0);
+        expect(result.leaked).toBe(0);
+    });
+
+    test("`fileSize` answers without moving the position", async () => {
+        // The property worth pinning rather than the number: a size that also
+        // seeks is a size you cannot ask for in the middle of reading.
+        const path = scratchPath("sized.txt");
+        const result = await run(
+            "io-size",
+            `import { fileClose, fileOpen, fileRead, fileSize, fileTell, fileWrite } from "std/io";
+
+       export function main(): i32 {
+         const w = fileOpen("${path}", "w");
+         if (w === null) { return 1; }
+         fileWrite(w, "0123456789");
+         fileClose(w);
+
+         const r = fileOpen("${path}", "r");
+         if (r === null) { return 2; }
+         fileRead(r, 3);
+         const before = fileTell(r);
+         const size = fileSize(r);
+         const after = fileTell(r);
+         const rest = fileRead(r, 32);
+         fileClose(r);
+
+         console.log(\`\${size} \${before} \${after} \${rest}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("10 3 3 3456789\n");
+        expect(result.leaked).toBe(0);
+    });
+
+    test("a standard stream has no position and no size", async () => {
+        // It answers rather than pretending, which is what makes the `-1`
+        // worth having: a stream that reported 0 would read as an empty file.
+        const result = await run(
+            "io-unseekable",
+            `import { fileSeek, fileSize, fileTell, stdout, Seek } from "std/io";
+
+       export function main(): i32 {
+         if (fileSeek(stdout(), 0, Seek.Set)) { return 1; }
+         if (fileTell(stdout()) !== -1) { return 2; }
+         if (fileSize(stdout()) !== -1) { return 3; }
+         console.log("unseekable");
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("unseekable\n");
+        expect(result.leaked).toBe(0);
+    });
+
+    test("`fileReadAll` reads from the position, not from the start", async () => {
+        // Which is what makes it compose with seeking. Reading a whole file
+        // that has already been read from is a `Seek.Set` away, and the test
+        // does both so the difference is visible rather than assumed.
+        const path = scratchPath("read-all.txt");
+        const result = await run(
+            "io-read-all",
+            `import { fileClose, fileOpen, fileRead, fileReadAll, fileSeek, fileWrite, Seek } from "std/io";
+
+       export function main(): i32 {
+         const w = fileOpen("${path}", "w");
+         if (w === null) { return 1; }
+         fileWrite(w, "head:body and more");
+         fileClose(w);
+
+         const r = fileOpen("${path}", "r");
+         if (r === null) { return 2; }
+         const head = fileRead(r, 5);
+         const rest = fileReadAll(r);
+         fileSeek(r, 0, Seek.Set);
+         const whole = fileReadAll(r);
+         fileClose(r);
+
+         console.log(\`\${head}|\${rest}|\${whole.length}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("head:|body and more|18\n");
+        expect(result.leaked).toBe(0);
+    });
+
+    test("`fileReadAll` of an empty file is an empty string", async () => {
+        const path = scratchPath("empty.txt");
+        const result = await run(
+            "io-read-all-empty",
+            `import { fileClose, fileOpen, fileReadAll } from "std/io";
+
+       export function main(): i32 {
+         const w = fileOpen("${path}", "w");
+         if (w === null) { return 1; }
+         fileClose(w);
+
+         const r = fileOpen("${path}", "r");
+         if (r === null) { return 2; }
+         const text = fileReadAll(r);
+         fileClose(r);
+
+         console.log(\`[\${text}] \${text.length}\`);
+         return cast<i32>(text.length);
+       }\n`,
+        );
+        expect(result.stdout).toBe("[] 0\n");
+        expect(result.exitCode).toBe(0);
+        expect(result.leaked).toBe(0);
+    });
+
+    test("`fileReadAll` survives a file larger than its first buffer", async () => {
+        // The growth path. A seekable file is sized up front, so this is really
+        // checking that the sizing is right rather than that doubling works —
+        // and a wrong answer here is a truncated file, which is the quiet kind.
+        const path = scratchPath("large.txt");
+        const result = await run(
+            "io-read-all-large",
+            `import { fileClose, fileOpen, fileReadAll, fileWrite } from "std/io";
+
+       export function main(): i32 {
+         const w = fileOpen("${path}", "w");
+         if (w === null) { return 1; }
+         let i: i32 = 0;
+         while (i < 1000) { fileWrite(w, "0123456789"); i = i + 1; }
+         fileClose(w);
+
+         const r = fileOpen("${path}", "r");
+         if (r === null) { return 2; }
+         const text = fileReadAll(r);
+         fileClose(r);
+
+         console.log(\`\${text.length}\`);
+         return text.length === 10000 ? 0 : 3;
+       }\n`,
+        );
+        expect(result.stdout).toBe("10000\n");
+        expect(result.exitCode).toBe(0);
+        expect(result.leaked).toBe(0);
+    });
+
     test("`stdout()` writes the bytes `console.log` writes", async () => {
         // The reason the standard streams are not `FILE *` here. Through the
         // CRT on Windows every `\n` on the way out becomes `\r\n`, which is
