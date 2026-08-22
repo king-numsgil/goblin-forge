@@ -43,7 +43,7 @@ import {
     STRING_FROM_CSTRING,
     TRY_CAST,
 } from "./tables.ts";
-import { CSTRING_TYPE, ERROR, POLY, STRING, type Typed, typed, USIZE, VOID, type Width } from "./types.ts";
+import { CSTRING_TYPE, ERROR, ISIZE, POLY, STRING, type Typed, typed, USIZE, VOID, type Width } from "./types.ts";
 import { describe, elementTypeOf, isStaticMember } from "./util.ts";
 import { Emitter } from "./emit.ts";
 
@@ -810,6 +810,15 @@ export abstract class WidthPass extends Emitter {
         // any declaration's.
         const element = this.arrayElementAt(access);
         if (element !== undefined) {
+            // The methods taking a **callback** answer before the argument loop
+            // below, because a lambda has no width of its own: its type comes
+            // from the prelude's declaration through tsc's contextual type, and
+            // asking the width pass about one reports a lambda written where
+            // nothing says what it should be — which is the wrong complaint
+            // about the one position where something does.
+            if (access.name.text === "forEach") {
+                return typed(VOID);
+            }
             for (const argument of expression.arguments) {
                 if (this.width(argument).kind === "error") {
                     return ERROR;
@@ -824,6 +833,33 @@ export abstract class WidthPass extends Emitter {
                     this.outer.unsupported(
                         expression,
                         `\`${access.name.text}\` on a \`${renderType(element)}[]\``,
+                    );
+                    return ERROR;
+            }
+        }
+
+        // `s.substring(a, b)`, `s.indexOf(t)`, `s.codePointAt(i)`. Asked of tsc
+        // rather than of the width pass, for the reason the array branch above
+        // gives: this runs over every method call, and reporting on a receiver
+        // that turns out not to be a string would complain about the wrong
+        // thing.
+        if (this.outer.tryErase(access.expression)?.kind === "string") {
+            for (const argument of expression.arguments) {
+                if (this.width(argument).kind === "error") {
+                    return ERROR;
+                }
+            }
+            switch (access.name.text) {
+                case "substring":
+                    return typed(STRING);
+                case "indexOf":
+                    return typed(ISIZE);
+                case "codePointAt":
+                    return typed({kind: "scalar", name: "u32"});
+                default:
+                    this.outer.unsupported(
+                        expression,
+                        `\`${access.name.text}\` on a \`string\``,
                     );
                     return ERROR;
             }

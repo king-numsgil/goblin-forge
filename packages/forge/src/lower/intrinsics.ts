@@ -946,6 +946,182 @@ export abstract class IntrinsicLowerer extends WidthPass {
     }
 
     /**
+     * A `LocalFn` argument, as the place its two words occupy.
+     *
+     * The expected type comes from **tsc's contextual type**, not from the
+     * lambda: a lambda has no type of its own, and the prelude's declaration is
+     * what says the parameter is a `LocalFn<(value: T) => void>` with `T`
+     * substituted. Erasing that is what turns `(x) => …` into a closure value
+     * rather than a `GF0001` about a construct with nowhere to land.
+     */
+    protected closureArgument(
+        argument: ts.Expression,
+    ): { place: Place; type: Extract<MachineType, { kind: "localfn" }> } | undefined {
+        const contextual = this.outer.checker.getContextualType(argument);
+        const expected =
+            contextual === undefined ? undefined : this.outer.erase(argument, contextual);
+        if (expected === undefined || expected.kind !== "localfn") {
+            this.outer.unsupported(argument, "a callback that is not a `LocalFn`");
+            return undefined;
+        }
+        const value = this.expressionTyped(argument, expected);
+        if (value === undefined) {
+            return undefined;
+        }
+        if (value.operand.kind === "Const") {
+            // A closure is two words in a frame slot; there is no constant form
+            // of one, so this is a shape nothing produces rather than a rule.
+            this.outer.unsupported(argument, "a callback with no address");
+            return undefined;
+        }
+        return {place: value.operand.value, type: expected};
+    }
+
+    /**
+     * Call a `LocalFn` whose arguments are already lowered.
+     *
+     * The environment goes first, exactly as {@link BodyLowerer.localFnCall}
+     * puts it there for a written call: field 0 is the code address and field 1
+     * the environment, and a lifted body takes the environment as its own
+     * parameter zero.
+     */
+    protected invokeClosure(
+        at: ts.CallExpression,
+        callback: { place: Place; type: Extract<MachineType, { kind: "localfn" }> },
+        args: readonly Operand[],
+    ): Typed | undefined {
+        const field = (index: number): Place => ({
+            local: callback.place.local,
+            projection: [...callback.place.projection, {kind: "Field", value: FieldId(index)}],
+        });
+        return this.emitCall(
+            at,
+            {
+                kind: "Indirect",
+                operand: {kind: "Copy", value: field(0)},
+                sig: this.outer.localFnSig(callback.type, at),
+            },
+            [{kind: "Copy", value: field(1)}, ...args],
+            callback.type.returns,
+        );
+    }
+
+    /**
+     * `xs.forEach(f)` — call `f` with each element, in order.
+     *
+     * The loop is emitted here rather than run in the runtime, and that is what
+     * makes it possible at all: the runtime would need the element's stride and
+     * a way to pass a value it has no type for, while the frontend knows both.
+     * It is the loop {@link fixedArray} emits, over a length read from the
+     * handle instead of a constant.
+     *
+     * **The length is read once, before the first call.** So growing or
+     * shrinking the array from inside `f` is undefined here in exactly the way
+     * mutating a `std::vector` while iterating it is — and the alternative,
+     * re-reading `Len` every turn, turns a `push` inside `f` into a loop that
+     * does not end.
+     *
+     * The element is **copied** into the call, because the callback's parameter
+     * is a `T` by value and a by-value argument of an owning type is a copy
+     * everywhere else in the language. `Reference<T>` is the parameter to write
+     * where that copy is not wanted.
+     */
+    protected arrayForEach(
+        expression: ts.CallExpression,
+        array: Typed,
+        element: MachineType,
+    ): Typed | undefined {
+        const argument = expression.arguments[0];
+        if (expression.arguments.length !== 1 || argument === undefined) {
+            this.outer.error(expression, "GF0002", "`forEach` takes exactly one function.");
+            return undefined;
+        }
+        const callback = this.closureArgument(argument);
+        if (callback === undefined) {
+            return undefined;
+        }
+        if (callback.type.params.length !== 1) {
+            this.outer.unsupported(argument, "a `forEach` callback that does not take one argument");
+            return undefined;
+        }
+        const resolved = this.asArray(expression, array);
+        if (resolved === undefined) {
+            return undefined;
+        }
+
+        this.eachElement(expression, resolved.place, element, (slot) => {
+            this.invokeClosure(expression, callback, [{kind: "Copy", value: slot}]);
+        });
+        return {operand: {kind: "Const", value: {kind: "Unit"}}, type: VOID};
+    }
+
+    /**
+     * The loop every array method shares: `i` from zero to the length it had
+     * when the loop began, with `body` emitted over each element's place.
+     */
+    protected eachElement(
+        at: ts.Expression,
+        array: Place,
+        element: MachineType,
+        body: (slot: Place) => void,
+    ): void {
+        void element;
+        const usizeTy = this.outer.tyOf(USIZE, at);
+        const one: Operand = {kind: "Const", value: {kind: "Int", bits: 1n, ty: usizeTy}};
+        const zero: Operand = {kind: "Const", value: {kind: "Int", bits: 0n, ty: usizeTy}};
+
+        // Read once, into its own local: the loop's range is decided before the
+        // first call, not renegotiated on every turn.
+        const limit = this.f.addLocal({ty: usizeTy, storage: "Owned"});
+        this.push({kind: "StorageLive", value: limit});
+        this.push({kind: "Init", place: placeOf(limit), rvalue: {kind: "Len", value: array}});
+
+        const counter = this.f.addLocal({ty: usizeTy, storage: "Owned"});
+        const test = this.f.addLocal({ty: this.boolTy(), storage: "Temporary"});
+
+        const head = this.f.block();
+        const step = this.f.block();
+        const exit = this.f.block();
+
+        this.push({kind: "StorageLive", value: counter});
+        this.push({kind: "Init", place: placeOf(counter), rvalue: {kind: "Use", value: zero}});
+        this.seal({kind: "Goto", value: head});
+
+        this.current = head;
+        this.push({kind: "StorageLive", value: test});
+        this.push({
+            kind: "Init",
+            place: placeOf(test),
+            rvalue: {
+                kind: "Binary",
+                op: "Lt",
+                lhs: {kind: "Copy", value: placeOf(counter)},
+                rhs: {kind: "Copy", value: placeOf(limit)},
+            },
+        });
+        this.seal({kind: "Branch", cond: {kind: "Copy", value: placeOf(test)}, thenBlock: step, elseBlock: exit});
+
+        this.current = step;
+        body({local: array.local, projection: [...array.projection, {kind: "Index", value: counter}]});
+        this.push({
+            kind: "Assign",
+            place: placeOf(counter),
+            rvalue: {
+                kind: "Binary",
+                op: "Add",
+                lhs: {kind: "Copy", value: placeOf(counter)},
+                rhs: one,
+            },
+        });
+        this.seal({kind: "Goto", value: head});
+
+        this.current = exit;
+        this.push({kind: "StorageDead", value: test});
+        this.push({kind: "StorageDead", value: counter});
+        this.push({kind: "StorageDead", value: limit});
+    }
+
+    /**
      * `fixedArray(N, fill)` — `N` elements, inline, every one a copy of `fill`.
      *
      * Zeroed first, then filled. The zeroing is not belt-and-braces: an element of

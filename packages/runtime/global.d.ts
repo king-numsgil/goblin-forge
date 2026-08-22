@@ -178,6 +178,27 @@ interface Array<T> {
      * Popping an empty array is unchecked, like indexing one.
      */
     pop(): T;
+
+    /**
+     * Call `f` with each element, in order.
+     *
+     *     let total: i32 = 0;
+     *     xs.forEach((x) => { total = total + x; });
+     *
+     * The loop is emitted inline and `f` is a {@link LocalFn}, so this costs no
+     * allocation: the closure's captures are references into the frame that
+     * wrote them, and there is nothing to release afterwards.
+     *
+     * **The length is read once, before the first call.** Growing or shrinking
+     * the array from inside `f` is undefined, exactly as mutating a
+     * `std::vector` while iterating it is — and a `push` in particular would
+     * otherwise be a loop that does not end.
+     *
+     * The element arrives **by value**, so a `string[]` copies each string into
+     * the call. That is what a by-value parameter means everywhere else here;
+     * take a `Reference<T>` where the copy is not wanted.
+     */
+    forEach(f: LocalFn<(value: T) => void>): void;
 }
 
 /**

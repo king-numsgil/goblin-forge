@@ -207,24 +207,34 @@ describe("the intrinsics the prelude declares and the lowerer does not have", ()
 });
 
 describe("the `String` methods the prelude declares", () => {
-    // `length` works. The other three are declared with their exact semantics
-    // written out — clamping, byte offsets, the zero that means "inside a
-    // multi-byte character" — and none of them is lowered.
-    const cases: [string, string][] = [
-        ["substring", "  const s: string = \"hello\";\n  console.log(s.substring(1, 3));\n  return 0;"],
-        ["indexOf", "  const s: string = \"hello\";\n  const i: isize = s.indexOf(\"ll\");\n  return cast<i32>(i);"],
-        ["codePointAt", "  const s: string = \"hello\";\n  const c: u32 = s.codePointAt(0);\n  return cast<i32>(c);"],
-    ];
+    // All four are lowered now: `length` is a `Len` on the handle, and the other
+    // three are runtime calls. `tests/strings.test.ts` covers their semantics;
+    // this is the reminder that the prelude declares exactly these.
+    test("the three that are calls all reach the runtime", async () => {
+        const result = await run(
+            "intr-string-methods",
+            `export function main(): i32 {
+         const s: string = "hello";
+         console.log(s.substring(1, 3));
+         console.log(\`\${s.indexOf("ll")}\`);
+         console.log(\`\${s.codePointAt(0)}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("el\n2\n104\n");
+        expect(result.leaked).toBe(0);
+    });
 
-    for (const [name, body] of cases) {
-        test(`\`${name}\` is GF0001`, async () => {
-            await expectRejected(
-                `intr-string-${name}`,
-                `export function main(): i32 {\n${body}\n}\n`,
-                "GF0001",
-            );
-        });
-    }
+    test("a method the prelude does not declare is GF0001", async () => {
+        await expectRejected(
+            "intr-string-unknown",
+            `export function main(): i32 {
+         const s: string = "hello";
+         return cast<i32>(s.charCodeAt(0));
+       }\n`,
+            "TS2339",
+        );
+    });
 
     test("`length` on a literal is GF0001, though it is on a binding", async () => {
         await expectRejected(

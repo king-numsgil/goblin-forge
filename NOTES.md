@@ -172,6 +172,7 @@ backend failure:
 | Not implemented | Where it is refused | Milestone |
 |---|---|---|
 | interface-to-interface conversion, and a contract extending another | nothing lowers either | later |
+| array methods past `push`/`pop`/`forEach` — `map`, `filter`, `reduce`, `find` | not declared in `global.d.ts`. The machinery is there: `eachElement` emits the loop, `closureArgument` and `invokeClosure` handle the callback. `map` additionally needs a result array of the callback's *return* type, which `callback.type.returns` already gives | later |
 | `Reference<T>` for anything but a class or a contract | `checker/src/types.ts`, the `isReferenceType` branch | later |
 | an interface mixing methods and data | `checker/src/types.ts`, `contractOf` — a rule, not a gap | — |
 | writing *through* a `Pointer<Pointer<T>>` for a primitive `T` — `cells[i] = p` | tsc, not the compiler. `Pointer<Pointer<u8>>` is `CorePointer<u8> & CorePointer<CorePointer<u8>>`, and the two index signatures merge to `u8 & CorePointer<u8>`, which nothing produces. Reading is fine, and `Pointer<CString>` is the spelling for a `char **` that has to be written | later |

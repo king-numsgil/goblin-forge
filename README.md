@@ -326,6 +326,18 @@ Nobody writes a destructor; there is no syntax for one. A value is released
 because its *type* says it owns something. Every test in the suite asserts the
 live allocation count is zero when the program exits, automatically.
 
+Four methods, and `length` is the one that is not a call:
+
+```ts
+s.length;                 // a load from the header, O(1) — bytes, not characters
+s.substring(7);           // a new string; clamped, and a reversed pair swaps
+s.indexOf("world");       // `isize`, so "not found" can be -1
+s.codePointAt(0);         // `u32`; zero inside a multi-byte character
+```
+
+Offsets are **bytes**, and `substring` copies — the result is owned by whatever
+takes it, and the string it was read from is only borrowed.
+
 The allocator underneath all of it is **mimalloc**, statically linked into every
 program. It is also published under its own C names — `mi_malloc`, `mi_free` and
 six more — so a library that lets its allocator be replaced can be handed the
@@ -600,6 +612,21 @@ Copying copies every element with **that element's** own copy operation: a
 array holds no buffer and allocates nothing, and growth is amortised.
 `Reference<T[]>` is how you pass one without copying the buffer.
 
+`forEach` takes a `LocalFn`, so iterating with a closure costs no allocation:
+
+```ts
+let total: i32 = 0;
+xs.forEach((x) => { total = total + x; });
+```
+
+The loop is emitted inline, and the length is read **once, before the first
+call** — growing or shrinking the array from inside the callback is undefined,
+exactly as mutating a `std::vector` while iterating it is. The element arrives
+by value, so a `string[]` copies each string into the call; take a
+`Reference<T>` where that copy is not wanted.
+
+`map`, `filter` and `reduce` are not there yet.
+
 ### Functions are values, if they capture nothing
 
 ```ts
@@ -693,16 +720,12 @@ on two machines.
 
 ### Not there yet
 
-`String.substring`/`indexOf`/`codePointAt`, generics, exceptions (`try`/`catch`
-and `throw`), escaping closures (`HeapFn`), static fields, top-level statements
-and top-level `const`.
+Generics, exceptions (`try`/`catch` and `throw`), escaping closures (`HeapFn`),
+static fields, top-level statements and top-level `const`. On arrays,
+everything past `push`/`pop`/`forEach`: `map`, `filter`, `reduce` and the rest.
 
 All of them are declared or valid TypeScript, and all of them produce a
 `GF0001` diagnostic naming the construct and pointing at it.
-
-`switch`, `do`/`while`, `for…of` and capturing lambdas are **not** on this list
-any more — they are implemented, and `tests/control-flow.test.ts` and
-`tests/closures.test.ts` run them.
 
 ---
 

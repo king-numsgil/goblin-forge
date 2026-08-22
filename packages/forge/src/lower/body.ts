@@ -68,7 +68,7 @@ import {
     STRING_FROM_CSTRING,
     TRY_CAST,
 } from "./tables.ts";
-import { type FnRecord, STRING, type Typed, typed, USIZE, VOID } from "./types.ts";
+import { type FnRecord, ISIZE, STRING, type Typed, typed, USIZE, VOID } from "./types.ts";
 import { type Binding, bindingPlace, isCapture, type LoopFrame, type Scope, Scopes } from "./scopes.ts";
 import { describe, elementTypeOf, hasNullValue, needsDrop, nullAdvice, placeOf } from "./util.ts";
 import type { Lowerer } from "./module.ts";
@@ -3804,10 +3804,19 @@ export class BodyLowerer extends BoundaryLowerer {
                     return this.arrayPush(expression, array, element);
                 case "pop":
                     return this.arrayPop(expression, array, element);
+                case "forEach":
+                    return this.arrayForEach(expression, array, element);
                 default:
                     this.outer.unsupported(expression, `\`${access.name.text}\` on an array`);
                     return undefined;
             }
+        }
+
+        // `s.substring(a, b)`, `s.indexOf(t)`, `s.codePointAt(i)` — the three
+        // `String` methods that are runtime calls. Before the class and contract
+        // paths for the reason the array branch above is: a `string` is neither.
+        if (this.outer.tryErase(access.expression)?.kind === "string") {
+            return this.#stringMethod(expression, access);
         }
 
         const contract = this.contractAt(access.expression);
@@ -4255,6 +4264,90 @@ export class BodyLowerer extends BoundaryLowerer {
         // class's default member initialisers — before the constructor body.
         this.#emitPendingInitialisers();
         return undefined;
+    }
+
+    /**
+     * `s.substring(a, b)`, `s.indexOf(t)`, `s.codePointAt(i)`.
+     *
+     * The receiver is **borrowed**, like every other argument a runtime call
+     * takes — `forRead` sees an owning type and produces a `Borrow`, so reading
+     * a substring does not first clone the string it is read from.
+     *
+     * The result of `substring` is an owned `string`, so the scope that takes it
+     * releases it. That is the same arrangement `stringFromCString` has and
+     * needs no special handling here: a `callRuntime` returning `STRING` lands
+     * in a temporary the drop pass already tracks.
+     */
+    #stringMethod(
+        expression: ts.CallExpression,
+        access: ts.PropertyAccessExpression,
+    ): Typed | undefined {
+        const subject = this.value(access.expression, STRING);
+        if (subject === undefined) {
+            return undefined;
+        }
+        const written = expression.arguments;
+
+        switch (access.name.text) {
+            case "substring": {
+                const start = this.#offsetArgument(expression, written[0], 0n);
+                // The end nobody wrote is "as far as there is", spelled as the
+                // largest `usize` — which `gf_string_substring` clamps to the
+                // length, exactly as it clamps one somebody did write. So the
+                // two forms are one call rather than two signatures.
+                const end = this.#offsetArgument(expression, written[1], 0xffff_ffff_ffff_ffffn);
+                if (start === undefined || end === undefined) {
+                    return undefined;
+                }
+                return this.callRuntime(expression, RUNTIME.substring, [subject, start, end], STRING);
+            }
+            case "indexOf": {
+                const search = written[0];
+                if (search === undefined) {
+                    this.outer.error(expression, "GF0002", "`indexOf` takes a string to look for.");
+                    return undefined;
+                }
+                const needle = this.value(search, STRING);
+                const from = this.#offsetArgument(expression, written[1], 0n);
+                if (needle === undefined || from === undefined) {
+                    return undefined;
+                }
+                return this.callRuntime(expression, RUNTIME.indexOf, [subject, needle, from], ISIZE);
+            }
+            case "codePointAt": {
+                const index = this.#offsetArgument(expression, written[0], 0n);
+                if (index === undefined) {
+                    return undefined;
+                }
+                return this.callRuntime(
+                    expression,
+                    RUNTIME.codePointAt,
+                    [subject, index],
+                    {kind: "scalar", name: "u32"},
+                );
+            }
+            default:
+                this.outer.unsupported(expression, `\`${access.name.text}\` on a \`string\``);
+                return undefined;
+        }
+    }
+
+    /** A `usize` offset argument, or the constant an omitted one stands for. */
+    #offsetArgument(
+        at: ts.Expression,
+        argument: ts.Expression | undefined,
+        absent: bigint,
+    ): Typed | undefined {
+        if (argument === undefined) {
+            return {
+                operand: {
+                    kind: "Const",
+                    value: {kind: "Int", bits: absent, ty: this.outer.tyOf(USIZE, at)},
+                },
+                type: USIZE,
+            };
+        }
+        return this.value(argument, USIZE);
     }
 
     /**

@@ -609,6 +609,121 @@ describe("LocalFn, refused", () => {
  * than chaining, so a capture three closures deep costs the same two loads as
  * one, and every level writes to the same storage.
  */
+describe("`forEach`, the first prelude method that takes a closure", () => {
+    test("a capture accumulates across the whole array", async () => {
+        const result = await run(
+            "foreach-sum",
+            `export function main(): i32 {
+         const xs: i32[] = [1, 2, 3, 4];
+         let total: i32 = 0;
+         xs.forEach((x) => { total = total + x; });
+         return total;
+       }\n`,
+        );
+        expect(result.exitCode).toBe(10);
+        expect(result.leaked).toBe(0);
+    });
+
+    test("an empty array calls nothing", async () => {
+        const result = await run(
+            "foreach-empty",
+            `export function main(): i32 {
+         const xs: i32[] = [];
+         let calls: i32 = 0;
+         xs.forEach((x) => { calls = calls + x + 1; });
+         return calls;
+       }\n`,
+        );
+        expect(result.exitCode).toBe(0);
+        expect(result.leaked).toBe(0);
+    });
+
+    test("the element type reaches the callback, and owning elements balance", async () => {
+        // The type comes from tsc's *contextual* type at the call — `Array<T>`
+        // is generic, so nothing else knows the callback takes a `string`. And
+        // the element arrives by value, so each one is copied in and released by
+        // the callee: a non-zero leak count here would mean one half happened
+        // without the other.
+        const result = await run(
+            "foreach-strings",
+            `export function main(): i32 {
+         const words: string[] = ["a", "bb", "ccc"];
+         let n: usize = 0;
+         words.forEach((w) => { n = n + w.length; });
+         console.log(\`\${n}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("6\n");
+        expect(result.leaked).toBe(0);
+    });
+
+    test("the callback may call a declared function and read other captures", async () => {
+        const result = await run(
+            "foreach-mixed",
+            `function twice(n: i32): i32 { return n * 2; }
+
+       export function main(): i32 {
+         const xs: i32[] = [1, 2, 3];
+         const bonus: i32 = 10;
+         let total: i32 = 0;
+         xs.forEach((x) => { total = total + twice(x) + bonus; });
+         return total;
+       }\n`,
+        );
+        expect(result.exitCode).toBe(42);
+        expect(result.leaked).toBe(0);
+    });
+
+    test("forEach nests over two arrays", async () => {
+        const result = await run(
+            "foreach-nested",
+            `export function main(): i32 {
+         const rows: i32[] = [1, 2, 3];
+         const cols: i32[] = [10, 20];
+         let total: i32 = 0;
+         rows.forEach((r) => {
+           cols.forEach((c) => { total = total + r * c; });
+         });
+         return total;
+       }\n`,
+        );
+        expect(result.exitCode).toBe(180);
+        expect(result.leaked).toBe(0);
+    });
+
+    test("writing an element through the array the callback captured", async () => {
+        // The array is a capture like any other, so this reaches the caller's
+        // own buffer rather than a copy of it.
+        const result = await run(
+            "foreach-write-back",
+            `export function main(): i32 {
+         const xs: i32[] = [1, 2, 3];
+         let i: usize = 0;
+         xs.forEach((x) => { xs[i] = x * 10; i = i + 1; });
+         return xs[0] + xs[1] + xs[2];
+       }\n`,
+        );
+        expect(result.exitCode).toBe(60);
+        expect(result.leaked).toBe(0);
+    });
+
+    test("a callback that is not written as a lambda still works", async () => {
+        // A `LocalFn` parameter accepts a non-capturing lambda with a null
+        // environment, which is what lets a caller not know which kind it wrote.
+        const result = await run(
+            "foreach-noncapturing",
+            `export function main(): i32 {
+         const xs: i32[] = [5, 6];
+         xs.forEach((x) => { console.log(\`\${x}\`); });
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("5\n6\n");
+        expect(result.leaked).toBe(0);
+    });
+});
+
 describe("LocalFn, nested", () => {
     test("the inner closure writes to the outermost frame's local", async () => {
         const result = await run(

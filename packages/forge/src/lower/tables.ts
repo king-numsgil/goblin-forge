@@ -219,6 +219,19 @@ export const RUNTIME = {
     allocArrayCount: "gf_alloc_array_count",
     freeArray: "gf_free_array",
     /**
+     * The three `String` methods that are calls rather than loads.
+     *
+     * `length` is not among them: it is a `Len` on the handle, which is the
+     * whole reason a `string` has a header and a `CString` does not.
+     *
+     * Each takes its offsets as `usize` and clamps rather than refusing, which
+     * is what lets an omitted argument be a sentinel instead of a second
+     * signature — `substring(1)` passes `u64::MAX` for the end it did not name.
+     */
+    substring: "gf_string_substring",
+    indexOf: "gf_string_index_of",
+    codePointAt: "gf_string_code_point_at",
+    /**
      * `gf_string_from_cstr(p)` — `strlen`, allocate, copy, NUL-terminate.
      *
      * The one direction that has to copy. A `CString` has no header, so it cannot

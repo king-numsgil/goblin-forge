@@ -43,11 +43,16 @@ const UNREACHABLE: Partial<Record<string, string>> = {
 
 describe("codes raised by a program", () => {
     test("GF0001 — a construct the compiler cannot lower yet", async () => {
+        // A generic function: valid TypeScript, meant to be valid Goblin, and
+        // waiting on REWRITE-PLAN §11.7's answer about monomorphisation. It is
+        // deliberately something with no near-term plan to land, because this
+        // test's specimen becoming *implemented* is how it last broke.
         await expectRejected(
             "diag-0001",
-            `export function main(): i32 {
-         const s: string = "abc";
-         return cast<i32>(s.indexOf("b"));
+            `function identity<T>(x: T): T { return x; }
+
+       export function main(): i32 {
+         return identity(1);
        }\n`,
             "GF0001",
         );

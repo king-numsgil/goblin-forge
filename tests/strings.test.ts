@@ -294,6 +294,120 @@ describe("the value model", () => {
     });
 });
 
+describe("the three methods that are runtime calls", () => {
+    test("`substring` copies the bytes between two offsets", async () => {
+        const result = await run(
+            "string-substring",
+            `export function main(): i32 {
+         const s: string = "hello, world";
+         console.log(s.substring(0, 5));
+         console.log(s.substring(7, 12));
+         // The end nobody writes is the end of the string.
+         console.log(s.substring(7));
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("hello\nworld\nworld\n");
+        expect(result.leaked).toBe(0);
+    });
+
+    test("`substring` clamps and swaps rather than refusing", async () => {
+        // Documented as matching JavaScript, so that parsing code does not need
+        // a bounds check on every call. A reversed pair is the interesting one:
+        // it is a *swap*, not an empty string.
+        const result = await run(
+            "string-substring-clamped",
+            `export function main(): i32 {
+         const s: string = "abcdef";
+         console.log(\`[\${s.substring(4, 99)}]\`);
+         console.log(\`[\${s.substring(99, 200)}]\`);
+         console.log(\`[\${s.substring(4, 1)}]\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("[ef]\n[]\n[bcd]\n");
+        expect(result.leaked).toBe(0);
+    });
+
+    test("`indexOf` answers -1 rather than a position that is not there", async () => {
+        // `isize`, not `usize`, and that is the whole reason: "not found" has to
+        // be a value the type can hold.
+        const result = await run(
+            "string-index-of",
+            `export function main(): i32 {
+         const s: string = "hello, hello";
+         console.log(\`\${s.indexOf("hello")}\`);
+         console.log(\`\${s.indexOf("hello", 1)}\`);
+         console.log(\`\${s.indexOf("nope")}\`);
+         console.log(\`\${s.indexOf("")}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("0\n7\n-1\n0\n");
+        expect(result.leaked).toBe(0);
+    });
+
+    test("`codePointAt` is zero inside a multi-byte character", async () => {
+        // Which is how a byte-by-byte scan tells a character from a
+        // continuation byte, and it is why the answer is a `u32` rather than a
+        // byte: `é` does not fit in one.
+        const result = await run(
+            "string-code-point",
+            `export function main(): i32 {
+         const s: string = "hé";
+         console.log(\`\${s.codePointAt(0)}\`);
+         console.log(\`\${s.codePointAt(1)}\`);
+         console.log(\`\${s.codePointAt(2)}\`);
+         console.log(\`\${s.codePointAt(99)}\`);
+         return 0;
+       }\n`,
+        );
+        // 'h', then 'é' at byte 1, then a continuation byte, then past the end.
+        expect(result.stdout).toBe("104\n233\n0\n0\n");
+        expect(result.leaked).toBe(0);
+    });
+
+    test("a substring is owned by the scope that took it", async () => {
+        // The check that matters, and the harness makes it without being asked:
+        // `substring` allocates, so a loop of them either balances or does not.
+        const result = await run(
+            "string-substring-owned",
+            `export function main(): i32 {
+         const s: string = "the quick brown fox";
+         let n: usize = 0;
+         let i: usize = 0;
+         while (i < 8) {
+           const part = s.substring(i, i + 4);
+           n = n + part.length;
+           i = i + 1;
+         }
+         console.log(\`\${n}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("32\n");
+        expect(result.leaked).toBe(0);
+    });
+
+    test("the receiver is borrowed, not copied", async () => {
+        // A `substring` of a string that is then still readable, and a clean
+        // allocation count: if the receiver were copied into the call, the copy
+        // would be nobody's to release.
+        const result = await run(
+            "string-substring-borrows",
+            `export function main(): i32 {
+         const two: i32 = 2;
+         const s: string = \`built \${two}\`;
+         const part = s.substring(0, 5);
+         console.log(\`\${part} \${s}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("built built 2\n");
+        expect(result.leaked).toBe(0);
+    });
+});
+
 describe("what a string is made of", () => {
     test("`length` counts bytes, not characters", async () => {
         // The prelude is explicit that this is a byte count. `héllo ✓` is seven

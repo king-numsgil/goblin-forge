@@ -455,7 +455,14 @@ function eraseSignature(
                     "GF0001",
                 );
             }
-            return erase(checker, checker.getTypeAtLocation(declaration));
+            // **Of the symbol, not of the declaration.** For an *instantiated*
+            // signature the parameter's symbol carries the substituted type,
+            // while its declaration still reads as it was written — so
+            // `Array<i32>.forEach`'s callback erased as `T` rather than `i32`
+            // and failed as a type with no machine representation. Identical
+            // for a signature with no type parameters, which is every other
+            // caller.
+            return erase(checker, checker.getTypeOfSymbolAtLocation(parameter, declaration));
         }),
         returns: erase(checker, checker.getReturnTypeOfSignature(signature)),
     };
