@@ -1209,6 +1209,164 @@ declare module "std/io" {
 }
 
 // ---------------------------------------------------------------------------
+// Scalar maths
+//
+// **Two of everything, and the prefix says which.** `dsin` takes an `f64`,
+// `fsin` an `f32`:
+//
+//     import { datan2, dhypot, dsqrt } from "std/math";
+//
+//     const r = dhypot(x, y);
+//     const bearing = datan2(y, x);
+//
+// There is no unprefixed `sin`, and that is the same rule the rest of the
+// language follows rather than an inconvenience layered on top. A single `sin`
+// would have to take one width, and every call with the other would either be
+// refused — leaving you to write the conversion this module was supposed to
+// spare you — or promoted silently, which is the thing fixed widths exist to
+// stop. `f32` is not a smaller `f64`; `dsin(x)` on an `f32` costs a widening,
+// and the name is where you can see it.
+//
+// The implementation is a MUSL port compiled into the runtime, not the
+// platform's libm, so **every target gives the same bits**. Two consequences
+// worth knowing: nothing has to be linked (a Goblin program never passes `-lm`,
+// and would have failed on Linux if this called the system's), and a value
+// printed on one machine is the value printed on another.
+//
+// Every one of these is **total**. `dsqrt(-1)` is a NaN, `dlog(0)` is negative
+// infinity, and `dfmod(x, 0)` is a NaN — nothing here traps, raises, or has an
+// error to report, exactly as in C. `disnan` is how you ask afterwards.
+//
+// The constants are functions because the language has no top-level `const` to
+// bind one to. `dpi()` is a call, and a cheap one.
+// ---------------------------------------------------------------------------
+
+declare module "std/math" {
+    // -- f64 -----------------------------------------------------------------
+
+    /** Trigonometry, in radians. `dasin`/`dacos` are NaN outside [-1, 1]. */
+    export function dsin(x: f64): f64;
+    export function dcos(x: f64): f64;
+    export function dtan(x: f64): f64;
+    export function dasin(x: f64): f64;
+    export function dacos(x: f64): f64;
+    export function datan(x: f64): f64;
+
+    /**
+     * The angle to `(x, y)` from the positive x-axis, in `(-pi, pi]`.
+     *
+     * `y` first, as in C. It is the quadrant-correct `datan(y / x)`, and it is
+     * the one to reach for: the division loses the quadrant and divides by zero
+     * on the y-axis.
+     */
+    export function datan2(y: f64, x: f64): f64;
+
+    export function dsinh(x: f64): f64;
+    export function dcosh(x: f64): f64;
+    export function dtanh(x: f64): f64;
+
+    /** `dlog` is the natural logarithm. Negative input is a NaN, zero is -inf. */
+    export function dexp(x: f64): f64;
+    export function dexp2(x: f64): f64;
+    export function dlog(x: f64): f64;
+    export function dlog2(x: f64): f64;
+    export function dlog10(x: f64): f64;
+    export function dpow(base: f64, exponent: f64): f64;
+    export function dsqrt(x: f64): f64;
+    export function dcbrt(x: f64): f64;
+
+    /**
+     * `dsqrt(x*x + y*y)`, without the overflow.
+     *
+     * The intermediate square is what overflows, and at astronomical scale it
+     * does so long before the answer would: a length that fits in an `f64`
+     * comes back as infinity because the square of one leg did not.
+     */
+    export function dhypot(x: f64, y: f64): f64;
+
+    /** `dround` goes away from zero at the halfway point, as C's does. */
+    export function dfloor(x: f64): f64;
+    export function dceil(x: f64): f64;
+    export function dround(x: f64): f64;
+    export function dtrunc(x: f64): f64;
+    export function dabs(x: f64): f64;
+
+    /** The remainder of `x / y`, taking its sign from `x`. NaN when `y` is zero. */
+    export function dfmod(x: f64, y: f64): f64;
+
+    /** A NaN operand loses: `dmin(nan, 3)` is 3, which is C's rule, not `<`'s. */
+    export function dmin(x: f64, y: f64): f64;
+    export function dmax(x: f64, y: f64): f64;
+
+    /** The magnitude of `x` with the sign of `y` — including the sign of a zero. */
+    export function dcopysign(x: f64, y: f64): f64;
+
+    /**
+     * `disnan` is the only way to ask: a NaN is not equal to itself, so
+     * `x !== x` is the C idiom and `x === dnan()` is always false.
+     */
+    export function disnan(x: f64): boolean;
+    export function disinf(x: f64): boolean;
+    export function disfinite(x: f64): boolean;
+
+    /** Constants, as calls. `de` is Euler's number; `dtau` is `2 * dpi()`. */
+    export function dpi(): f64;
+    export function dtau(): f64;
+    export function de(): f64;
+    export function dinf(): f64;
+    export function dnan(): f64;
+
+    // -- f32 -----------------------------------------------------------------
+    //
+    // The same set, to the bit where the width allows it. Reach for these when
+    // the storage is `f32` and widening every call would be the only reason the
+    // program touched an `f64` at all.
+
+    export function fsin(x: f32): f32;
+    export function fcos(x: f32): f32;
+    export function ftan(x: f32): f32;
+    export function fasin(x: f32): f32;
+    export function facos(x: f32): f32;
+    export function fatan(x: f32): f32;
+    export function fatan2(y: f32, x: f32): f32;
+
+    export function fsinh(x: f32): f32;
+    export function fcosh(x: f32): f32;
+    export function ftanh(x: f32): f32;
+
+    export function fexp(x: f32): f32;
+    export function fexp2(x: f32): f32;
+    export function flog(x: f32): f32;
+    export function flog2(x: f32): f32;
+    export function flog10(x: f32): f32;
+    export function fpow(base: f32, exponent: f32): f32;
+    export function fsqrt(x: f32): f32;
+    export function fcbrt(x: f32): f32;
+    export function fhypot(x: f32, y: f32): f32;
+
+    export function ffloor(x: f32): f32;
+    export function fceil(x: f32): f32;
+    export function fround(x: f32): f32;
+    export function ftrunc(x: f32): f32;
+    export function fabs(x: f32): f32;
+
+    export function ffmod(x: f32, y: f32): f32;
+    export function fmin(x: f32, y: f32): f32;
+    export function fmax(x: f32, y: f32): f32;
+    export function fcopysign(x: f32, y: f32): f32;
+
+    export function fisnan(x: f32): boolean;
+    export function fisinf(x: f32): boolean;
+    export function fisfinite(x: f32): boolean;
+
+    export function fpi(): f32;
+    export function ftau(): f32;
+    export function fe(): f32;
+    export function finf(): f32;
+    export function fnan(): f32;
+}
+
+// ---------------------------------------------------------------------------
 // console
 //
 // The output methods, and only those. `log`, `info` and `debug` write to

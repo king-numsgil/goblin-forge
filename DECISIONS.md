@@ -1543,6 +1543,69 @@ written is worse than the plain move error.
 
 ---
 
+## §21 — `std/math`, and why there are two of everything *(settled and built, 2026-08-22)*
+
+`dsin` takes an `f64` and `fsin` an `f32`. There is no unprefixed `sin`, and
+that is not a naming preference — it is what fixed widths cost when they are
+taken seriously.
+
+**A single `sin` would have to pick a width for every caller who did not.** Take
+an `f64` and every `f32` call is either refused, leaving the programmer to write
+the conversion the module was supposed to spare them, or promoted silently —
+which is the thing REWRITE-PLAN §7's whole width design exists to prevent, back
+again through the standard library's front door. Overloading on the argument
+type is the answer a language with implicit conversions gives, and this is not
+one: `f32` is not a smaller `f64` here, and `dsin(x)` on an `f32` costs a
+widening that ought to be visible at the call.
+
+So the prefix is the choice, written down where it is read. It is C's answer
+(`sinf`), with the letter moved to the front so the family sorts together.
+
+### The implementation is Rust's `libm`, and the first reason is a link error
+
+**Nothing adds `-lm` to a Goblin link.** `system_libs` is the user's list, from
+their build config. A runtime that called the platform's `sin` would therefore
+fail to link on every Linux program that had not thought to ask for a library it
+never mentioned — and the failure would be an unresolved external with no file
+and no line, about a function the program did call. The alternative is for the
+compiler to pass `-lm` on every Unix link forever, which is a permanent tax for
+a module most programs do not import.
+
+**The second reason is that the platforms disagree.** The three libms differ in
+the last ulp on the transcendentals, and this project asserts on printed output
+— so a shared implementation is the difference between one expected string and
+three, on a suite whose CI already has a "passes on Windows, fails on Linux"
+history. The `libm` crate is a MUSL port and gives the same bits everywhere.
+
+The cost is the obvious one: it is not the platform's hand-tuned version. That
+is the right trade for a language whose tests compare output, and it is
+reversible — the surface is `gf_dsin`, so what is underneath can change without
+a program noticing, exactly as §16 arranged for the allocator.
+
+### Everything is total, and the constants are calls
+
+No function here traps, raises, or returns an error. `dsqrt(-1)` is a NaN,
+`dlog(0)` is negative infinity, `dfmod(x, 0)` is a NaN. This is C's behaviour
+and the only one available: there is no exception mechanism to raise into and no
+error type to return, and a checked variant would double a surface that is
+already seventy-two functions.
+
+`disnan` therefore has to exist and is not a convenience: a NaN is not equal to
+itself, so `x === dnan()` is always false and there is no other way to ask.
+
+**The constants are functions** — `dpi()`, not `dpi` — because the language has
+no top-level `const` to bind one to, ambient or otherwise. They are calls into
+the runtime, which is a real if tiny cost, and the alternative is an extern
+*data* symbol: new lowering, a relocation, and a second kind of thing a std
+module can export. Not worth it for five values per width.
+
+`STD_MODULES` derives the math half of its table from a name list rather than
+spelling out seventy-two pairs, because the rule — the symbol is `gf_` and the
+name — is the thing that is actually true, and seventy-two hand-written pairs
+are seventy-two chances for one to quietly say something else.
+
+---
+
 ## §20 — `std/io`, and what a standard library is here *(settled and built, 2026-08-22)*
 
 §15's amendment moved the allocator into `"std/alloc"` to find out whether an

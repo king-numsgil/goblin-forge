@@ -378,6 +378,34 @@ const rest = fileReadAll(f);    // from the position to the end
 are `fopen`'s, so `"a"` appends and `"r+"`, `"wb"` and the rest mean what they
 mean in C.
 
+### Maths
+
+`std/math` has two of everything, and the prefix says which width: `d` is `f64`
+and `f` is `f32`.
+
+```ts
+import { datan2, dhypot, dpi } from "std/math";
+
+const range = dhypot(x, y);          // no overflow in the intermediate square
+const bearing = datan2(y, x);        // quadrant-correct, unlike datan(y / x)
+const degrees = bearing * 180.0 / dpi();
+```
+
+There is no unprefixed `sin`, and that follows from fixed widths rather than
+being a decoration on top: one `sin` would have to choose a width for every
+caller who did not, and choosing silently is what fixed widths exist to
+prevent. `f32` is not a smaller `f64` — `dsin(x)` on an `f32` costs a widening,
+and the name is where you can see it.
+
+Every one is **total**: `dsqrt(-1)` is a NaN, `dlog(0)` is `-inf`, and nothing
+traps. Ask afterwards with `disnan`, `disinf`, `disfinite` — and note that a NaN
+is not equal to itself, so `x === dnan()` is always false and `disnan(x)` is the
+only way.
+
+The implementation is a MUSL port compiled into the runtime rather than the
+platform's libm, so **every target produces the same bits** and a Goblin program
+never has to link `-lm`.
+
 A program is one self-contained file, runtime included. The exception is opt-in
 and exists for exactly one situation — a Goblin `shared-lib` loaded by a Goblin
 `bin`, where two private runtimes would mean two heaps:

@@ -1578,6 +1578,177 @@ pub unsafe extern "C" fn gf_file_read_all(file: *mut GfFile) -> GfStr {
     text
 }
 
+// ---------------------------------------------------------------------------
+// Scalar maths — `std/math`, from the runtime side
+//
+// **Two of everything, because there are two float widths.** `dsin` takes an
+// `f64` and `fsin` an `f32`, and neither promotes: a language with fixed widths
+// and no implicit narrowing cannot have one `sin` without deciding, silently,
+// which width a caller meant. The prefix is the decision, written down.
+//
+// The implementation is the `libm` crate rather than the platform's, and the
+// reasoning is in `Cargo.toml` beside the dependency: nothing adds `-lm` to a
+// Goblin link, and a MUSL port gives the same answer on all three targets where
+// the platforms' own libms disagree in the last ulp. This project asserts on
+// printed output, so that difference is one expected string against three.
+//
+// These are the only entry points here that are **not** `unsafe`: a float is a
+// float, there is no pointer to get wrong, and every one of them is total —
+// `dsqrt(-1)` is a NaN rather than a trap, exactly as C's is.
+// ---------------------------------------------------------------------------
+
+/// `f(x)`, for one float in and one out.
+macro_rules! unary {
+    ($ty:ty, $($symbol:ident = $implementation:path,)*) => {
+        $(
+            #[unsafe(no_mangle)]
+            pub extern "C" fn $symbol(x: $ty) -> $ty {
+                $implementation(x)
+            }
+        )*
+    };
+}
+
+/// `f(x, y)`, for two floats in and one out.
+macro_rules! binary {
+    ($ty:ty, $($symbol:ident = $implementation:path,)*) => {
+        $(
+            #[unsafe(no_mangle)]
+            pub extern "C" fn $symbol(x: $ty, y: $ty) -> $ty {
+                $implementation(x, y)
+            }
+        )*
+    };
+}
+
+/// A question about a float, answered as the `u8` a `boolean` crosses as.
+macro_rules! predicate {
+    ($ty:ty, $($symbol:ident = $method:ident,)*) => {
+        $(
+            #[unsafe(no_mangle)]
+            pub extern "C" fn $symbol(x: $ty) -> u8 {
+                u8::from(<$ty>::$method(x))
+            }
+        )*
+    };
+}
+
+/// A constant, as a call — the language has no top-level `const` to bind it to.
+macro_rules! constant {
+    ($ty:ty, $($symbol:ident = $value:expr,)*) => {
+        $(
+            #[unsafe(no_mangle)]
+            pub extern "C" fn $symbol() -> $ty {
+                $value
+            }
+        )*
+    };
+}
+
+unary!(
+    f64,
+    gf_dsin = libm::sin,
+    gf_dcos = libm::cos,
+    gf_dtan = libm::tan,
+    gf_dasin = libm::asin,
+    gf_dacos = libm::acos,
+    gf_datan = libm::atan,
+    gf_dsinh = libm::sinh,
+    gf_dcosh = libm::cosh,
+    gf_dtanh = libm::tanh,
+    gf_dexp = libm::exp,
+    gf_dexp2 = libm::exp2,
+    gf_dlog = libm::log,
+    gf_dlog2 = libm::log2,
+    gf_dlog10 = libm::log10,
+    gf_dsqrt = libm::sqrt,
+    gf_dcbrt = libm::cbrt,
+    gf_dfloor = libm::floor,
+    gf_dceil = libm::ceil,
+    gf_dround = libm::round,
+    gf_dtrunc = libm::trunc,
+    gf_dabs = libm::fabs,
+);
+
+unary!(
+    f32,
+    gf_fsin = libm::sinf,
+    gf_fcos = libm::cosf,
+    gf_ftan = libm::tanf,
+    gf_fasin = libm::asinf,
+    gf_facos = libm::acosf,
+    gf_fatan = libm::atanf,
+    gf_fsinh = libm::sinhf,
+    gf_fcosh = libm::coshf,
+    gf_ftanh = libm::tanhf,
+    gf_fexp = libm::expf,
+    gf_fexp2 = libm::exp2f,
+    gf_flog = libm::logf,
+    gf_flog2 = libm::log2f,
+    gf_flog10 = libm::log10f,
+    gf_fsqrt = libm::sqrtf,
+    gf_fcbrt = libm::cbrtf,
+    gf_ffloor = libm::floorf,
+    gf_fceil = libm::ceilf,
+    gf_fround = libm::roundf,
+    gf_ftrunc = libm::truncf,
+    gf_fabs = libm::fabsf,
+);
+
+binary!(
+    f64,
+    gf_datan2 = libm::atan2,
+    gf_dpow = libm::pow,
+    gf_dhypot = libm::hypot,
+    gf_dfmod = libm::fmod,
+    gf_dmin = libm::fmin,
+    gf_dmax = libm::fmax,
+    gf_dcopysign = libm::copysign,
+);
+
+binary!(
+    f32,
+    gf_fatan2 = libm::atan2f,
+    gf_fpow = libm::powf,
+    gf_fhypot = libm::hypotf,
+    gf_ffmod = libm::fmodf,
+    gf_fmin = libm::fminf,
+    gf_fmax = libm::fmaxf,
+    gf_fcopysign = libm::copysignf,
+);
+
+predicate!(
+    f64,
+    gf_disnan = is_nan,
+    gf_disinf = is_infinite,
+    gf_disfinite = is_finite,
+);
+
+predicate!(
+    f32,
+    gf_fisnan = is_nan,
+    gf_fisinf = is_infinite,
+    gf_fisfinite = is_finite,
+);
+
+constant!(
+    f64,
+    gf_dpi = core::f64::consts::PI,
+    gf_dtau = core::f64::consts::TAU,
+    gf_de = core::f64::consts::E,
+    gf_dinf = f64::INFINITY,
+    gf_dnan = f64::NAN,
+);
+
+constant!(
+    f32,
+    gf_fpi = core::f32::consts::PI,
+    gf_ftau = core::f32::consts::TAU,
+    gf_fe = core::f32::consts::E,
+    gf_finf = f32::INFINITY,
+    gf_fnan = f32::NAN,
+);
+
 /// `strlen`, for a `CString`.
 ///
 /// The other half of the string pair, and the reason it is a separate type: a

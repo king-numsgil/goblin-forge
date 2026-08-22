@@ -71,6 +71,38 @@ export const POINTER_ADDRESS = "address";
  * that has three per-platform workarounds, one of which is a hard link error
  * on Mach-O. A Rust symbol needs no workaround on any of them.
  */
+/**
+ * `std/math`'s names, whose symbol is always `gf_` followed by the name.
+ *
+ * Written as the rule rather than as seventy-two pairs. The pairs would be
+ * seventy-two chances for one right-hand side to say something the rule does
+ * not, and the one that did would surface as an unresolved external with no
+ * file and no line — which is the shape of failure the allowlist exists to
+ * prevent, arriving through the allowlist itself.
+ *
+ * Two of everything, because there are two float widths and neither promotes.
+ * `d` is `f64` and `f` is `f32`; there is deliberately no unprefixed spelling,
+ * because a single `sin` would have to pick a width for every caller that did
+ * not.
+ */
+const MATH_NAMES: readonly string[] = [
+    "dsin", "dcos", "dtan", "dasin", "dacos", "datan", "datan2",
+    "dsinh", "dcosh", "dtanh",
+    "dexp", "dexp2", "dlog", "dlog2", "dlog10", "dpow", "dsqrt", "dcbrt", "dhypot",
+    "dfloor", "dceil", "dround", "dtrunc", "dabs",
+    "dfmod", "dmin", "dmax", "dcopysign",
+    "disnan", "disinf", "disfinite",
+    "dpi", "dtau", "de", "dinf", "dnan",
+
+    "fsin", "fcos", "ftan", "fasin", "facos", "fatan", "fatan2",
+    "fsinh", "fcosh", "ftanh",
+    "fexp", "fexp2", "flog", "flog2", "flog10", "fpow", "fsqrt", "fcbrt", "fhypot",
+    "ffloor", "fceil", "fround", "ftrunc", "fabs",
+    "ffmod", "fmin", "fmax", "fcopysign",
+    "fisnan", "fisinf", "fisfinite",
+    "fpi", "ftau", "fe", "finf", "fnan",
+];
+
 export const STD_MODULES: ReadonlyMap<string, ReadonlyMap<string, string>> = new Map([
     [
         "std/alloc",
@@ -105,6 +137,7 @@ export const STD_MODULES: ReadonlyMap<string, ReadonlyMap<string, string>> = new
             ["stderr", "gf_stderr"],
         ]),
     ],
+    ["std/math", new Map(MATH_NAMES.map((name): [string, string] => [name, `gf_${name}`]))],
 ]);
 
 /**

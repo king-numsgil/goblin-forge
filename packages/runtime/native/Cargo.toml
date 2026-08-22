@@ -27,6 +27,18 @@ crate-type = ["staticlib", "cdylib"]
 # machinery this crate is arranged to leave out.
 libc = { version = "0.2", default-features = false }
 libmimalloc-sys = { version = "0.1.49", features = ["extended"] }
+# `std/math`, in Rust rather than the platform's libm — and not for purity.
+#
+# Two reasons, and the first is a link failure. Nothing adds `-lm` to a Goblin
+# link: `system_libs` is the user's list, so a runtime that referenced `sin`
+# would fail to link on every Linux program that did not think to ask for a
+# library it never mentioned.
+#
+# The second is that this crate is a port of MUSL's libm and therefore gives the
+# *same* answer on all three targets. The platforms' own libms disagree in the
+# last ulp, and this project asserts on printed output — so a shared `sin` is
+# the difference between one expected string and three.
+libm = { version = "0.2", default-features = false }
 
 [profile.release]
 opt-level = 3
