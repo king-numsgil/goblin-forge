@@ -11,6 +11,7 @@
 
 import type { Operand, Place } from "@goblin-forge/backend";
 import {
+    columnTypeOf,
     commonType,
     erase,
     isFloatType,
@@ -414,6 +415,22 @@ export abstract class WidthPass extends Emitter {
         }
         const through =
             subject.type.kind === "reference" ? subject.type.referent : subject.type;
+
+        // `m[0]` is `m.c0` and `v[1]` is `v.y` — a field, not an element at a
+        // stride. The lowerer refuses a non-literal index and says why; this
+        // only has to give the answer's width (DECISIONS §22).
+        const linalg = linalgFromMachine(through);
+        if (linalg !== undefined) {
+            const column = columnTypeOf(linalg);
+            return typed(
+                column !== undefined
+                    ? linalgStruct(column)
+                    : linalg.element === "bool"
+                        ? {kind: "bool"}
+                        : {kind: "scalar", name: linalg.element},
+            );
+        }
+
         const element = elementTypeOf(through);
         if (element === undefined) {
             this.outer.unsupported(
@@ -1027,6 +1044,16 @@ export abstract class WidthPass extends Emitter {
                 return found.mutating
                     ? typed({kind: "reference", referent: linalgStruct(type)})
                     : value;
+            // `m.mulVec(v)` — a matrix operation whose result is one of its
+            // columns rather than a matrix.
+            case "column": {
+                const column = columnTypeOf(type);
+                if (column === undefined) {
+                    this.outer.unsupported(access, `\`${name}\`, which has no column type`);
+                    return ERROR;
+                }
+                return typed(linalgStruct(column));
+            }
             case "scalar":
                 return typed(
                     type.element === "bool"

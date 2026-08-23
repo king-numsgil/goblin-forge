@@ -175,8 +175,16 @@ none of the steps above applies to them: there is no `gf_*` symbol, nothing in
 The single source of truth is `packages/checker/src/linalg.ts`, and three
 things read it — `erase()` for the layout, the lowerer for the arithmetic, and
 a generator for the declarations. Adding an operation is a row in `LINALG_OPS`
-and a case in `compose()` in `packages/forge/src/lower/linalg.ts`; the backend
-is not involved, because it only ever sees SIMD primitives.
+(or `LINALG_MAT_OPS`) and a case in `compose()` in
+`packages/forge/src/lower/linalg.ts`; a constructor is a row in `LINALG_CTORS`.
+The backend is not involved either way, because it only ever sees SIMD
+primitives.
+
+Matrices live in `packages/forge/src/lower/linalg-matrix.ts`, reached from the
+shared dispatch through two `protected abstract` hooks. **A matrix is columns
+of a vector type** — `dmat3` is a struct of three `dvec3` — which is why
+`add`, `sub`, `scale`, `negate` and `equals` on a matrix reuse the vector arms
+unchanged and only five operations are matrix-specific.
 
 **After changing that table, run `bun run build:linalg`.** It rewrites the
 generated block of `global.d.ts` in place. Skipping it leaves the compiler

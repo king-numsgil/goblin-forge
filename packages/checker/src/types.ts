@@ -15,6 +15,7 @@
 import ts from "typescript";
 
 import {
+    columnTypeOf,
     LINALG_MODULE,
     LINALG_TYPES,
     type LinalgType,
@@ -688,8 +689,30 @@ function declaringModuleOf(node: ts.Node): string | null {
     return null;
 }
 
-/** The struct a linear-algebra type erases to: its fields, and nothing else. */
+/**
+ * The struct a linear-algebra type erases to: its fields, and nothing else.
+ *
+ * A matrix's fields are its **columns**, each the column vector's own struct.
+ * Nested aggregates are inline, so a `dmat3` is three `dvec3` back to back —
+ * 72 bytes, the layout a graphics API expects — and its columns are ordinary
+ * field projections rather than anything this module had to invent.
+ */
 export function linalgStruct(found: LinalgType): MachineType {
+    if (found.family === "mat") {
+        const column = columnTypeOf(found);
+        if (column === undefined) {
+            throw new ErasureError(
+                `\`${found.name}\` names a column type that does not exist.`,
+                "GF9001",
+            );
+        }
+        const columnStruct = linalgStruct(column);
+        return {
+            kind: "struct",
+            name: linalgStructName(found),
+            fields: found.fields.map((field) => ({name: field, type: columnStruct})),
+        };
+    }
     return {
         kind: "struct",
         name: linalgStructName(found),

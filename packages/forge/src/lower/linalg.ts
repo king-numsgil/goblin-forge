@@ -33,9 +33,12 @@ import {
     type TyId,
 } from "@goblin-forge/backend";
 import {
+    columnTypeOf,
+    type LinalgCtor,
     type LinalgOp,
     type LinalgType,
     type MachineType,
+    linalgCtorOf,
     linalgFromMachine,
     linalgMethodOf,
     linalgNamedBy,
@@ -453,7 +456,7 @@ export abstract class LinalgLowerer extends IntrinsicLowerer {
     }
 
     /** `a.x === b.x && a.y === b.y && …`, without the short-circuit. */
-    private laneWiseEquals(
+    protected laneWiseEquals(
         at: ts.Node,
         left: LocalId,
         right: LocalId,
@@ -493,6 +496,239 @@ export abstract class LinalgLowerer extends IntrinsicLowerer {
                     });
         }
         return all ?? this.temporaryTyped(at, bool, {kind: "Default"});
+    }
+
+    // -- what matrices need from here -----------------------------------------
+    //
+    // The matrix algorithms live in `linalg-matrix.ts`: one subject, and one
+    // long enough that keeping it here would have doubled this file. They are
+    // reached through these two hooks rather than by the dispatch moving down a
+    // level, because the dispatch is the same for both families and there
+    // should be exactly one of it.
+
+    /** `A.mul(B)`, `m.transpose()`, `m.inverse()` — see `linalg-matrix.ts`. */
+    protected abstract matrixCompose(
+        at: ts.Node,
+        call: LinalgCall,
+        self: Typed,
+        args: readonly Typed[],
+    ): { value: Typed } | { columns: LocalId[] } | undefined;
+
+    /** `dmat4.perspective(…)` and its siblings — see `linalg-matrix.ts`. */
+    protected abstract matrixCtor(
+        expression: ts.CallExpression,
+        type: LinalgType,
+        ctor: LinalgCtor,
+        args: readonly ts.Expression[],
+    ): Typed | undefined;
+
+    /**
+     * `m[0]` and `v[1]` — a **constant** index into a linear-algebra type.
+     *
+     * A field projection, because these are structs rather than arrays: `m[0]`
+     * is `m.c0` written the way a shader writes it, and it costs no arithmetic.
+     *
+     * A *computed* index is deliberately refused. Components are not at a
+     * uniform stride once a padded type is involved — an `aligned_dvec3`'s
+     * three components sit in four lanes — so `v[i]` would need either a bounds
+     * check this language does not have for structs or a stride that is a lie
+     * for half the types. Naming the component is always available and always
+     * correct.
+     */
+    protected linalgElementPlace(
+        expression: ts.ElementAccessExpression,
+        subject: Typed,
+        type: LinalgType,
+    ): { place: Place; element: MachineType } | undefined {
+        const argument = expression.argumentExpression;
+        if (!ts.isNumericLiteral(argument) || /[.eE]/.test(argument.getText())) {
+            this.outer.error(
+                argument,
+                "GF0002",
+                `a \`${type.name}\` can only be indexed by a literal, because its ` +
+                `${type.family === "mat" ? "columns" : "components"} are fields rather than ` +
+                "elements at a stride. Name the " +
+                `${type.family === "mat" ? "column" : "component"} — ` +
+                `\`${type.family === "mat" ? "m.c0" : "v.x"}\` — or index by a constant.`,
+            );
+            return undefined;
+        }
+
+        const index = Number(argument.getText());
+        if (!Number.isInteger(index) || index < 0 || index >= type.components.length) {
+            this.outer.error(
+                argument,
+                "GF0164",
+                `\`${type.name}\` has ${type.components.length} ` +
+                `${type.family === "mat" ? "columns" : "components"}, so \`${index}\` is ` +
+                "outside it." +
+                (type.padded
+                    ? " Its padding is not a component and cannot be reached."
+                    : ""),
+            );
+            return undefined;
+        }
+
+        const place = this.linalgPlace(expression, subject);
+        if (place === undefined) {
+            return undefined;
+        }
+        const column = columnTypeOf(type);
+        return {
+            place: this.columnPlace(place, index),
+            element:
+                column === undefined ? this.componentType(type) : this.linalgStructOf(column),
+        };
+    }
+
+    /** One evaluated scalar argument, coerced to the element type. */
+    protected scalarArgument(
+        at: ts.Node,
+        type: LinalgType,
+        argument: ts.Expression | undefined,
+    ): Operand | undefined {
+        if (argument === undefined) {
+            this.outer.unsupported(at, `a \`${type.name}\` argument that is missing`);
+            return undefined;
+        }
+        const component = this.componentType(type);
+        const value = this.value(argument, component);
+        const coerced = value && this.coerce(argument, value, component);
+        if (coerced === undefined) {
+            return undefined;
+        }
+        // Read repeatedly, so the operand has to be one that can be: a
+        // temporary consumed once would be moved out of by its first use.
+        return this.repeatable(coerced);
+    }
+
+    /** A scalar binary operation on two element-typed values. */
+    protected scalarOp(
+        at: ts.Node,
+        op: "Add" | "Sub" | "Mul" | "Div",
+        type: LinalgType,
+        lhs: Typed,
+        rhs: Typed,
+    ): Typed {
+        return this.temporaryTyped(at, this.componentType(type), {
+            kind: "Binary",
+            op,
+            lhs: this.forRead(lhs),
+            rhs: this.forRead(rhs),
+        });
+    }
+
+    /** `-x`, on an element-typed value. */
+    protected scalarNeg(at: ts.Node, type: LinalgType, value: Typed): Typed {
+        return this.temporaryTyped(at, this.componentType(type), {
+            kind: "Unary",
+            op: "Neg",
+            operand: this.forRead(value),
+        });
+    }
+
+    /** An element-typed literal. */
+    protected scalarConst(at: ts.Node, type: LinalgType, value: number): Typed {
+        return {operand: this.componentConst(at, type, value), type: this.componentType(type)};
+    }
+
+    /** One lane of a vector, as a scalar. */
+    protected laneOf(at: ts.Node, type: LinalgType, vector: LocalId, lane: number): Typed {
+        return this.temporaryTyped(at, this.componentType(type), {
+            kind: "SimdExtract",
+            vector: this.simdRead(vector),
+            lane,
+        });
+    }
+
+    /**
+     * `gf_dsin` and friends, at the element's width.
+     *
+     * The transform builders are the only part of `std/linalg` that needs a
+     * transcendental, and they get it from the same runtime `std/math` calls a
+     * user would — DECISIONS §21's surface, reached from the inside.
+     */
+    protected mathCall(at: ts.Expression, type: LinalgType, fn: string, x: Typed): Typed | undefined {
+        const prefix = type.element === "f32" ? "f" : "d";
+        return this.callRuntime(at, `gf_${prefix}${fn}`, [x], this.componentType(type));
+    }
+
+    /**
+     * The place of one column of a matrix.
+     *
+     * An ordinary field projection, because a matrix *is* a struct of columns —
+     * which is the whole reason matrices needed so little new machinery.
+     */
+    protected columnPlace(place: Place, column: number): Place {
+        return {...place, projection: [...place.projection, {kind: "Field", value: FieldId(column)}]};
+    }
+
+    /** Load every column of a matrix into its own vector. */
+    protected loadColumns(
+        at: ts.Node,
+        subject: Typed,
+        type: LinalgType,
+        column: LinalgType,
+    ): LocalId[] | undefined {
+        const place = this.linalgPlace(at, subject);
+        if (place === undefined) {
+            return undefined;
+        }
+        return type.components.map((_, index) =>
+            this.simdLocal(at, column, {
+                kind: "SimdLoad",
+                source: this.columnPlace(place, index),
+                ty: this.simdTy(column),
+            }),
+        );
+    }
+
+    /**
+     * Build a matrix value from its columns.
+     *
+     * Each column is written with an `Init` through a field projection rather
+     * than the whole matrix being assembled as one aggregate, because the
+     * columns are already *in vector registers* — going through an aggregate
+     * would mean storing each one to a temporary and copying it back in.
+     */
+    protected matrixValue(at: ts.Node, type: LinalgType, columns: readonly LocalId[]): Typed {
+        const machine = this.linalgStructOf(type);
+        const local = this.f.addLocal({
+            ty: this.outer.tyOf(machine, at),
+            storage: "Temporary",
+            span: this.outer.span(at),
+        });
+        this.temporaries.push(local);
+        this.push({kind: "StorageLive", value: local});
+        for (const [index, column] of columns.entries()) {
+            this.push({
+                kind: "Init",
+                place: this.columnPlace(placeOf(local), index),
+                rvalue: {kind: "SimdStore", vector: this.simdRead(column)},
+            });
+        }
+        return {
+            operand: {kind: "Copy", value: placeOf(local)},
+            type: machine,
+            temporary: local,
+        };
+    }
+
+    /** A vector built from one scalar per lane, padding included. */
+    protected vectorFromLanes(
+        at: ts.Node,
+        column: LinalgType,
+        lanes: readonly Typed[],
+    ): LocalId {
+        const filled = [...lanes.map((lane) => this.forRead(lane))];
+        while (filled.length < column.fields.length) {
+            filled.push(this.componentConst(at, column, 0));
+        }
+        return this.simdLocal(at, column, {
+            kind: "SimdFromParts",
+            lanes: filled,
+            ty: this.simdTy(column),
+        });
     }
 
     // -- entry points ---------------------------------------------------------
@@ -614,54 +850,54 @@ export abstract class LinalgLowerer extends IntrinsicLowerer {
         const name = access.name.text;
         const args = [...expression.arguments];
 
-        // The constants. `zero` and `one` are every component; `splat` is a
-        // named component; the unit axes are one component set and the rest
-        // clear. All four build an aggregate rather than reaching the vector
-        // unit, for the reason `new` does.
-        if (name === "zero" || name === "one") {
-            const value = name === "one" ? 1 : 0;
-            return this.buildValue(
-                expression,
-                type,
-                type.components.map(() => this.componentConst(expression, type, value)),
-            );
-        }
-        if (name === "splat") {
-            const component = this.componentType(type);
-            const argument = args[0];
-            if (argument === undefined) {
-                this.outer.unsupported(expression, "`splat` with no value");
-                return undefined;
+        // The constructors, from the table. Everything a *vector* builds is an
+        // aggregate literal rather than a trip through the vector unit, for the
+        // reason `new` is; everything a *matrix* builds is columns, and lives
+        // next door in `linalg-matrix.ts`.
+        const built = linalgCtorOf(name, type);
+        if (built !== undefined) {
+            if (built.ctor.kind === "from") {
+                return this.#convert(expression, type, args);
             }
-            const value = this.value(argument, component);
-            const coerced = value && this.coerce(argument, value, component);
-            if (coerced === undefined) {
-                return undefined;
+            if (type.family === "mat") {
+                return this.matrixCtor(expression, type, built.ctor, args);
             }
-            // Read repeatedly, so the operand has to be one that can be: a
-            // temporary consumed once would be moved out of by the first lane.
-            const operand = this.repeatable(coerced);
-            return this.buildValue(
-                expression,
-                type,
-                type.components.map(() => operand),
-            );
-        }
-        const axis = type.components.findIndex(
-            (component) => name === `unit${component.toUpperCase()}`,
-        );
-        if (axis !== -1) {
-            return this.buildValue(
-                expression,
-                type,
-                type.components.map((_, index) =>
-                    this.componentConst(expression, type, index === axis ? 1 : 0),
-                ),
-            );
-        }
-
-        if (name === "from") {
-            return this.#convert(expression, type, args);
+            switch (built.ctor.kind) {
+                case "zero":
+                case "one": {
+                    const value = built.ctor.kind === "one" ? 1 : 0;
+                    return this.buildValue(
+                        expression,
+                        type,
+                        type.components.map(() => this.componentConst(expression, type, value)),
+                    );
+                }
+                case "unit":
+                    return this.buildValue(
+                        expression,
+                        type,
+                        type.components.map((_, index) =>
+                            this.componentConst(expression, type, index === built.axis ? 1 : 0),
+                        ),
+                    );
+                case "splat": {
+                    const operand = this.scalarArgument(expression, type, args[0]);
+                    if (operand === undefined) {
+                        return undefined;
+                    }
+                    return this.buildValue(
+                        expression,
+                        type,
+                        type.components.map(() => operand),
+                    );
+                }
+                default:
+                    this.outer.unsupported(
+                        access,
+                        `\`${name}\` on \`${type.name}\``,
+                    );
+                    return undefined;
+            }
         }
 
         // Everything else is an operation whose receiver was written as the
@@ -788,22 +1024,57 @@ export abstract class LinalgLowerer extends IntrinsicLowerer {
             return undefined;
         }
 
+        const column = columnTypeOf(type);
         const evaluated: Typed[] = [];
         for (const [index, argument] of args.entries()) {
+            const kind = op.params[index];
             const expected =
-                op.params[index] === "vector"
+                kind === "vector"
                     ? this.linalgStructOf(type)
-                    : this.componentType(type);
+                    : kind === "column"
+                        ? this.linalgStructOf(column ?? type)
+                        : this.componentType(type);
             const value = this.value(argument, expected);
             if (value === undefined) {
                 return undefined;
             }
             const coerced =
-                op.params[index] === "vector" ? value : this.coerce(argument, value, expected);
+                kind === "scalar" ? this.coerce(argument, value, expected) : value;
             if (coerced === undefined) {
                 return undefined;
             }
             evaluated.push(coerced);
+        }
+
+        // A matrix works column by column, so it never loads "the receiver"
+        // into one register and the shared path below does not fit.
+        if (type.family === "mat") {
+            const result = this.matrixCompose(expression, call, receiver, evaluated);
+            if (result === undefined) {
+                return undefined;
+            }
+            if ("value" in result) {
+                return result.value;
+            }
+            if (!call.mutating) {
+                return this.matrixValue(expression, type, result.columns);
+            }
+            const target = this.linalgPlace(expression, receiver);
+            if (target === undefined) {
+                return undefined;
+            }
+            for (const [index, vector] of result.columns.entries()) {
+                this.push({
+                    kind: "Assign",
+                    place: this.columnPlace(target, index),
+                    rvalue: {kind: "SimdStore", vector: this.simdRead(vector)},
+                });
+            }
+            const referent = this.linalgStructOf(type);
+            return {
+                operand: this.refTo(expression, target, referent),
+                type: {kind: "reference", referent},
+            };
         }
 
         const self = this.loadVector(expression, receiver, type);

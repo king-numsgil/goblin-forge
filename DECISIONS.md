@@ -2017,6 +2017,77 @@ None of that is a preference this compiler is entitled to. It is written down
 because a projection matrix that disagrees with its consumer produces a black
 screen and no diagnostic whatsoever.
 
+### A matrix is columns of a vector type
+
+`dmat3` is a struct of three `dvec3`. Not nine `f64`, and not a `FixedArray` of
+them — the *column vector type*, whatever that type already is.
+
+This is the decision that made matrices cheap, and every consequence of it is
+one that would otherwise have been work:
+
+- **Layout is free.** Nested aggregates are inline, so a `dmat3` is 72 bytes and
+  a `dmat4` is 128, which is what a graphics API expects, and nothing new lays
+  anything out.
+- **A column is a field projection.** `m.c0` and `m[0]` are the projection the
+  compiler already had; no stride, no index, no bounds question.
+- **Five operations came for free.** `add`, `sub`, `scale`, `negate` and
+  `equals` on a matrix are the vector operations of the same name, once per
+  column. They carry the same `kind` in the table and reach the same arms of the
+  lowerer. Only `mul`, `mulVec`, `transpose`, `determinant` and `inverse` are
+  new.
+- **`aligned_` composes.** An `aligned_dmat3` is three `aligned_dvec3`, so
+  padding is a property of the column type and the matrix inherits it without
+  knowing what it is.
+
+**Column-major is what makes `M * v` the cheap one.** The result is a linear
+combination of the matrix's *columns*, weighted by the vector's components — so
+it is one multiply and `order - 1` fused multiply-adds over whole vectors, with
+nothing transposed and no horizontal add anywhere. Row-major would need a dot
+product per row: the same arithmetic with a lane reduction in the middle of it.
+`A.mul(B)` is then the same routine run once per column of `B`.
+
+`A.mul(B)` means `A * B`, so **`B` is applied first** and the receiver is the
+outer transform. That is GLM's convention and it is the one thing here a test
+asserts by building the same transform both ways round, because getting it
+backwards yields a matrix rather than an error.
+
+### `determinant` and `inverse` are cofactor expansion, deliberately
+
+Memoised on the sub-determinant, generic over the order, and not fast. A 4x4
+inverse is a few hundred instructions.
+
+The alternative is the hand-written closed form per order — three unrelated
+pages of arithmetic, each correct or not in a way no reviewer can check by
+reading. This is arithmetic where being *checkably* right matters more than
+being quick: a wrong inverse is a plausible matrix, and it is plausible all the
+way to the screen. The memo table is what keeps the naive expansion from
+recomputing the same 2x2 minor thirty times; sixteen 4x4 cofactors share nine of
+them.
+
+The suite checks it the only way worth checking: `M * M⁻¹` against the identity,
+for a matrix with no special structure. Diagonal matrices invert correctly under
+several wrong implementations.
+
+A singular matrix divides by zero and produces infinities, like every other
+total operation in this language (§21). There is no error to return.
+
+### Indexing is a literal, and it is a field
+
+`m[0]` is `m.c0` and `v[1]` is `v.y` — the spelling a shader uses, lowered to
+the field projection it already was.
+
+**A computed index is refused**, with a message that says to name the component.
+Two reasons, and the second is the real one: the components are fields rather
+than elements at a stride, and for a padded type they are not even evenly spaced
+— an `aligned_dvec3`'s three components live in four lanes. A `v[i]` would need
+either a bounds check this language does not have for struct fields or a stride
+that is a lie for half the types in the module.
+
+The declared index signature is therefore *wider* than what compiles. That is
+deliberate: tsc accepting `v[i]` and the compiler refusing it with a caret and a
+suggestion is a better failure than tsc rejecting it with a structural-typing
+message about an index signature that does not exist.
+
 ### The module is `std/linalg`
 
 Not `std/vector`, which was the first name and collided immediately: `T[]` is

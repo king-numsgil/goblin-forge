@@ -1447,6 +1447,8 @@ declare module "std/linalg" {
         x: f64;
         y: f64;
 
+        [index: number]: f64;
+
         /** Every component zero. */
         static zero(): dvec2;
 
@@ -1495,9 +1497,9 @@ declare module "std/linalg" {
         max(other: dvec2): dvec2;
         maxMut(other: dvec2): Reference<dvec2>;
 
-        static scale(a: dvec2, b: f64): dvec2;
-        scale(other: f64): dvec2;
-        scaleMut(other: f64): Reference<dvec2>;
+        static scale(a: dvec2, by: f64): dvec2;
+        scale(by: f64): dvec2;
+        scaleMut(by: f64): Reference<dvec2>;
 
         static addScaled(a: dvec2, b: dvec2, t: f64): dvec2;
         addScaled(other: dvec2, t: f64): dvec2;
@@ -1539,9 +1541,9 @@ declare module "std/linalg" {
         lerp(other: dvec2, t: f64): dvec2;
         lerpMut(other: dvec2, t: f64): Reference<dvec2>;
 
-        static clamp(a: dvec2, b: dvec2, t: dvec2): dvec2;
-        clamp(other: dvec2, t: dvec2): dvec2;
-        clampMut(other: dvec2, t: dvec2): Reference<dvec2>;
+        static clamp(a: dvec2, low: dvec2, high: dvec2): dvec2;
+        clamp(low: dvec2, high: dvec2): dvec2;
+        clampMut(low: dvec2, high: dvec2): Reference<dvec2>;
 
         static dot(a: dvec2, b: dvec2): f64;
         dot(other: dvec2): f64;
@@ -1577,6 +1579,8 @@ declare module "std/linalg" {
         x: f64;
         y: f64;
         z: f64;
+
+        [index: number]: f64;
 
         /** Every component zero. */
         static zero(): dvec3;
@@ -1631,9 +1635,9 @@ declare module "std/linalg" {
         max(other: dvec3): dvec3;
         maxMut(other: dvec3): Reference<dvec3>;
 
-        static scale(a: dvec3, b: f64): dvec3;
-        scale(other: f64): dvec3;
-        scaleMut(other: f64): Reference<dvec3>;
+        static scale(a: dvec3, by: f64): dvec3;
+        scale(by: f64): dvec3;
+        scaleMut(by: f64): Reference<dvec3>;
 
         static addScaled(a: dvec3, b: dvec3, t: f64): dvec3;
         addScaled(other: dvec3, t: f64): dvec3;
@@ -1675,9 +1679,9 @@ declare module "std/linalg" {
         lerp(other: dvec3, t: f64): dvec3;
         lerpMut(other: dvec3, t: f64): Reference<dvec3>;
 
-        static clamp(a: dvec3, b: dvec3, t: dvec3): dvec3;
-        clamp(other: dvec3, t: dvec3): dvec3;
-        clampMut(other: dvec3, t: dvec3): Reference<dvec3>;
+        static clamp(a: dvec3, low: dvec3, high: dvec3): dvec3;
+        clamp(low: dvec3, high: dvec3): dvec3;
+        clampMut(low: dvec3, high: dvec3): Reference<dvec3>;
 
         static cross(a: dvec3, b: dvec3): dvec3;
         cross(other: dvec3): dvec3;
@@ -1717,6 +1721,8 @@ declare module "std/linalg" {
         y: f64;
         z: f64;
         w: f64;
+
+        [index: number]: f64;
 
         /** Every component zero. */
         static zero(): dvec4;
@@ -1772,9 +1778,9 @@ declare module "std/linalg" {
         max(other: dvec4): dvec4;
         maxMut(other: dvec4): Reference<dvec4>;
 
-        static scale(a: dvec4, b: f64): dvec4;
-        scale(other: f64): dvec4;
-        scaleMut(other: f64): Reference<dvec4>;
+        static scale(a: dvec4, by: f64): dvec4;
+        scale(by: f64): dvec4;
+        scaleMut(by: f64): Reference<dvec4>;
 
         static addScaled(a: dvec4, b: dvec4, t: f64): dvec4;
         addScaled(other: dvec4, t: f64): dvec4;
@@ -1816,9 +1822,9 @@ declare module "std/linalg" {
         lerp(other: dvec4, t: f64): dvec4;
         lerpMut(other: dvec4, t: f64): Reference<dvec4>;
 
-        static clamp(a: dvec4, b: dvec4, t: dvec4): dvec4;
-        clamp(other: dvec4, t: dvec4): dvec4;
-        clampMut(other: dvec4, t: dvec4): Reference<dvec4>;
+        static clamp(a: dvec4, low: dvec4, high: dvec4): dvec4;
+        clamp(low: dvec4, high: dvec4): dvec4;
+        clampMut(low: dvec4, high: dvec4): Reference<dvec4>;
 
         static dot(a: dvec4, b: dvec4): f64;
         dot(other: dvec4): f64;
@@ -1855,6 +1861,8 @@ declare module "std/linalg" {
         x: f64;
         y: f64;
         z: f64;
+
+        [index: number]: f64;
 
         /** Every component zero. */
         static zero(): aligned_dvec3;
@@ -1909,9 +1917,9 @@ declare module "std/linalg" {
         max(other: aligned_dvec3): aligned_dvec3;
         maxMut(other: aligned_dvec3): Reference<aligned_dvec3>;
 
-        static scale(a: aligned_dvec3, b: f64): aligned_dvec3;
-        scale(other: f64): aligned_dvec3;
-        scaleMut(other: f64): Reference<aligned_dvec3>;
+        static scale(a: aligned_dvec3, by: f64): aligned_dvec3;
+        scale(by: f64): aligned_dvec3;
+        scaleMut(by: f64): Reference<aligned_dvec3>;
 
         static addScaled(a: aligned_dvec3, b: aligned_dvec3, t: f64): aligned_dvec3;
         addScaled(other: aligned_dvec3, t: f64): aligned_dvec3;
@@ -1953,9 +1961,9 @@ declare module "std/linalg" {
         lerp(other: aligned_dvec3, t: f64): aligned_dvec3;
         lerpMut(other: aligned_dvec3, t: f64): Reference<aligned_dvec3>;
 
-        static clamp(a: aligned_dvec3, b: aligned_dvec3, t: aligned_dvec3): aligned_dvec3;
-        clamp(other: aligned_dvec3, t: aligned_dvec3): aligned_dvec3;
-        clampMut(other: aligned_dvec3, t: aligned_dvec3): Reference<aligned_dvec3>;
+        static clamp(a: aligned_dvec3, low: aligned_dvec3, high: aligned_dvec3): aligned_dvec3;
+        clamp(low: aligned_dvec3, high: aligned_dvec3): aligned_dvec3;
+        clampMut(low: aligned_dvec3, high: aligned_dvec3): Reference<aligned_dvec3>;
 
         static cross(a: aligned_dvec3, b: aligned_dvec3): aligned_dvec3;
         cross(other: aligned_dvec3): aligned_dvec3;
@@ -1981,6 +1989,376 @@ declare module "std/linalg" {
     }
 
     /**
+     * `dmat2` — a 2x2 matrix: 2 `dvec2` columns.
+     *
+     * **Column-major, with column vectors.** `m.c0` is the first column and
+     * `a.mul(b)` applies `b` first, which is GLM's convention and therefore what
+     * every shader and every piece of reference code assumes.
+     *
+     * 32 bytes, packed — the layout a graphics API expects.
+     */
+    export class dmat2 {
+        private readonly __linalg: "dmat2";
+
+        constructor(c0: dvec2, c1: dvec2);
+
+        c0: dvec2;
+        c1: dvec2;
+
+        [index: number]: dvec2;
+
+        /** Every entry zero. */
+        static zero(): dmat2;
+
+        /** Ones on the diagonal, zero elsewhere. */
+        static identity(): dmat2;
+
+        /**
+         * Convert from another 2x2 matrix.
+         *
+         * Explicit because nothing here converts on its own: an `fvec3` is not a
+         * narrower `dvec3`, and a conversion that costs precision should cost a
+         * word at the site that pays for it.
+         */
+        static from(value: fmat2): dmat2;
+
+        /** Built from its columns, left to right. */
+        static fromColumns(c0: dvec2, c1: dvec2): dmat2;
+
+        /** A counter-clockwise rotation by `angle` radians. */
+        static fromRotation(angle: f64): dmat2;
+
+        static add(a: dmat2, b: dmat2): dmat2;
+        add(other: dmat2): dmat2;
+        addMut(other: dmat2): Reference<dmat2>;
+
+        static sub(a: dmat2, b: dmat2): dmat2;
+        sub(other: dmat2): dmat2;
+        subMut(other: dmat2): Reference<dmat2>;
+
+        static scale(a: dmat2, by: f64): dmat2;
+        scale(by: f64): dmat2;
+        scaleMut(by: f64): Reference<dmat2>;
+
+        static negate(a: dmat2): dmat2;
+        negate(): dmat2;
+        negateMut(): Reference<dmat2>;
+
+        static mul(a: dmat2, b: dmat2): dmat2;
+        mul(other: dmat2): dmat2;
+        mulMut(other: dmat2): Reference<dmat2>;
+
+        static mulVec(a: dmat2, v: dvec2): dvec2;
+        mulVec(v: dvec2): dvec2;
+
+        static transpose(a: dmat2): dmat2;
+        transpose(): dmat2;
+        transposeMut(): Reference<dmat2>;
+
+        static inverse(a: dmat2): dmat2;
+        inverse(): dmat2;
+        inverseMut(): Reference<dmat2>;
+
+        static determinant(a: dmat2): f64;
+        determinant(): f64;
+
+        static equals(a: dmat2, b: dmat2): boolean;
+        equals(other: dmat2): boolean;
+    }
+
+    /**
+     * `dmat3` — a 3x3 matrix: 3 `dvec3` columns.
+     *
+     * **Column-major, with column vectors.** `m.c0` is the first column and
+     * `a.mul(b)` applies `b` first, which is GLM's convention and therefore what
+     * every shader and every piece of reference code assumes.
+     *
+     * 72 bytes, packed — the layout a graphics API expects.
+     * `aligned_dmat3` is the same maths with padded columns, and faster.
+     */
+    export class dmat3 {
+        private readonly __linalg: "dmat3";
+
+        constructor(c0: dvec3, c1: dvec3, c2: dvec3);
+
+        c0: dvec3;
+        c1: dvec3;
+        c2: dvec3;
+
+        [index: number]: dvec3;
+
+        /** Every entry zero. */
+        static zero(): dmat3;
+
+        /** Ones on the diagonal, zero elsewhere. */
+        static identity(): dmat3;
+
+        /**
+         * Convert from another 3x3 matrix.
+         *
+         * Explicit because nothing here converts on its own: an `fvec3` is not a
+         * narrower `dvec3`, and a conversion that costs precision should cost a
+         * word at the site that pays for it.
+         */
+        static from(value: aligned_dmat3): dmat3;
+        static from(value: fmat3): dmat3;
+        static from(value: aligned_fmat3): dmat3;
+
+        /** Built from its columns, left to right. */
+        static fromColumns(c0: dvec3, c1: dvec3, c2: dvec3): dmat3;
+
+        /** A scale along each axis. */
+        static fromScale(scale: dvec3): dmat3;
+
+        /** A right-handed rotation about the x-axis, in radians. */
+        static fromRotationX(angle: f64): dmat3;
+
+        /** A right-handed rotation about the y-axis, in radians. */
+        static fromRotationY(angle: f64): dmat3;
+
+        /** A right-handed rotation about the z-axis, in radians. */
+        static fromRotationZ(angle: f64): dmat3;
+
+        /** A right-handed rotation about an arbitrary axis. The axis is normalised first. */
+        static fromAxisAngle(axis: dvec3, angle: f64): dmat3;
+
+        static add(a: dmat3, b: dmat3): dmat3;
+        add(other: dmat3): dmat3;
+        addMut(other: dmat3): Reference<dmat3>;
+
+        static sub(a: dmat3, b: dmat3): dmat3;
+        sub(other: dmat3): dmat3;
+        subMut(other: dmat3): Reference<dmat3>;
+
+        static scale(a: dmat3, by: f64): dmat3;
+        scale(by: f64): dmat3;
+        scaleMut(by: f64): Reference<dmat3>;
+
+        static negate(a: dmat3): dmat3;
+        negate(): dmat3;
+        negateMut(): Reference<dmat3>;
+
+        static mul(a: dmat3, b: dmat3): dmat3;
+        mul(other: dmat3): dmat3;
+        mulMut(other: dmat3): Reference<dmat3>;
+
+        static mulVec(a: dmat3, v: dvec3): dvec3;
+        mulVec(v: dvec3): dvec3;
+
+        static transpose(a: dmat3): dmat3;
+        transpose(): dmat3;
+        transposeMut(): Reference<dmat3>;
+
+        static inverse(a: dmat3): dmat3;
+        inverse(): dmat3;
+        inverseMut(): Reference<dmat3>;
+
+        static determinant(a: dmat3): f64;
+        determinant(): f64;
+
+        static equals(a: dmat3, b: dmat3): boolean;
+        equals(other: dmat3): boolean;
+    }
+
+    /**
+     * `dmat4` — a 4x4 matrix: 4 `dvec4` columns.
+     *
+     * **Column-major, with column vectors.** `m.c0` is the first column and
+     * `a.mul(b)` applies `b` first, which is GLM's convention and therefore what
+     * every shader and every piece of reference code assumes.
+     *
+     * 128 bytes, packed — the layout a graphics API expects.
+     */
+    export class dmat4 {
+        private readonly __linalg: "dmat4";
+
+        constructor(c0: dvec4, c1: dvec4, c2: dvec4, c3: dvec4);
+
+        c0: dvec4;
+        c1: dvec4;
+        c2: dvec4;
+        c3: dvec4;
+
+        [index: number]: dvec4;
+
+        /** Every entry zero. */
+        static zero(): dmat4;
+
+        /** Ones on the diagonal, zero elsewhere. */
+        static identity(): dmat4;
+
+        /**
+         * Convert from another 4x4 matrix.
+         *
+         * Explicit because nothing here converts on its own: an `fvec3` is not a
+         * narrower `dvec3`, and a conversion that costs precision should cost a
+         * word at the site that pays for it.
+         */
+        static from(value: fmat4): dmat4;
+
+        /** Built from its columns, left to right. */
+        static fromColumns(c0: dvec4, c1: dvec4, c2: dvec4, c3: dvec4): dmat4;
+
+        /** A scale along each axis. */
+        static fromScale(scale: dvec3): dmat4;
+
+        /** A right-handed rotation about the x-axis, in radians. */
+        static fromRotationX(angle: f64): dmat4;
+
+        /** A right-handed rotation about the y-axis, in radians. */
+        static fromRotationY(angle: f64): dmat4;
+
+        /** A right-handed rotation about the z-axis, in radians. */
+        static fromRotationZ(angle: f64): dmat4;
+
+        /** A right-handed rotation about an arbitrary axis. The axis is normalised first. */
+        static fromAxisAngle(axis: dvec3, angle: f64): dmat4;
+
+        /** An affine translation. */
+        static fromTranslation(offset: dvec3): dmat4;
+
+        /** A right-handed view matrix looking from `eye` towards `center`. */
+        static lookAt(eye: dvec3, center: dvec3, up: dvec3): dmat4;
+
+        /** A right-handed perspective projection: vertical field of view in radians, aspect ratio, near and far. Depth maps to `[0, 1]` and `+Y` stays up. */
+        static perspective(fovY: f64, aspect: f64, near: f64, far: f64): dmat4;
+
+        /** A right-handed orthographic projection from `left`, `right`, `bottom`, `top`, `near`, `far`. Depth maps to `[0, 1]` and `+Y` stays up. */
+        static ortho(left: f64, right: f64, bottom: f64, top: f64, near: f64, far: f64): dmat4;
+
+        static add(a: dmat4, b: dmat4): dmat4;
+        add(other: dmat4): dmat4;
+        addMut(other: dmat4): Reference<dmat4>;
+
+        static sub(a: dmat4, b: dmat4): dmat4;
+        sub(other: dmat4): dmat4;
+        subMut(other: dmat4): Reference<dmat4>;
+
+        static scale(a: dmat4, by: f64): dmat4;
+        scale(by: f64): dmat4;
+        scaleMut(by: f64): Reference<dmat4>;
+
+        static negate(a: dmat4): dmat4;
+        negate(): dmat4;
+        negateMut(): Reference<dmat4>;
+
+        static mul(a: dmat4, b: dmat4): dmat4;
+        mul(other: dmat4): dmat4;
+        mulMut(other: dmat4): Reference<dmat4>;
+
+        static mulVec(a: dmat4, v: dvec4): dvec4;
+        mulVec(v: dvec4): dvec4;
+
+        static transpose(a: dmat4): dmat4;
+        transpose(): dmat4;
+        transposeMut(): Reference<dmat4>;
+
+        static inverse(a: dmat4): dmat4;
+        inverse(): dmat4;
+        inverseMut(): Reference<dmat4>;
+
+        static determinant(a: dmat4): f64;
+        determinant(): f64;
+
+        static equals(a: dmat4, b: dmat4): boolean;
+        equals(other: dmat4): boolean;
+    }
+
+    /**
+     * `aligned_dmat3` — a 3x3 matrix: 3 `aligned_dvec3` columns.
+     *
+     * **Column-major, with column vectors.** `m.c0` is the first column and
+     * `a.mul(b)` applies `b` first, which is GLM's convention and therefore what
+     * every shader and every piece of reference code assumes.
+     *
+     * Each column carries a lane of padding: 96 bytes against `dmat3`'s
+     * 72, and every column operation is one instruction rather than two.
+     */
+    export class aligned_dmat3 {
+        private readonly __linalg: "aligned_dmat3";
+
+        constructor(c0: aligned_dvec3, c1: aligned_dvec3, c2: aligned_dvec3);
+
+        c0: aligned_dvec3;
+        c1: aligned_dvec3;
+        c2: aligned_dvec3;
+
+        [index: number]: aligned_dvec3;
+
+        /** Every entry zero. */
+        static zero(): aligned_dmat3;
+
+        /** Ones on the diagonal, zero elsewhere. */
+        static identity(): aligned_dmat3;
+
+        /**
+         * Convert from another 3x3 matrix.
+         *
+         * Explicit because nothing here converts on its own: an `fvec3` is not a
+         * narrower `dvec3`, and a conversion that costs precision should cost a
+         * word at the site that pays for it.
+         */
+        static from(value: dmat3): aligned_dmat3;
+        static from(value: fmat3): aligned_dmat3;
+        static from(value: aligned_fmat3): aligned_dmat3;
+
+        /** Built from its columns, left to right. */
+        static fromColumns(c0: aligned_dvec3, c1: aligned_dvec3, c2: aligned_dvec3): aligned_dmat3;
+
+        /** A scale along each axis. */
+        static fromScale(scale: dvec3): aligned_dmat3;
+
+        /** A right-handed rotation about the x-axis, in radians. */
+        static fromRotationX(angle: f64): aligned_dmat3;
+
+        /** A right-handed rotation about the y-axis, in radians. */
+        static fromRotationY(angle: f64): aligned_dmat3;
+
+        /** A right-handed rotation about the z-axis, in radians. */
+        static fromRotationZ(angle: f64): aligned_dmat3;
+
+        /** A right-handed rotation about an arbitrary axis. The axis is normalised first. */
+        static fromAxisAngle(axis: dvec3, angle: f64): aligned_dmat3;
+
+        static add(a: aligned_dmat3, b: aligned_dmat3): aligned_dmat3;
+        add(other: aligned_dmat3): aligned_dmat3;
+        addMut(other: aligned_dmat3): Reference<aligned_dmat3>;
+
+        static sub(a: aligned_dmat3, b: aligned_dmat3): aligned_dmat3;
+        sub(other: aligned_dmat3): aligned_dmat3;
+        subMut(other: aligned_dmat3): Reference<aligned_dmat3>;
+
+        static scale(a: aligned_dmat3, by: f64): aligned_dmat3;
+        scale(by: f64): aligned_dmat3;
+        scaleMut(by: f64): Reference<aligned_dmat3>;
+
+        static negate(a: aligned_dmat3): aligned_dmat3;
+        negate(): aligned_dmat3;
+        negateMut(): Reference<aligned_dmat3>;
+
+        static mul(a: aligned_dmat3, b: aligned_dmat3): aligned_dmat3;
+        mul(other: aligned_dmat3): aligned_dmat3;
+        mulMut(other: aligned_dmat3): Reference<aligned_dmat3>;
+
+        static mulVec(a: aligned_dmat3, v: aligned_dvec3): aligned_dvec3;
+        mulVec(v: aligned_dvec3): aligned_dvec3;
+
+        static transpose(a: aligned_dmat3): aligned_dmat3;
+        transpose(): aligned_dmat3;
+        transposeMut(): Reference<aligned_dmat3>;
+
+        static inverse(a: aligned_dmat3): aligned_dmat3;
+        inverse(): aligned_dmat3;
+        inverseMut(): Reference<aligned_dmat3>;
+
+        static determinant(a: aligned_dmat3): f64;
+        determinant(): f64;
+
+        static equals(a: aligned_dmat3, b: aligned_dmat3): boolean;
+        equals(other: aligned_dmat3): boolean;
+    }
+
+    /**
      * `fvec2` — 2 `f32`.
      *
      * Exactly 2 components and no padding — 8 bytes — so an array of
@@ -1993,6 +2371,8 @@ declare module "std/linalg" {
 
         x: f32;
         y: f32;
+
+        [index: number]: f32;
 
         /** Every component zero. */
         static zero(): fvec2;
@@ -2042,9 +2422,9 @@ declare module "std/linalg" {
         max(other: fvec2): fvec2;
         maxMut(other: fvec2): Reference<fvec2>;
 
-        static scale(a: fvec2, b: f32): fvec2;
-        scale(other: f32): fvec2;
-        scaleMut(other: f32): Reference<fvec2>;
+        static scale(a: fvec2, by: f32): fvec2;
+        scale(by: f32): fvec2;
+        scaleMut(by: f32): Reference<fvec2>;
 
         static addScaled(a: fvec2, b: fvec2, t: f32): fvec2;
         addScaled(other: fvec2, t: f32): fvec2;
@@ -2086,9 +2466,9 @@ declare module "std/linalg" {
         lerp(other: fvec2, t: f32): fvec2;
         lerpMut(other: fvec2, t: f32): Reference<fvec2>;
 
-        static clamp(a: fvec2, b: fvec2, t: fvec2): fvec2;
-        clamp(other: fvec2, t: fvec2): fvec2;
-        clampMut(other: fvec2, t: fvec2): Reference<fvec2>;
+        static clamp(a: fvec2, low: fvec2, high: fvec2): fvec2;
+        clamp(low: fvec2, high: fvec2): fvec2;
+        clampMut(low: fvec2, high: fvec2): Reference<fvec2>;
 
         static dot(a: fvec2, b: fvec2): f32;
         dot(other: fvec2): f32;
@@ -2124,6 +2504,8 @@ declare module "std/linalg" {
         x: f32;
         y: f32;
         z: f32;
+
+        [index: number]: f32;
 
         /** Every component zero. */
         static zero(): fvec3;
@@ -2178,9 +2560,9 @@ declare module "std/linalg" {
         max(other: fvec3): fvec3;
         maxMut(other: fvec3): Reference<fvec3>;
 
-        static scale(a: fvec3, b: f32): fvec3;
-        scale(other: f32): fvec3;
-        scaleMut(other: f32): Reference<fvec3>;
+        static scale(a: fvec3, by: f32): fvec3;
+        scale(by: f32): fvec3;
+        scaleMut(by: f32): Reference<fvec3>;
 
         static addScaled(a: fvec3, b: fvec3, t: f32): fvec3;
         addScaled(other: fvec3, t: f32): fvec3;
@@ -2222,9 +2604,9 @@ declare module "std/linalg" {
         lerp(other: fvec3, t: f32): fvec3;
         lerpMut(other: fvec3, t: f32): Reference<fvec3>;
 
-        static clamp(a: fvec3, b: fvec3, t: fvec3): fvec3;
-        clamp(other: fvec3, t: fvec3): fvec3;
-        clampMut(other: fvec3, t: fvec3): Reference<fvec3>;
+        static clamp(a: fvec3, low: fvec3, high: fvec3): fvec3;
+        clamp(low: fvec3, high: fvec3): fvec3;
+        clampMut(low: fvec3, high: fvec3): Reference<fvec3>;
 
         static cross(a: fvec3, b: fvec3): fvec3;
         cross(other: fvec3): fvec3;
@@ -2264,6 +2646,8 @@ declare module "std/linalg" {
         y: f32;
         z: f32;
         w: f32;
+
+        [index: number]: f32;
 
         /** Every component zero. */
         static zero(): fvec4;
@@ -2319,9 +2703,9 @@ declare module "std/linalg" {
         max(other: fvec4): fvec4;
         maxMut(other: fvec4): Reference<fvec4>;
 
-        static scale(a: fvec4, b: f32): fvec4;
-        scale(other: f32): fvec4;
-        scaleMut(other: f32): Reference<fvec4>;
+        static scale(a: fvec4, by: f32): fvec4;
+        scale(by: f32): fvec4;
+        scaleMut(by: f32): Reference<fvec4>;
 
         static addScaled(a: fvec4, b: fvec4, t: f32): fvec4;
         addScaled(other: fvec4, t: f32): fvec4;
@@ -2363,9 +2747,9 @@ declare module "std/linalg" {
         lerp(other: fvec4, t: f32): fvec4;
         lerpMut(other: fvec4, t: f32): Reference<fvec4>;
 
-        static clamp(a: fvec4, b: fvec4, t: fvec4): fvec4;
-        clamp(other: fvec4, t: fvec4): fvec4;
-        clampMut(other: fvec4, t: fvec4): Reference<fvec4>;
+        static clamp(a: fvec4, low: fvec4, high: fvec4): fvec4;
+        clamp(low: fvec4, high: fvec4): fvec4;
+        clampMut(low: fvec4, high: fvec4): Reference<fvec4>;
 
         static dot(a: fvec4, b: fvec4): f32;
         dot(other: fvec4): f32;
@@ -2402,6 +2786,8 @@ declare module "std/linalg" {
         x: f32;
         y: f32;
         z: f32;
+
+        [index: number]: f32;
 
         /** Every component zero. */
         static zero(): aligned_fvec3;
@@ -2456,9 +2842,9 @@ declare module "std/linalg" {
         max(other: aligned_fvec3): aligned_fvec3;
         maxMut(other: aligned_fvec3): Reference<aligned_fvec3>;
 
-        static scale(a: aligned_fvec3, b: f32): aligned_fvec3;
-        scale(other: f32): aligned_fvec3;
-        scaleMut(other: f32): Reference<aligned_fvec3>;
+        static scale(a: aligned_fvec3, by: f32): aligned_fvec3;
+        scale(by: f32): aligned_fvec3;
+        scaleMut(by: f32): Reference<aligned_fvec3>;
 
         static addScaled(a: aligned_fvec3, b: aligned_fvec3, t: f32): aligned_fvec3;
         addScaled(other: aligned_fvec3, t: f32): aligned_fvec3;
@@ -2500,9 +2886,9 @@ declare module "std/linalg" {
         lerp(other: aligned_fvec3, t: f32): aligned_fvec3;
         lerpMut(other: aligned_fvec3, t: f32): Reference<aligned_fvec3>;
 
-        static clamp(a: aligned_fvec3, b: aligned_fvec3, t: aligned_fvec3): aligned_fvec3;
-        clamp(other: aligned_fvec3, t: aligned_fvec3): aligned_fvec3;
-        clampMut(other: aligned_fvec3, t: aligned_fvec3): Reference<aligned_fvec3>;
+        static clamp(a: aligned_fvec3, low: aligned_fvec3, high: aligned_fvec3): aligned_fvec3;
+        clamp(low: aligned_fvec3, high: aligned_fvec3): aligned_fvec3;
+        clampMut(low: aligned_fvec3, high: aligned_fvec3): Reference<aligned_fvec3>;
 
         static cross(a: aligned_fvec3, b: aligned_fvec3): aligned_fvec3;
         cross(other: aligned_fvec3): aligned_fvec3;
@@ -2525,6 +2911,376 @@ declare module "std/linalg" {
 
         static equals(a: aligned_fvec3, b: aligned_fvec3): boolean;
         equals(other: aligned_fvec3): boolean;
+    }
+
+    /**
+     * `fmat2` — a 2x2 matrix: 2 `fvec2` columns.
+     *
+     * **Column-major, with column vectors.** `m.c0` is the first column and
+     * `a.mul(b)` applies `b` first, which is GLM's convention and therefore what
+     * every shader and every piece of reference code assumes.
+     *
+     * 16 bytes, packed — the layout a graphics API expects.
+     */
+    export class fmat2 {
+        private readonly __linalg: "fmat2";
+
+        constructor(c0: fvec2, c1: fvec2);
+
+        c0: fvec2;
+        c1: fvec2;
+
+        [index: number]: fvec2;
+
+        /** Every entry zero. */
+        static zero(): fmat2;
+
+        /** Ones on the diagonal, zero elsewhere. */
+        static identity(): fmat2;
+
+        /**
+         * Convert from another 2x2 matrix.
+         *
+         * Explicit because nothing here converts on its own: an `fvec3` is not a
+         * narrower `dvec3`, and a conversion that costs precision should cost a
+         * word at the site that pays for it.
+         */
+        static from(value: dmat2): fmat2;
+
+        /** Built from its columns, left to right. */
+        static fromColumns(c0: fvec2, c1: fvec2): fmat2;
+
+        /** A counter-clockwise rotation by `angle` radians. */
+        static fromRotation(angle: f32): fmat2;
+
+        static add(a: fmat2, b: fmat2): fmat2;
+        add(other: fmat2): fmat2;
+        addMut(other: fmat2): Reference<fmat2>;
+
+        static sub(a: fmat2, b: fmat2): fmat2;
+        sub(other: fmat2): fmat2;
+        subMut(other: fmat2): Reference<fmat2>;
+
+        static scale(a: fmat2, by: f32): fmat2;
+        scale(by: f32): fmat2;
+        scaleMut(by: f32): Reference<fmat2>;
+
+        static negate(a: fmat2): fmat2;
+        negate(): fmat2;
+        negateMut(): Reference<fmat2>;
+
+        static mul(a: fmat2, b: fmat2): fmat2;
+        mul(other: fmat2): fmat2;
+        mulMut(other: fmat2): Reference<fmat2>;
+
+        static mulVec(a: fmat2, v: fvec2): fvec2;
+        mulVec(v: fvec2): fvec2;
+
+        static transpose(a: fmat2): fmat2;
+        transpose(): fmat2;
+        transposeMut(): Reference<fmat2>;
+
+        static inverse(a: fmat2): fmat2;
+        inverse(): fmat2;
+        inverseMut(): Reference<fmat2>;
+
+        static determinant(a: fmat2): f32;
+        determinant(): f32;
+
+        static equals(a: fmat2, b: fmat2): boolean;
+        equals(other: fmat2): boolean;
+    }
+
+    /**
+     * `fmat3` — a 3x3 matrix: 3 `fvec3` columns.
+     *
+     * **Column-major, with column vectors.** `m.c0` is the first column and
+     * `a.mul(b)` applies `b` first, which is GLM's convention and therefore what
+     * every shader and every piece of reference code assumes.
+     *
+     * 36 bytes, packed — the layout a graphics API expects.
+     * `aligned_fmat3` is the same maths with padded columns, and faster.
+     */
+    export class fmat3 {
+        private readonly __linalg: "fmat3";
+
+        constructor(c0: fvec3, c1: fvec3, c2: fvec3);
+
+        c0: fvec3;
+        c1: fvec3;
+        c2: fvec3;
+
+        [index: number]: fvec3;
+
+        /** Every entry zero. */
+        static zero(): fmat3;
+
+        /** Ones on the diagonal, zero elsewhere. */
+        static identity(): fmat3;
+
+        /**
+         * Convert from another 3x3 matrix.
+         *
+         * Explicit because nothing here converts on its own: an `fvec3` is not a
+         * narrower `dvec3`, and a conversion that costs precision should cost a
+         * word at the site that pays for it.
+         */
+        static from(value: dmat3): fmat3;
+        static from(value: aligned_dmat3): fmat3;
+        static from(value: aligned_fmat3): fmat3;
+
+        /** Built from its columns, left to right. */
+        static fromColumns(c0: fvec3, c1: fvec3, c2: fvec3): fmat3;
+
+        /** A scale along each axis. */
+        static fromScale(scale: fvec3): fmat3;
+
+        /** A right-handed rotation about the x-axis, in radians. */
+        static fromRotationX(angle: f32): fmat3;
+
+        /** A right-handed rotation about the y-axis, in radians. */
+        static fromRotationY(angle: f32): fmat3;
+
+        /** A right-handed rotation about the z-axis, in radians. */
+        static fromRotationZ(angle: f32): fmat3;
+
+        /** A right-handed rotation about an arbitrary axis. The axis is normalised first. */
+        static fromAxisAngle(axis: fvec3, angle: f32): fmat3;
+
+        static add(a: fmat3, b: fmat3): fmat3;
+        add(other: fmat3): fmat3;
+        addMut(other: fmat3): Reference<fmat3>;
+
+        static sub(a: fmat3, b: fmat3): fmat3;
+        sub(other: fmat3): fmat3;
+        subMut(other: fmat3): Reference<fmat3>;
+
+        static scale(a: fmat3, by: f32): fmat3;
+        scale(by: f32): fmat3;
+        scaleMut(by: f32): Reference<fmat3>;
+
+        static negate(a: fmat3): fmat3;
+        negate(): fmat3;
+        negateMut(): Reference<fmat3>;
+
+        static mul(a: fmat3, b: fmat3): fmat3;
+        mul(other: fmat3): fmat3;
+        mulMut(other: fmat3): Reference<fmat3>;
+
+        static mulVec(a: fmat3, v: fvec3): fvec3;
+        mulVec(v: fvec3): fvec3;
+
+        static transpose(a: fmat3): fmat3;
+        transpose(): fmat3;
+        transposeMut(): Reference<fmat3>;
+
+        static inverse(a: fmat3): fmat3;
+        inverse(): fmat3;
+        inverseMut(): Reference<fmat3>;
+
+        static determinant(a: fmat3): f32;
+        determinant(): f32;
+
+        static equals(a: fmat3, b: fmat3): boolean;
+        equals(other: fmat3): boolean;
+    }
+
+    /**
+     * `fmat4` — a 4x4 matrix: 4 `fvec4` columns.
+     *
+     * **Column-major, with column vectors.** `m.c0` is the first column and
+     * `a.mul(b)` applies `b` first, which is GLM's convention and therefore what
+     * every shader and every piece of reference code assumes.
+     *
+     * 64 bytes, packed — the layout a graphics API expects.
+     */
+    export class fmat4 {
+        private readonly __linalg: "fmat4";
+
+        constructor(c0: fvec4, c1: fvec4, c2: fvec4, c3: fvec4);
+
+        c0: fvec4;
+        c1: fvec4;
+        c2: fvec4;
+        c3: fvec4;
+
+        [index: number]: fvec4;
+
+        /** Every entry zero. */
+        static zero(): fmat4;
+
+        /** Ones on the diagonal, zero elsewhere. */
+        static identity(): fmat4;
+
+        /**
+         * Convert from another 4x4 matrix.
+         *
+         * Explicit because nothing here converts on its own: an `fvec3` is not a
+         * narrower `dvec3`, and a conversion that costs precision should cost a
+         * word at the site that pays for it.
+         */
+        static from(value: dmat4): fmat4;
+
+        /** Built from its columns, left to right. */
+        static fromColumns(c0: fvec4, c1: fvec4, c2: fvec4, c3: fvec4): fmat4;
+
+        /** A scale along each axis. */
+        static fromScale(scale: fvec3): fmat4;
+
+        /** A right-handed rotation about the x-axis, in radians. */
+        static fromRotationX(angle: f32): fmat4;
+
+        /** A right-handed rotation about the y-axis, in radians. */
+        static fromRotationY(angle: f32): fmat4;
+
+        /** A right-handed rotation about the z-axis, in radians. */
+        static fromRotationZ(angle: f32): fmat4;
+
+        /** A right-handed rotation about an arbitrary axis. The axis is normalised first. */
+        static fromAxisAngle(axis: fvec3, angle: f32): fmat4;
+
+        /** An affine translation. */
+        static fromTranslation(offset: fvec3): fmat4;
+
+        /** A right-handed view matrix looking from `eye` towards `center`. */
+        static lookAt(eye: fvec3, center: fvec3, up: fvec3): fmat4;
+
+        /** A right-handed perspective projection: vertical field of view in radians, aspect ratio, near and far. Depth maps to `[0, 1]` and `+Y` stays up. */
+        static perspective(fovY: f32, aspect: f32, near: f32, far: f32): fmat4;
+
+        /** A right-handed orthographic projection from `left`, `right`, `bottom`, `top`, `near`, `far`. Depth maps to `[0, 1]` and `+Y` stays up. */
+        static ortho(left: f32, right: f32, bottom: f32, top: f32, near: f32, far: f32): fmat4;
+
+        static add(a: fmat4, b: fmat4): fmat4;
+        add(other: fmat4): fmat4;
+        addMut(other: fmat4): Reference<fmat4>;
+
+        static sub(a: fmat4, b: fmat4): fmat4;
+        sub(other: fmat4): fmat4;
+        subMut(other: fmat4): Reference<fmat4>;
+
+        static scale(a: fmat4, by: f32): fmat4;
+        scale(by: f32): fmat4;
+        scaleMut(by: f32): Reference<fmat4>;
+
+        static negate(a: fmat4): fmat4;
+        negate(): fmat4;
+        negateMut(): Reference<fmat4>;
+
+        static mul(a: fmat4, b: fmat4): fmat4;
+        mul(other: fmat4): fmat4;
+        mulMut(other: fmat4): Reference<fmat4>;
+
+        static mulVec(a: fmat4, v: fvec4): fvec4;
+        mulVec(v: fvec4): fvec4;
+
+        static transpose(a: fmat4): fmat4;
+        transpose(): fmat4;
+        transposeMut(): Reference<fmat4>;
+
+        static inverse(a: fmat4): fmat4;
+        inverse(): fmat4;
+        inverseMut(): Reference<fmat4>;
+
+        static determinant(a: fmat4): f32;
+        determinant(): f32;
+
+        static equals(a: fmat4, b: fmat4): boolean;
+        equals(other: fmat4): boolean;
+    }
+
+    /**
+     * `aligned_fmat3` — a 3x3 matrix: 3 `aligned_fvec3` columns.
+     *
+     * **Column-major, with column vectors.** `m.c0` is the first column and
+     * `a.mul(b)` applies `b` first, which is GLM's convention and therefore what
+     * every shader and every piece of reference code assumes.
+     *
+     * Each column carries a lane of padding: 48 bytes against `fmat3`'s
+     * 36, and every column operation is one instruction rather than two.
+     */
+    export class aligned_fmat3 {
+        private readonly __linalg: "aligned_fmat3";
+
+        constructor(c0: aligned_fvec3, c1: aligned_fvec3, c2: aligned_fvec3);
+
+        c0: aligned_fvec3;
+        c1: aligned_fvec3;
+        c2: aligned_fvec3;
+
+        [index: number]: aligned_fvec3;
+
+        /** Every entry zero. */
+        static zero(): aligned_fmat3;
+
+        /** Ones on the diagonal, zero elsewhere. */
+        static identity(): aligned_fmat3;
+
+        /**
+         * Convert from another 3x3 matrix.
+         *
+         * Explicit because nothing here converts on its own: an `fvec3` is not a
+         * narrower `dvec3`, and a conversion that costs precision should cost a
+         * word at the site that pays for it.
+         */
+        static from(value: dmat3): aligned_fmat3;
+        static from(value: aligned_dmat3): aligned_fmat3;
+        static from(value: fmat3): aligned_fmat3;
+
+        /** Built from its columns, left to right. */
+        static fromColumns(c0: aligned_fvec3, c1: aligned_fvec3, c2: aligned_fvec3): aligned_fmat3;
+
+        /** A scale along each axis. */
+        static fromScale(scale: fvec3): aligned_fmat3;
+
+        /** A right-handed rotation about the x-axis, in radians. */
+        static fromRotationX(angle: f32): aligned_fmat3;
+
+        /** A right-handed rotation about the y-axis, in radians. */
+        static fromRotationY(angle: f32): aligned_fmat3;
+
+        /** A right-handed rotation about the z-axis, in radians. */
+        static fromRotationZ(angle: f32): aligned_fmat3;
+
+        /** A right-handed rotation about an arbitrary axis. The axis is normalised first. */
+        static fromAxisAngle(axis: fvec3, angle: f32): aligned_fmat3;
+
+        static add(a: aligned_fmat3, b: aligned_fmat3): aligned_fmat3;
+        add(other: aligned_fmat3): aligned_fmat3;
+        addMut(other: aligned_fmat3): Reference<aligned_fmat3>;
+
+        static sub(a: aligned_fmat3, b: aligned_fmat3): aligned_fmat3;
+        sub(other: aligned_fmat3): aligned_fmat3;
+        subMut(other: aligned_fmat3): Reference<aligned_fmat3>;
+
+        static scale(a: aligned_fmat3, by: f32): aligned_fmat3;
+        scale(by: f32): aligned_fmat3;
+        scaleMut(by: f32): Reference<aligned_fmat3>;
+
+        static negate(a: aligned_fmat3): aligned_fmat3;
+        negate(): aligned_fmat3;
+        negateMut(): Reference<aligned_fmat3>;
+
+        static mul(a: aligned_fmat3, b: aligned_fmat3): aligned_fmat3;
+        mul(other: aligned_fmat3): aligned_fmat3;
+        mulMut(other: aligned_fmat3): Reference<aligned_fmat3>;
+
+        static mulVec(a: aligned_fmat3, v: aligned_fvec3): aligned_fvec3;
+        mulVec(v: aligned_fvec3): aligned_fvec3;
+
+        static transpose(a: aligned_fmat3): aligned_fmat3;
+        transpose(): aligned_fmat3;
+        transposeMut(): Reference<aligned_fmat3>;
+
+        static inverse(a: aligned_fmat3): aligned_fmat3;
+        inverse(): aligned_fmat3;
+        inverseMut(): Reference<aligned_fmat3>;
+
+        static determinant(a: aligned_fmat3): f32;
+        determinant(): f32;
+
+        static equals(a: aligned_fmat3, b: aligned_fmat3): boolean;
+        equals(other: aligned_fmat3): boolean;
     }
 }
 

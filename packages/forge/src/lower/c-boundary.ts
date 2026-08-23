@@ -21,9 +21,9 @@ import ts from "typescript";
 import { RUNTIME, STRING_FROM_BYTES, STRING_FROM_CSTRING } from "./tables.ts";
 import { CSTRING_TYPE, STRING, type Typed, typed, USIZE, VOID } from "./types.ts";
 import { fractionalLiteralIn, placeOf } from "./util.ts";
-import { LinalgLowerer } from "./linalg.ts";
+import { MatrixLowerer } from "./linalg-matrix.ts";
 
-export abstract class BoundaryLowerer extends LinalgLowerer {
+export abstract class BoundaryLowerer extends MatrixLowerer {
     /**
      * `cstring(s)` — borrow a `string`'s bytes as a raw `const char *`.
      *

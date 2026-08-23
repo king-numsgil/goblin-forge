@@ -2679,6 +2679,14 @@ export class BodyLowerer extends BoundaryLowerer {
             return undefined;
         }
 
+        // `m[0]` and `v[1]` — a field projection rather than an element at a
+        // stride, because these are structs (DECISIONS §22). Before the array
+        // path because a linear-algebra type is not one.
+        const linalg = this.linalgOf(subject.type);
+        if (linalg !== undefined) {
+            return this.linalgElementPlace(expression, subject, linalg);
+        }
+
         // An array first, so that a `Reference<T[]>` gets the `Deref` that reaches
         // its elements rather than being indexed as though it were the handle.
         const array = this.asArray(expression, subject);

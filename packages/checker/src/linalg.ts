@@ -55,14 +55,29 @@ export interface LinalgType {
     /** `aligned_dvec3` — the name written in source. */
     readonly name: string;
 
-    readonly family: "vec";
+    /**
+     * A vector, or a matrix of them.
+     *
+     * A matrix is **columns of a vector type**, not a flat block of scalars,
+     * and that is the whole of why matrices needed almost no new machinery:
+     * `dmat3` is a struct of three `dvec3`, so its layout comes from the
+     * existing rule that nested aggregates are inline, its columns are ordinary
+     * field projections, and every column operation is a vector operation that
+     * already worked.
+     */
+    readonly family: "vec" | "mat";
 
     readonly prefix: LinalgPrefix;
 
     /** What one component is. `bool` for a `bvec`. */
     readonly element: ScalarName | "bool";
 
-    /** The components a user can name, in order: `x`, `y`, `z`. */
+    /**
+     * The components a user can name, in order.
+     *
+     * `x`, `y`, `z` for a vector; `c0`, `c1`, `c2` — the *columns* — for a
+     * matrix.
+     */
     readonly components: readonly string[];
 
     /**
@@ -87,6 +102,21 @@ export interface LinalgType {
 
     /** Whether this type carries a lane of padding (`aligned_`). */
     readonly padded: boolean;
+
+    /**
+     * A matrix's column type, by name: `dmat3`'s is `dvec3`.
+     *
+     * Absent for a vector. Held as a name rather than as a {@link LinalgType}
+     * because the table is built one entry at a time and a direct reference
+     * would need it built twice.
+     */
+    readonly columnType?: string;
+
+    /**
+     * A matrix's order — 3 for a `dmat3`, which is both its column count and
+     * each column's component count. Square only, so one number says both.
+     */
+    readonly order?: number;
 }
 
 /**
@@ -132,11 +162,42 @@ function vector(prefix: LinalgPrefix, size: number, padded: boolean): LinalgType
 }
 
 /**
+ * A square matrix: `order` columns of the matching vector type.
+ *
+ * **Column-major, and column vectors.** `m.c0` is the first *column*, `M * v`
+ * is the transform, and `A.mul(B)` applies `B` first — GLM's convention, and
+ * therefore what every shader and every piece of reference code assumes
+ * (DECISIONS §22).
+ *
+ * The padded form pads each *column*, so an `aligned_dmat3` is three
+ * `aligned_dvec3`: 96 bytes against `dmat3`'s 72, and every column operation is
+ * one instruction rather than two.
+ */
+function matrix(prefix: LinalgPrefix, order: number, padded: boolean): LinalgType {
+    const columnType = `${padded ? "aligned_" : ""}${prefix}vec${order}`;
+    const columns = Array.from({length: order}, (_, index) => `c${index}`);
+    return {
+        name: `${padded ? "aligned_" : ""}${prefix}mat${order}`,
+        family: "mat",
+        prefix,
+        element: LINALG_ELEMENTS[prefix],
+        components: columns,
+        fields: columns,
+        // A matrix is not one register, so it has no lane count. Its columns do,
+        // and that is where every operation on it does its work.
+        lanes: null,
+        padded,
+        columnType,
+        order,
+    };
+}
+
+/**
  * Every type `std/linalg` declares, by name.
  *
- * Only the vector families so far. Matrices and quaternions are entries in this
- * same table when they land, which is the property the table exists for —
- * `mat3` is three `vec3` columns, so it needs no machinery this does not
+ * Vectors and square matrices. Quaternions are entries in this same table when
+ * they land, which is the property the table exists for — a `quat` is four
+ * lanes and a multiplication rule, and it needs no machinery this does not
  * already have.
  */
 export const LINALG_TYPES: ReadonlyMap<string, LinalgType> = new Map(
@@ -146,8 +207,15 @@ export const LINALG_TYPES: ReadonlyMap<string, LinalgType> = new Map(
         // fill their register exactly, and padding either would cost space for
         // no instruction saved.
         vector(prefix, 3, true),
+        ...[2, 3, 4].map((order) => matrix(prefix, order, false)),
+        matrix(prefix, 3, true),
     ]).map((type): [string, LinalgType] => [type.name, type]),
 );
+
+/** A matrix's column type, resolved. */
+export function columnTypeOf(type: LinalgType): LinalgType | undefined {
+    return type.columnType === undefined ? undefined : LINALG_TYPES.get(type.columnType);
+}
 
 // -- the operations -----------------------------------------------------------
 
@@ -178,7 +246,21 @@ export type LinalgOpKind =
     | "clamp"
     | "equals"
     /** `a + b * s`, one rounding. */
-    | "addScaled";
+    | "addScaled"
+    // -- matrices -------------------------------------------------------------
+    //
+    // `add`, `sub`, `scale`, `negate` and `equals` are **not** here: a matrix is
+    // columns of a vector type, so each of those is the vector operation of the
+    // same name applied per column, and they reuse the kinds above unchanged.
+    // That reuse is the payoff for making a matrix a struct of vectors rather
+    // than a flat block of scalars.
+    /** `A * B`, column-major: `B` is applied first. */
+    | "matMul"
+    /** `M * v`. */
+    | "matMulVec"
+    | "transpose"
+    | "determinant"
+    | "inverse";
 
 /**
  * The MIR's elementwise binary operations, by their own names.
@@ -195,11 +277,17 @@ export type LinalgBinOp = "Add" | "Sub" | "Mul" | "Div" | "Min" | "Max";
 /** The MIR's elementwise unary operations. */
 export type LinalgUnOp = "Neg" | "Abs" | "Sqrt" | "Floor" | "Ceil" | "Round" | "Trunc";
 
-/** What one parameter of an operation is. */
-export type LinalgParam = "vector" | "scalar";
+/**
+ * What one parameter of an operation is.
+ *
+ * `vector` means *the receiver's own type* — a `dvec3` for a `dvec3` operation,
+ * a `dmat4` for a `dmat4` one. `column` is a matrix's column vector, which is
+ * what `mulVec` takes, and means nothing on a vector.
+ */
+export type LinalgParam = "vector" | "scalar" | "column";
 
-/** What an operation hands back. */
-export type LinalgReturn = "vector" | "scalar" | "bool";
+/** What an operation hands back, in the same vocabulary. */
+export type LinalgReturn = "vector" | "scalar" | "bool" | "column";
 
 interface LinalgOpBase {
     readonly name: string;
@@ -288,6 +376,288 @@ export const LINALG_OPS: readonly LinalgOp[] = [
     {name: "equals", kind: "equals", params: ["vector"], returns: "bool"},
 ];
 
+/**
+ * The matrix operations.
+ *
+ * The first five are the *vector* kinds applied per column — `add` on a `dmat3`
+ * is `add` on each of its three `dvec3` — so they carry the same `kind` and the
+ * lowerer's existing arms do the work. Only the five below them are genuinely
+ * new, and every one of those is composed from vector operations too.
+ */
+export const LINALG_MAT_OPS: readonly LinalgOp[] = [
+    {name: "add", kind: "elementwise", op: "Add", params: ["vector"], returns: "vector"},
+    {name: "sub", kind: "elementwise", op: "Sub", params: ["vector"], returns: "vector"},
+    {name: "scale", kind: "scaled", op: "Mul", params: ["scalar"], returns: "vector"},
+    {name: "negate", kind: "unary", op: "Neg", params: [], returns: "vector"},
+
+    /**
+     * `A.mul(B)` is `A * B`, so **`B` is applied first**: the receiver is the
+     * outer transform. Column-major with column vectors, which is GLM's
+     * convention and therefore every shader's.
+     */
+    {name: "mul", kind: "matMul", params: ["vector"], returns: "vector"},
+    {name: "mulVec", kind: "matMulVec", params: ["column"], returns: "column"},
+    {name: "transpose", kind: "transpose", params: [], returns: "vector"},
+    {name: "inverse", kind: "inverse", params: [], returns: "vector"},
+    {name: "determinant", kind: "determinant", params: [], returns: "scalar"},
+
+    {name: "equals", kind: "equals", params: ["vector"], returns: "bool"},
+];
+
+/** The operations a type has, by family. */
+export function opsFor(type: LinalgType): readonly LinalgOp[] {
+    return type.family === "mat" ? LINALG_MAT_OPS : LINALG_OPS;
+}
+
+// -- constructors --------------------------------------------------------------
+
+/**
+ * What one parameter of a constructor is.
+ *
+ * `axis` is the *unpadded three-component* vector of the same element — a
+ * `dvec3` for a `dmat4`. Named separately from `column` because a `dmat4`'s
+ * column is a `dvec4` and a translation is not four numbers.
+ */
+export type LinalgCtorParam = "scalar" | "axis" | "column" | "self";
+
+export type LinalgCtorKind =
+    | "zero"
+    | "one"
+    | "splat"
+    | "unit"
+    | "from"
+    | "columns"
+    | "identity"
+    | "translation"
+    | "scaling"
+    | "rotationX"
+    | "rotationY"
+    | "rotationZ"
+    | "rotation2D"
+    | "axisAngle"
+    | "lookAt"
+    | "perspective"
+    | "ortho";
+
+export interface LinalgCtor {
+    readonly name: string;
+
+    readonly kind: LinalgCtorKind;
+
+    readonly params: readonly LinalgCtorParam[];
+
+    /**
+     * What each parameter is called, for the generated declaration.
+     *
+     * Spelled out because `perspective(fovY, aspect, near, far)` is four `f64`
+     * and the order is the entire content of the signature — `p0, p1, p2, p3`
+     * would be a declaration you have to read this file to use.
+     */
+    readonly names?: readonly string[];
+
+    /** Which family declares it. */
+    readonly family: "vec" | "mat";
+
+    /** Restricted to a matrix of exactly this order, or absent for all of them. */
+    readonly order?: number;
+
+    /**
+     * Restricted to matrices of order 3 *or* 4 — the two that carry a rotation
+     * basis. Spelled as a list because `order` alone cannot say "either".
+     */
+    readonly orders?: readonly number[];
+
+    /** A per-component doc line, for the generator. */
+    readonly doc?: string;
+}
+
+/**
+ * Every static that *builds* a value rather than operating on one.
+ *
+ * Kept apart from {@link LINALG_OPS} because these have no receiver and no
+ * uniform signature: `perspective` takes four scalars and `lookAt` takes three
+ * vectors, where every operation takes the receiver's own type or its
+ * component. Folding them into one table would mean an `params` field that
+ * meant something different depending on a sibling field.
+ *
+ * The projection builders are **Vulkan-through-SDL3**: depth in `[0, 1]` with
+ * near at 0, and `+Y` up in NDC as in world space, so no Y flip is baked in.
+ * DECISIONS §22 records why that is written down rather than defaulted — a
+ * projection that disagrees with its consumer produces a black screen and no
+ * diagnostic at all.
+ */
+export const LINALG_CTORS: readonly LinalgCtor[] = [
+    // -- vectors --------------------------------------------------------------
+    {name: "zero", kind: "zero", params: [], family: "vec", doc: "Every component zero."},
+    {name: "one", kind: "one", params: [], family: "vec", doc: "Every component one."},
+    {
+        name: "splat",
+        kind: "splat",
+        params: ["scalar"],
+        names: ["value"],
+        family: "vec",
+        doc: "Every component the same value.",
+    },
+    {name: "unit", kind: "unit", params: [], family: "vec"},
+    {name: "from", kind: "from", params: ["self"], family: "vec"},
+
+    // -- matrices -------------------------------------------------------------
+    {name: "zero", kind: "zero", params: [], family: "mat", doc: "Every entry zero."},
+    {
+        name: "identity",
+        kind: "identity",
+        params: [],
+        family: "mat",
+        doc: "Ones on the diagonal, zero elsewhere.",
+    },
+    {name: "from", kind: "from", params: ["self"], family: "mat"},
+    {
+        name: "fromColumns",
+        kind: "columns",
+        params: ["column"],
+        family: "mat",
+        doc: "Built from its columns, left to right.",
+    },
+
+    {
+        name: "fromRotation",
+        kind: "rotation2D",
+        params: ["scalar"],
+        names: ["angle"],
+        family: "mat",
+        order: 2,
+        doc: "A counter-clockwise rotation by `angle` radians.",
+    },
+
+    {
+        name: "fromScale",
+        kind: "scaling",
+        params: ["axis"],
+        names: ["scale"],
+        family: "mat",
+        orders: [3, 4],
+        doc: "A scale along each axis.",
+    },
+    {
+        name: "fromRotationX",
+        kind: "rotationX",
+        params: ["scalar"],
+        names: ["angle"],
+        family: "mat",
+        orders: [3, 4],
+        doc: "A right-handed rotation about the x-axis, in radians.",
+    },
+    {
+        name: "fromRotationY",
+        kind: "rotationY",
+        params: ["scalar"],
+        names: ["angle"],
+        family: "mat",
+        orders: [3, 4],
+        doc: "A right-handed rotation about the y-axis, in radians.",
+    },
+    {
+        name: "fromRotationZ",
+        kind: "rotationZ",
+        params: ["scalar"],
+        names: ["angle"],
+        family: "mat",
+        orders: [3, 4],
+        doc: "A right-handed rotation about the z-axis, in radians.",
+    },
+    {
+        name: "fromAxisAngle",
+        kind: "axisAngle",
+        params: ["axis", "scalar"],
+        names: ["axis", "angle"],
+        family: "mat",
+        orders: [3, 4],
+        doc: "A right-handed rotation about an arbitrary axis. The axis is normalised first.",
+    },
+
+    {
+        name: "fromTranslation",
+        kind: "translation",
+        params: ["axis"],
+        names: ["offset"],
+        family: "mat",
+        order: 4,
+        doc: "An affine translation.",
+    },
+    {
+        name: "lookAt",
+        kind: "lookAt",
+        params: ["axis", "axis", "axis"],
+        names: ["eye", "center", "up"],
+        family: "mat",
+        order: 4,
+        doc: "A right-handed view matrix looking from `eye` towards `center`.",
+    },
+    {
+        name: "perspective",
+        kind: "perspective",
+        params: ["scalar", "scalar", "scalar", "scalar"],
+        names: ["fovY", "aspect", "near", "far"],
+        family: "mat",
+        order: 4,
+        doc:
+            "A right-handed perspective projection: vertical field of view in radians, " +
+            "aspect ratio, near and far. Depth maps to `[0, 1]` and `+Y` stays up.",
+    },
+    {
+        name: "ortho",
+        kind: "ortho",
+        params: ["scalar", "scalar", "scalar", "scalar", "scalar", "scalar"],
+        names: ["left", "right", "bottom", "top", "near", "far"],
+        family: "mat",
+        order: 4,
+        doc:
+            "A right-handed orthographic projection from `left`, `right`, `bottom`, " +
+            "`top`, `near`, `far`. Depth maps to `[0, 1]` and `+Y` stays up.",
+    },
+];
+
+/** The constructors a type declares. */
+export function ctorsFor(type: LinalgType): readonly LinalgCtor[] {
+    return LINALG_CTORS.filter((ctor) => {
+        if (ctor.family !== type.family) {
+            return false;
+        }
+        const order = type.order ?? type.components.length;
+        if (ctor.order !== undefined && ctor.order !== order) {
+            return false;
+        }
+        return ctor.orders === undefined || ctor.orders.includes(order);
+    });
+}
+
+/**
+ * The constructor a static name refers to, if any.
+ *
+ * `unit` is the one whose *name* is per-component — `unitX`, `unitY` — so it is
+ * expanded here rather than being four table rows that would have to agree.
+ */
+export function linalgCtorOf(
+    name: string,
+    type: LinalgType,
+): { ctor: LinalgCtor; axis?: number } | undefined {
+    for (const ctor of ctorsFor(type)) {
+        if (ctor.kind === "unit") {
+            const axis = type.components.findIndex(
+                (component) => name === `unit${component.toUpperCase()}`,
+            );
+            if (axis !== -1) {
+                return {ctor, axis};
+            }
+            continue;
+        }
+        if (ctor.name === name) {
+            return {ctor};
+        }
+    }
+    return undefined;
+}
+
 /** Whether an operation applies to a given type. */
 export function appliesTo(op: LinalgOp, type: LinalgType): boolean {
     return op.components === undefined || op.components === type.components.length;
@@ -311,28 +681,27 @@ export function mutatingName(op: LinalgOp): string {
 // out of its reach. A shared question deserves one answer, not a protected
 // method and a copy of it.
 
-/** Every method name a linear-algebra type answers to, and what it means. */
-const METHODS: ReadonlyMap<string, { op: LinalgOp; mutating: boolean }> = new Map(
-    LINALG_OPS.flatMap((op) => {
-        const forms: [string, { op: LinalgOp; mutating: boolean }][] = [
-            [op.name, {op, mutating: false}],
-        ];
-        if (hasMutatingForm(op)) {
-            forms.push([mutatingName(op), {op, mutating: true}]);
-        }
-        return forms;
-    }),
-);
-
-/** The names that build a value rather than operating on one. */
-export function isLinalgConstructor(name: string, type: LinalgType): boolean {
-    return (
-        name === "zero" ||
-        name === "one" ||
-        name === "splat" ||
-        name === "from" ||
-        type.components.some((component) => name === `unit${component.toUpperCase()}`)
+/** Every method name a family answers to, and what each means. */
+function methodsOf(ops: readonly LinalgOp[]): ReadonlyMap<string, { op: LinalgOp; mutating: boolean }> {
+    return new Map(
+        ops.flatMap((op) => {
+            const forms: [string, { op: LinalgOp; mutating: boolean }][] = [
+                [op.name, {op, mutating: false}],
+            ];
+            if (hasMutatingForm(op)) {
+                forms.push([mutatingName(op), {op, mutating: true}]);
+            }
+            return forms;
+        }),
     );
+}
+
+const VEC_METHODS = methodsOf(LINALG_OPS);
+const MAT_METHODS = methodsOf(LINALG_MAT_OPS);
+
+/** Whether a static name builds a value rather than operating on one. */
+export function isLinalgConstructor(name: string, type: LinalgType): boolean {
+    return linalgCtorOf(name, type) !== undefined;
 }
 
 /** The operation a method name names on a given type, if it names one. */
@@ -340,7 +709,7 @@ export function linalgMethodOf(
     name: string,
     type: LinalgType,
 ): { op: LinalgOp; mutating: boolean } | undefined {
-    const found = METHODS.get(name);
+    const found = (type.family === "mat" ? MAT_METHODS : VEC_METHODS).get(name);
     if (found === undefined) {
         return undefined;
     }
