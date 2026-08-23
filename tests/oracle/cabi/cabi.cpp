@@ -20,6 +20,7 @@
 // what it received, so a mismatch shows up as a wrong number rather than as a
 // crash somewhere else.
 
+#include <cstddef>
 #include <cstdint>
 
 extern "C" {
@@ -295,5 +296,81 @@ int32_t gf_c_apply_pair(PairOp op, int32_t x, int32_t y) {
   Pair result = op(Pair{x, y});
   return result.x * 1000 + result.y;
 }
+
+// -- vertex blobs -------------------------------------------------------------
+//
+// The case a graphics API is: a run of interleaved vertices handed over as a
+// `void *`, a count and a stride, with the *C* side deciding what the bytes
+// mean. Nothing about the Goblin declaration reaches here — this file is
+// compiled by the platform's C++ compiler and its `Vertex` is written from
+// scratch — so agreement is agreement about layout and nothing else.
+//
+// `float pos[3]` rather than a vector type on purpose: what a `fvec3` has to
+// be, for this to work, is three floats and no padding.
+
+struct Vertex {
+  float pos[3];
+  float uv[2];
+  uint32_t mat;
+};
+
+/// What C makes of the layout, so the two sides can be compared directly.
+int32_t gf_c_vertex_size(void) { return (int32_t)sizeof(Vertex); }
+int32_t gf_c_vertex_align(void) { return (int32_t)alignof(Vertex); }
+int32_t gf_c_vertex_offset_uv(void) { return (int32_t)offsetof(Vertex, uv); }
+int32_t gf_c_vertex_offset_mat(void) { return (int32_t)offsetof(Vertex, mat); }
+
+/// Read one vertex out of an interleaved blob, striding as a GPU would.
+///
+/// Deliberately takes the stride from the caller rather than using
+/// `sizeof(Vertex)`: if the two disagree this reads from the wrong offset and
+/// the test fails, which is the failure worth catching.
+double gf_c_vertex_read(const void *data, int32_t index, int32_t stride,
+                        int32_t field) {
+  const unsigned char *base = (const unsigned char *)data;
+  const Vertex *v = (const Vertex *)(base + (size_t)index * (size_t)stride);
+  switch (field) {
+    case 0: return v->pos[0];
+    case 1: return v->pos[1];
+    case 2: return v->pos[2];
+    case 3: return v->uv[0];
+    case 4: return v->uv[1];
+    case 5: return (double)v->mat;
+    default: return -1.0;
+  }
+}
+
+/// Write a vertex *from* C, so the traffic is checked in both directions.
+void gf_c_vertex_write(void *data, int32_t index, int32_t stride, float x,
+                       float y, float z, float u, float v, uint32_t mat) {
+  unsigned char *base = (unsigned char *)data;
+  Vertex *target = (Vertex *)(base + (size_t)index * (size_t)stride);
+  target->pos[0] = x;
+  target->pos[1] = y;
+  target->pos[2] = z;
+  target->uv[0] = u;
+  target->uv[1] = v;
+  target->mat = mat;
+}
+
+/// Sum every `mat` in the blob, which only works if the stride is right for
+/// *every* element rather than only the first.
+uint32_t gf_c_vertex_sum_mat(const void *data, int32_t count, int32_t stride) {
+  const unsigned char *base = (const unsigned char *)data;
+  uint32_t total = 0;
+  for (int32_t i = 0; i < count; i += 1) {
+    total += ((const Vertex *)(base + (size_t)i * (size_t)stride))->mat;
+  }
+  return total;
+}
+
+// The same question for a matrix, which is what a uniform buffer carries.
+// Column-major, so `m[0]` is the first column and `m[12]`..`m[14]` are the
+// translation — the layout every shader expects.
+double gf_c_mat4_element(const void *data, int32_t index) {
+  return (double)((const float *)data)[index];
+}
+
+int32_t gf_c_mat4_size(void) { return (int32_t)(16 * sizeof(float)); }
 
 }  // extern "C"
