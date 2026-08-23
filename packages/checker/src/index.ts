@@ -36,6 +36,32 @@ export {
 export { fromTsDiagnostic, loadConfig, type LoadedConfig } from "./tsconfig.ts";
 
 export {
+    appliesTo,
+    hasMutatingForm,
+    inLinalgModule,
+    isLinalgConstructor,
+    linalgFromMachine,
+    linalgMethodOf,
+    linalgNamedBy,
+    type LinalgBinOp,
+    type LinalgUnOp,
+    LINALG_ELEMENTS,
+    LINALG_MODULE,
+    LINALG_OPS,
+    LINALG_TYPES,
+    type LinalgOp,
+    type LinalgOpKind,
+    type LinalgParam,
+    type LinalgPrefix,
+    type LinalgReturn,
+    type LinalgType,
+    linalgStructName,
+    mutatingName,
+    PAD_FIELD,
+    SIMD_PREFIXES,
+} from "./linalg.ts";
+
+export {
     ASSUMED_POINTER_BITS,
     checkLiteral,
     commonType,
@@ -73,6 +99,8 @@ export {
     isCStringType,
     isPointerType,
     isReferenceType,
+    linalgStruct,
+    linalgTypeOf,
     isSignedInteger,
     type MachineType,
     referentOf,

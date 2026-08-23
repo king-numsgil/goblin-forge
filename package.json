@@ -13,7 +13,8 @@
     "typecheck": "tsc --build",
     "test": "bun test",
     "bench:boundary": "bun run packages/backend/bench/boundary.bench.ts",
-    "build:cli": "bun run packages/cli/build.ts"
+    "build:cli": "bun run packages/cli/build.ts",
+    "build:linalg": "bun run packages/runtime/src/gen-linalg.ts"
   },
   "devDependencies": {
     "@types/bun": "latest",

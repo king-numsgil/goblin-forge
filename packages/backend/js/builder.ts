@@ -65,6 +65,8 @@ function tyKindKey(kind: TyKind): string {
         case "Int":
         case "Float":
             return `${kind.kind}:${kind.value}`;
+        case "Simd":
+            return `Simd:${kind.elem}:${kind.lanes}`;
         case "Pointer":
         case "Reference":
         case "Array":
@@ -427,6 +429,9 @@ export class ModuleBuilder {
             case "Int":
             case "Float":
             case "FnPtr":
+            // A vector is lanes of float and nothing else: bits to copy, and
+            // nothing to destroy.
+            case "Simd":
                 return "Trivial";
             // A type with no value form: nothing here is ever copied or destroyed,
             // because nothing here is ever *held*. Only a `Pointer` to one travels,

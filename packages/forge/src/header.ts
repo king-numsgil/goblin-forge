@@ -376,6 +376,12 @@ function spell(module: Module, kind: TyKind): string {
             return INT_TYPES[kind.value] ?? "intptr_t";
         case "Float":
             return kind.value === "F32" ? "float" : "double";
+        // A `dvec3` crosses the C boundary as the struct it is, which is what a
+        // C caller can name; the vector form exists only between a load and a
+        // store and never reaches a signature (DECISIONS §22). Reaching here is
+        // a frontend that put one in an export.
+        case "Simd":
+            throw new HeaderError("a vector has no C spelling");
         case "Pointer":
         case "Reference":
             return `${cType(module, kind.value)}*`;

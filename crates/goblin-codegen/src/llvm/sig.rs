@@ -124,6 +124,9 @@ fn internal_abi(types: &mut Types, layouts: &mut Layouts<'_>, sig: &Signature) -
         match layouts.repr(param.ty)? {
             Repr::Void => internal_error!("a parameter cannot have type `void`"),
             Repr::Register(value) => params.push(scalar(value).to_owned()),
+            // A vector is an arithmetic intermediate, never a parameter: a
+            // `dvec3` crosses a call as the struct it is (DECISIONS §22).
+            Repr::Vector { .. } => internal_error!("a parameter cannot be a vector"),
             Repr::Aggregate => params.push("ptr".to_owned()),
         }
     }

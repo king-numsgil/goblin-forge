@@ -166,6 +166,34 @@ that reason. And a **class with members**: an ambient class is an opaque handle,
 `collectClasses` skips it, and its statics and methods are never lowered. That
 is why `std/io` is `fileOpen(path)` rather than `File.open(path)`.
 
+### `std/linalg` is not one of those four steps
+
+`dvec3` and its family are **recognised types**, like `string` and `T[]`, and
+none of the steps above applies to them: there is no `gf_*` symbol, nothing in
+`STD_MODULES`, and nothing in the runtime. DECISIONS §22 is the design.
+
+The single source of truth is `packages/checker/src/linalg.ts`, and three
+things read it — `erase()` for the layout, the lowerer for the arithmetic, and
+a generator for the declarations. Adding an operation is a row in `LINALG_OPS`
+and a case in `compose()` in `packages/forge/src/lower/linalg.ts`; the backend
+is not involved, because it only ever sees SIMD primitives.
+
+**After changing that table, run `bun run build:linalg`.** It rewrites the
+generated block of `global.d.ts` in place. Skipping it leaves the compiler
+implementing a method tsc has never heard of, which is a `TS2339` at the call
+site rather than anything pointing here.
+
+Two invariants worth knowing before touching it:
+
+- **The MIR struct is named `linalg.dvec3`, not `dvec3`.** Structs are interned
+  by name alone, so a user's own `dvec3` would otherwise be the same struct as
+  this one and get its layout. `.` is not a character a TypeScript identifier
+  can hold, which is what makes the qualified name unforgeable.
+- **The declared classes carry a private member.** Without it `dvec3` and
+  `aligned_dvec3` are structurally identical to tsc — same components, same
+  methods — and `packed.add(padded)` would type-check and then lower a
+  three-lane operation over a four-lane value.
+
 ## The wire format
 
 The MIR is defined once, in Rust, and the TypeScript types *and their postcard

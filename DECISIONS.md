@@ -1844,6 +1844,211 @@ are seventy-two chances for one to quietly say something else.
 
 ---
 
+## §22 — `std/linalg`, and where SIMD enters *(settled 2026-08-23; being built)*
+
+GLM's shape, in a language with no operator overloading and no generics that
+survive to the backend: `dvec3`, `fmat4`, `dquat`, spelled `Ttype` where `T` is
+the element — `d` `f` `i` `u` `l` `ul` `b`, with `l` for the C intuition of
+`long` rather than for any exact type.
+
+The whole section is about one boundary. **A linear-algebra type's *storage* is
+an ordinary struct, and its *arithmetic* is a vector that exists only between a
+load and a store.** Everything below follows from refusing to let those two be
+the same thing.
+
+### The types are builtins, because an interface cannot be both
+
+`contractOf` rejects an interface that declares both a method and a data member
+(`GF0002`): an interface is a *shape* laid out as a struct, or a *contract*
+dispatched through an itable, and one that is both would have to be a layout and
+a dispatch table at once. A `dvec3` is exactly that mixture — three `f64` fields
+and forty methods — so it cannot be a declared interface, and the rule that
+stops it is a good rule that should not be weakened for this.
+
+So these are **recognised types**, like `string`, `T[]` and `FixedArray<T, N>`:
+`erase()` matches them before the general paths and returns a `struct` built
+from a table, not from tsc's property list. The mixing rule never runs, because
+nothing ever asks tsc what the shape of a `dvec3` is.
+
+What that buys is that the answer is *already an ordinary struct*. Layout, the C
+boundary, `dvec3[]`, `sizeOf`, copies, `alloc<dvec3>()` — none of it learns a
+new type. Only the methods need a new path, next to the array and `string`
+branches that are already there for the same reason.
+
+Recognition is keyed on **the declaring module**, not on the name. `dvec3` is
+this `dvec3` when it came from `"std/linalg"`, for the reason `STD_MODULES` is
+keyed by specifier: a flat table of names would match any `.d.ts` the project
+happens to include and silently rebind a user's own type.
+
+### The lowerer composes; the backend translates
+
+MIR gains a small set of SIMD *primitives* — load, store, build-from-lanes,
+extract, splat, elementwise binary and unary, shuffle, fused multiply-add — and
+nothing else. `dot` is not a node. It is a multiply, a shuffle and two adds,
+emitted **by the lowerer**, and it reads that way in a MIR dump and again in the
+`.ll`.
+
+This is REWRITE-PLAN's rule about ownership applied to arithmetic: the frontend
+decides, the backend obeys and selects by lookup. A `SimdOp::Dot` that the
+backend expanded would be a second place where the algorithm lives, and the
+first time the two disagreed the symptom would be a wrong number rather than a
+crash. It also means adding `slerp` is a function in the lowering table and no
+backend change at all, which is the property that matters for a surface this
+size.
+
+The cost is verbose MIR. That is the correct direction for a compiler whose
+`.ll` is kept beside every object precisely so it can be read.
+
+### The vector type carries its true lane count, and that is load-bearing
+
+A `dvec3` is `<3 x double>`, not `<4 x double>` with a lane ignored.
+
+LLVM distinguishes a vector's *store size* from its *alloc size*: `<3 x double>`
+occupies 24 bytes when loaded or stored, and rounds to 32 only when something
+asks how much stack to reserve. So `store <3 x double>` into a 24-byte struct
+writes 24 bytes, and the packed layout a vertex buffer needs survives contact
+with the vector unit.
+
+That claim was **measured, not assumed** — a 64-byte buffer filled with `0xFF`,
+a `<3 x double>` stored at offset 0, the bytes at 24..27 read back. They are
+still `0xFF`, at `-O0` and at `-O2`. It is the kind of fact that is silently
+wrong in exactly one direction, so it is written down here with how it was
+checked.
+
+### `aligned_` means padded, not over-aligned
+
+`aligned_dvec3` is four lanes and 32 bytes; `dvec3` is three and 24. The prefix
+says the value has been padded out to the vector unit's width, and the
+difference is real:
+
+```asm
+add3:   vmovsd 16(%rdx), %xmm0     ; dvec3   — 24 bytes, packed
+        vmovupd (%rdx), %xmm1
+        vaddpd (%r8), %xmm1, %xmm1
+        vaddsd 16(%r8), %xmm0, %xmm0
+        vmovsd %xmm0, 16(%rcx)
+        vmovupd %xmm1, (%rcx)
+
+add4:   vmovupd (%rdx), %ymm0      ; aligned_dvec3 — 32 bytes, padded
+        vaddpd (%r8), %ymm0, %ymm0
+        vmovupd %ymm0, (%rcx)
+```
+
+Six instructions against three, and the user picks. Packed for a vertex buffer,
+padded for a loop.
+
+It is **not** over-alignment, and the distinction is worth being exact about
+because the name invites the other reading. `layout.rs` computes a struct's
+alignment as its strictest field's, so `aligned_dvec3` is 8-aligned like any
+other struct of `f64`. Every vector access is therefore emitted unaligned
+(`align 8`), which on the v3 baseline costs nothing when the address happens to
+be aligned anyway and is *correct* when it is not. Adding an `align` to
+`StructDef` to get `vmovapd` would buy a rounding error's worth of throughput
+and a new way for a heap allocation to be subtly wrong.
+
+### There is no CPU detection, and no instruction-set switch either
+
+`-march=x86-64-v3` is already passed to clang (`llvm/driver.rs`) and to the
+runtime's rustc (`runtime/src/build.ts`), so AVX2 and FMA3 are a floor rather
+than a question.
+
+More to the point, **nothing in the lowerer chooses between SSE and AVX.** It
+emits a lane count and an element width; `<4 x float>` is 128 bits and becomes
+`vaddps`, `<4 x double>` is 256 and becomes `vaddpd ymm`. The two paths asked
+for in the design conversation turned out to be one path with a multiplication
+in it, which is the better answer and was not the expected one.
+
+### No fast-math. FMA is asked for by name
+
+Not a single `fast`, `reassoc` or `contract` flag is emitted. Floating-point
+results are IEEE and deterministic, which is what a test suite that asserts on
+printed output requires, and what a space simulation wants when a trajectory has
+to reproduce.
+
+Fusion is still available, because `llvm.fma.v4f64` selects `vfmadd213pd` on its
+own with no flags at all — verified in the same probe. So a contraction happens
+where the lowerer *says* it happens, and nowhere else. Loosening this later is a
+per-operation decision rather than a module-wide one, which is the reason to
+start closed.
+
+There are no approximate variants. `normalize` on `f64` is a real `sqrt` and a
+real division; `rsqrtps` and a Newton–Raphson step would be a different function
+with a different answer, and it can be added under a name that says so if
+benchmarks ever ask for it.
+
+### Lane 3 is masked at the reduction, not maintained as an invariant
+
+An unpadded `dvec3` in a 4-lane register has a fourth lane that means nothing.
+The tempting rule is "it is always zero" — and `add`, `sub`, `min` and `max`
+would all preserve that. **`div` does not.** Zero divided by zero is a NaN, and
+a NaN in the ignored lane propagates into the next `dot` and poisons a result
+that has nothing to do with it.
+
+So the invariant is not maintained. Instead the operations that actually collapse
+lanes — `dot`, `length`, `any`, `all` — mask the dead lane where they read it.
+One extra operation in four places, rather than a blend after every arithmetic
+op and a standing obligation that any new operation must remember.
+
+### Integers and booleans get no vector unit
+
+`ivec3.add` is three `add i32`. AVX2's integer support stops short of 64-bit
+multiply and of division entirely, so `lvec` and `ulvec` would be part
+vectorised and part not — a performance surface with a cliff in it that nothing
+in the type says. Doing all of them scalar means one lowering rule, and the
+integer vectors are for indices and counts rather than for hot arithmetic
+anyway.
+
+`b` exists only as `bvec2/3/4`: there is no `bmat` or `bquat` to want. Comparison
+operations produce one, and `any()` / `all()` consume it. One byte per lane, like
+every other `boolean`.
+
+### Conventions, fixed by the target rather than by taste
+
+Column-major storage, column vectors, `M * v` — GLM's, and therefore what every
+shader and every piece of reference code assumes.
+
+Clip space is **SDL3's GPU API on Vulkan**, which settles the two questions that
+otherwise have no defensible default: depth is `[0, 1]` with near at 0, and `+Y`
+is up in NDC as it is in world space. So `perspective` does *not* emit the Y flip
+that a Vulkan-native projection matrix carries. Viewport coordinates run from
+`[0, 0]` at lower-left to `[1, 1]` at upper-right.
+
+None of that is a preference this compiler is entitled to. It is written down
+because a projection matrix that disagrees with its consumer produces a black
+screen and no diagnostic whatsoever.
+
+### The module is `std/linalg`
+
+Not `std/vector`, which was the first name and collided immediately: `T[]` is
+already "the language's `std::vector`", says so in its own test file, and a
+`std/vector` that contained no growable arrays would be a permanent small
+confusion.
+
+### Three spellings, and the mutating one chains
+
+`dvec3.add(a, b)` returns a copy; `a.add(b)` returns a copy; `a.addMut(b)`
+mutates in place. The static form exists for every operation taking at least one
+vector, the mutating form only for operations returning the receiver's own type
+— there is no `dotMut` to want.
+
+`addMut` returns `Reference<dvec3>`, so mutations chain. This is deliberately
+*not* enforced against aliasing or lifetime: a reference into a local is already
+a thing this language lets you hold, with rules that live elsewhere, and a
+value type of three doubles is not where that argument should be relitigated.
+
+### The declaration surface is generated
+
+Thirty-odd types times forty operations times up to three spellings is several
+thousand lines of `global.d.ts`, and the same list has to appear again as the
+lowering table. Written twice by hand, they drift, and the failure is `GF0001`
+under a name the user can see in their editor's completion list.
+
+So one table generates both, the way `mir.generated.ts` is generated from the
+Rust MIR — for the reason given there, which is that a hand-maintained second
+copy of a wire format is worse than no second copy.
+
+---
+
 ## Class decisions *(2026-08-12, milestone 8)*
 
 ### Every class has a vtable pointer, including one with no virtual methods

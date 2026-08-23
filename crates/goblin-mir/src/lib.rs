@@ -21,8 +21,8 @@ pub mod ty;
 
 pub use body::{
     AbortReason, BinOp, Block, BlockKind, CallDest, Callee, CastKind, Const, FuncRef, Function,
-    Linkage, LocalDecl, Operand, Place, Projection, Rvalue, Statement, SwitchTarget, Terminator,
-    UnOp, UnwindAction,
+    Linkage, LocalDecl, Operand, Place, Projection, Rvalue, SimdBinOp, SimdUnOp, Statement,
+    SwitchTarget, Terminator, UnOp, UnwindAction,
 };
 pub use ids::{
     BlockId, ClassId, ExternId, FieldId, FileId, FuncId, InterfaceId, LocalId, SigId, StructId,

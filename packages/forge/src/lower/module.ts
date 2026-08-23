@@ -711,6 +711,20 @@ export class Lowerer {
         return {func: builder.id, captures: captures.map((capture) => capture.binding), env};
     }
 
+    /**
+     * The MIR type of a vector: `<3 x f64>`.
+     *
+     * Reached directly rather than through {@link Lowerer.tyOf}, because there
+     * is no `MachineType` for one and there should not be. A vector is not a
+     * type the *language* has — no binding, field, parameter or return is ever
+     * one — it is what a `dvec3` becomes between a load and a store, and the
+     * only thing that names one is the lowering of an operation (DECISIONS
+     * §22).
+     */
+    simdTy(elem: "F32" | "F64", lanes: number): TyId {
+        return this.#mir.ty({kind: "Simd", elem, lanes});
+    }
+
     /** The MIR type id for an erased machine type. */
     tyOf(type: MachineType, at: ts.Node): TyId {
         switch (type.kind) {

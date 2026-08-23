@@ -75,6 +75,29 @@ pub enum TyKind {
     Bool,
     Int(IntTy),
     Float(FloatTy),
+    /// `lanes` copies of a float, in one vector register.
+    ///
+    /// **This is an arithmetic type, never a storage type.** DECISIONS §22: a
+    /// `dvec3` *is* a [`TyKind::Struct`] of three `f64` — that is what a vertex
+    /// buffer holds and what crosses the C boundary — and this is what exists
+    /// between the load that reads one and the store that writes it back. No
+    /// field, no parameter and no return type is ever a `Simd`; a local holding
+    /// an intermediate is the whole of its use.
+    ///
+    /// The lane count is the *true* one, so an unpadded `dvec3` is three lanes
+    /// and not four with one ignored. LLVM keeps a vector's store size (24
+    /// bytes here) apart from its alloc size (32), so the packed layout
+    /// survives being loaded into a register and written back — measured, and
+    /// recorded in §22 because it is silently wrong in exactly one direction.
+    ///
+    /// Floats only. Integer and boolean vectors lower to ordinary scalar
+    /// arithmetic on the struct's fields: AVX2 has no 64-bit multiply and no
+    /// integer division, so a vectorised `lvec` would have a performance cliff
+    /// in it that nothing in the type admits to.
+    Simd {
+        elem: FloatTy,
+        lanes: u8,
+    },
     /// `Pointer<T>`: an address the program may reseat and dereference.
     /// A borrow; destroying one does nothing.
     Pointer(TyId),

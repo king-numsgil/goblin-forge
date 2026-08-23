@@ -138,6 +138,15 @@ pub enum Repr {
     Void,
     /// One machine register holding this scalar.
     Register(Scalar),
+    /// One *vector* register holding `lanes` copies of `elem`.
+    ///
+    /// Kept apart from [`Repr::Register`] rather than folded into it with a
+    /// lane count of one, because everything that asks this question wants to
+    /// know whether it is looking at an ABI-classifiable scalar — and a vector
+    /// is not one. DECISIONS §22 keeps `Simd` out of every signature, so the
+    /// honest answer at those sites is a panic rather than a classification,
+    /// and that only stays honest while the two are distinguishable.
+    Vector { elem: Scalar, lanes: u8 },
     /// Too large or too structured for a register. Travels by address.
     Aggregate,
 }
@@ -207,6 +216,26 @@ impl<'m> Layouts<'m> {
             TyKind::Int(int) => Layout::scalar(int_bytes(*int, pointer)),
             TyKind::Float(FloatTy::F32) => Layout::scalar(4),
             TyKind::Float(FloatTy::F64) => Layout::scalar(8),
+            // A vector's *alloc* size, which is what an `alloca` reserves: the
+            // lanes rounded up to a power of two, which is LLVM's own answer
+            // for the same type. A `<3 x double>` therefore reserves 32 bytes
+            // and is 32-aligned.
+            //
+            // This is deliberately **not** the number of bytes a `<3 x double>`
+            // load or store touches, which is 24 — that is the *store* size,
+            // and it is the reason a packed `dvec3` survives a round trip
+            // through a vector register (DECISIONS §22). The two differ only
+            // for this type, and nothing here may quietly answer the other
+            // question: a `Simd` is never a field and never an array element,
+            // so no stride is ever computed from this number.
+            TyKind::Simd { elem, lanes } => {
+                let bytes = simd_bytes(*elem, *lanes);
+                Layout {
+                    size: bytes,
+                    align: bytes,
+                    fields: Vec::new(),
+                }
+            }
             // Every handle in this language is one machine word: a pointer, a
             // reference, a function pointer, a string, an array.
             TyKind::Pointer(_)
@@ -344,6 +373,10 @@ impl<'m> Layouts<'m> {
             TyKind::Int(int) => Repr::Register(int_scalar(*int, self.target)),
             TyKind::Float(FloatTy::F32) => Repr::Register(Scalar::F32),
             TyKind::Float(FloatTy::F64) => Repr::Register(Scalar::F64),
+            TyKind::Simd { elem, lanes } => Repr::Vector {
+                elem: float_scalar(*elem),
+                lanes: *lanes,
+            },
             TyKind::Pointer(_)
             | TyKind::Reference(_)
             | TyKind::FnPtr(_)
@@ -367,6 +400,25 @@ impl<'m> Layouts<'m> {
                 );
             }
         })
+    }
+}
+
+/// How many bytes an `alloca` of a vector reserves.
+///
+/// The lanes rounded up to a power of two, matching LLVM's alloc size and ABI
+/// alignment for the same type on x86-64.
+pub fn simd_bytes(elem: FloatTy, lanes: u8) -> u32 {
+    let width = match elem {
+        FloatTy::F32 => 4,
+        FloatTy::F64 => 8,
+    };
+    (width * u32::from(lanes)).next_power_of_two()
+}
+
+fn float_scalar(float: FloatTy) -> Scalar {
+    match float {
+        FloatTy::F32 => Scalar::F32,
+        FloatTy::F64 => Scalar::F64,
     }
 }
 
@@ -399,6 +451,9 @@ pub fn render_type(module: &Module, ty: TyId) -> String {
         TyKind::Bool => "bool".into(),
         TyKind::Int(int) => format!("{int:?}").to_lowercase(),
         TyKind::Float(float) => format!("{float:?}").to_lowercase(),
+        TyKind::Simd { elem, lanes } => {
+            format!("<{lanes} x {}>", format!("{elem:?}").to_lowercase())
+        }
         TyKind::Pointer(inner) => format!("Pointer<{}>", render_type(module, *inner)),
         TyKind::Reference(inner) => format!("Reference<{}>", render_type(module, *inner)),
         TyKind::FnPtr(_) => "fn".into(),

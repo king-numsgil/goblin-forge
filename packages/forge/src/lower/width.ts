@@ -14,7 +14,13 @@ import {
     commonType,
     erase,
     isFloatType,
+    isLinalgConstructor,
     isMachineComparable,
+    linalgFromMachine,
+    linalgMethodOf,
+    linalgNamedBy,
+    linalgStruct,
+    type LinalgType,
     type MachineType,
     type Operator,
     type OperatorInfo,
@@ -184,6 +190,18 @@ export abstract class WidthPass extends Emitter {
             if (!ts.isIdentifier(expression.expression)) {
                 this.outer.unsupported(expression, "an expression after `new`");
                 return ERROR;
+            }
+            // `new dvec3(1, 2, 3)` is a struct literal rather than a class
+            // instance, so it answers before `classInfo` is asked — an ambient
+            // class has none (DECISIONS §22).
+            const linalg = linalgNamedBy(this.outer.checker, expression.expression);
+            if (linalg !== undefined) {
+                for (const argument of expression.arguments ?? []) {
+                    if (this.width(argument).kind === "error") {
+                        return ERROR;
+                    }
+                }
+                return typed(linalgStruct(linalg));
             }
             const name = expression.expression.text;
             if (this.outer.classInfo(name) === undefined) {
@@ -865,6 +883,25 @@ export abstract class WidthPass extends Emitter {
             }
         }
 
+        // `a.add(b)`, `dvec3.add(a, b)`, `dvec3.zero()`. Before the static and
+        // class paths for the reason the two branches above are: a `dvec3` is
+        // neither, and both spellings are the compiler's (DECISIONS §22).
+        //
+        // The *width* of one of these is entirely a function of the operation:
+        // every argument is either the receiver's own type or its component, so
+        // nothing here is polymorphic and nothing needs inferring.
+        const linalgStatic = linalgNamedBy(this.outer.checker, access.expression);
+        const linalgType =
+            linalgStatic ?? linalgFromMachine(this.outer.tryErase(access.expression));
+        if (linalgType !== undefined) {
+            for (const argument of expression.arguments) {
+                if (this.width(argument).kind === "error") {
+                    return ERROR;
+                }
+            }
+            return this.#linalgWidth(access, linalgType, linalgStatic !== undefined);
+        }
+
         // `p.free()`, `p.deref()`, `p.offset(n)`. Before the class path, because a
         // `Pointer<C>` auto-dereferences to a `C` and would otherwise look for a
         // method of that name on it.
@@ -947,6 +984,58 @@ export abstract class WidthPass extends Emitter {
             }
         }
         return typed(record.signature.returns);
+    }
+
+    /**
+     * What a `std/linalg` call answers with.
+     *
+     * Read off the operation table rather than off tsc, for the same reason the
+     * layout is: these are the compiler's own methods, and the table is what
+     * says so. A name the table does not have is `GF0001` here — under the
+     * caret, before the lowerer reaches it and reports something vaguer.
+     */
+    #linalgWidth(
+        access: ts.PropertyAccessExpression,
+        type: LinalgType,
+        isStatic: boolean,
+    ): Width {
+        const name = access.name.text;
+        const value = typed(linalgStruct(type));
+
+        // The constructors — `zero`, `one`, `splat`, the unit axes, `from` —
+        // exist only in the static spelling and always answer with the type
+        // itself. Writing `v.zero()` is a `GF0001` below rather than a silent
+        // success, because there is no receiver for it to have used.
+        if (isStatic && isLinalgConstructor(name, type)) {
+            return value;
+        }
+
+        const found = linalgMethodOf(name, type);
+        if (found === undefined) {
+            this.outer.unsupported(
+                access,
+                `\`${name}\` on a \`${type.name}\``,
+            );
+            return ERROR;
+        }
+        switch (found.op.returns) {
+            case "vector":
+                // A mutating form hands back a reference to the receiver, so
+                // that mutations chain. It is a different type from the copying
+                // form and has to say so here, or a chained call finds no
+                // receiver at all.
+                return found.mutating
+                    ? typed({kind: "reference", referent: linalgStruct(type)})
+                    : value;
+            case "scalar":
+                return typed(
+                    type.element === "bool"
+                        ? {kind: "bool"}
+                        : {kind: "scalar", name: type.element},
+                );
+            case "bool":
+                return typed({kind: "bool"});
+        }
     }
 
     /**

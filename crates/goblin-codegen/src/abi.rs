@@ -30,6 +30,7 @@
 use goblin_mir::{Module, TyId, TyKind};
 
 use crate::error::{InternalError, Result};
+use crate::internal_error;
 use crate::layout::{Layouts, Repr, Scalar};
 
 /// Which platform convention a signature follows.
@@ -304,6 +305,14 @@ pub fn classify_param(layouts: &mut Layouts<'_>, ty: TyId, conv: Conv) -> Result
             let signed = signedness(layouts.module(), ty);
             return Ok(Slot::Plain { ty: value, signed });
         }
+        // A `Simd` is an arithmetic intermediate and never appears in a
+        // signature (DECISIONS §22), so there is no classification to give and
+        // reaching here is a frontend that put one there.
+        Repr::Vector { .. } => internal_error!(
+            "`{}` is a vector and cannot cross a call boundary; it exists only \
+             between a load and a store",
+            crate::layout::render_type(layouts.module(), ty)
+        ),
         Repr::Aggregate => {}
     }
 
@@ -354,6 +363,11 @@ pub fn classify_return(layouts: &mut Layouts<'_>, ty: TyId, conv: Conv) -> Resul
             let signed = signedness(layouts.module(), ty);
             return Ok(Slot::Plain { ty: value, signed });
         }
+        Repr::Vector { .. } => internal_error!(
+            "`{}` is a vector and cannot be returned; it exists only between a \
+             load and a store",
+            crate::layout::render_type(layouts.module(), ty)
+        ),
         Repr::Aggregate => {}
     }
 

@@ -210,6 +210,40 @@ pub enum UnOp {
     Not,
 }
 
+/// An elementwise operation on two vectors of the same shape.
+///
+/// Deliberately short. DECISIONS §22 puts the algorithms in the lowerer — `dot`
+/// is a [`SimdBinOp::Mul`], a [`Rvalue::SimdShuffle`] and two adds, emitted by
+/// the frontend and readable as such in a MIR dump — so this enum only ever
+/// grows an entry when a *machine* operation is missing, not when a function is.
+///
+/// `Min` and `Max` are here rather than built from a comparison and a select
+/// because `llvm.minnum` is one instruction and the comparison form is three,
+/// and because writing it out would mean deciding what happens to a NaN in a
+/// place that is not thinking about NaNs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Schema)]
+pub enum SimdBinOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Min,
+    Max,
+}
+
+/// An elementwise operation on one vector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Schema)]
+pub enum SimdUnOp {
+    Neg,
+    Abs,
+    Sqrt,
+    Floor,
+    Ceil,
+    /// Half away from zero, matching `dround` rather than IEEE's even-ties.
+    Round,
+    Trunc,
+}
+
 /// What a [`Rvalue::Cast`] actually does at the machine level.
 ///
 /// Written down rather than re-derived from the operand's type, so the backend
@@ -338,6 +372,79 @@ pub enum Rvalue {
     SizeOf(TyId),
     /// `alignOf<T>()` — the alignment of a `T`, in bytes.
     AlignOf(TyId),
+
+    // -- SIMD (DECISIONS §22) -------------------------------------------------
+    //
+    // Primitives, and only primitives. Every named operation in `std/linalg` —
+    // `dot`, `normalize`, `cross`, `slerp`, a matrix multiply — is composed
+    // from these by the lowerer, so the algorithm lives in one place and the
+    // backend selects an instruction by lookup. Adding `slerp` is a function in
+    // a table; it is not a node here.
+    /// Read a whole vector out of a struct place: `<3 x double>` from a
+    /// `dvec3`, `<4 x double>` from an `aligned_dvec3`.
+    ///
+    /// The place's type is a struct of exactly `lanes` fields of the element's
+    /// type, laid out contiguously — which the frontend guarantees, because it
+    /// is the frontend that decided the struct was a `dvec3` in the first place.
+    SimdLoad {
+        source: Place,
+        /// The [`crate::TyKind::Simd`] produced. Carried rather than derived
+        /// from the source, because the *number of lanes* is the whole
+        /// difference between a packed and a padded vector and it should be
+        /// legible at the node rather than three lookups away.
+        ty: TyId,
+    },
+    /// Write a vector back into a struct place. The mirror of
+    /// [`Rvalue::SimdLoad`], with the same guarantee about the place's type.
+    SimdStore {
+        vector: Operand,
+    },
+    /// Build a vector from one value per lane, in lane order.
+    SimdFromParts {
+        lanes: Vec<Operand>,
+        ty: TyId,
+    },
+    /// One lane, as a scalar.
+    SimdExtract {
+        vector: Operand,
+        lane: u8,
+    },
+    /// Every lane the same value.
+    SimdSplat {
+        value: Operand,
+        ty: TyId,
+    },
+    SimdBinary {
+        op: SimdBinOp,
+        lhs: Operand,
+        rhs: Operand,
+    },
+    SimdUnary {
+        op: SimdUnOp,
+        operand: Operand,
+    },
+    /// Lane-wise selection from the concatenation of `lhs` and `rhs`.
+    ///
+    /// Each entry of `mask` indexes that concatenation, so for two three-lane
+    /// vectors `0..=2` name `lhs` and `3..=5` name `rhs`. This is `cross`'s
+    /// whole implementation and half of a transpose.
+    SimdShuffle {
+        lhs: Operand,
+        rhs: Operand,
+        mask: Vec<u8>,
+        ty: TyId,
+    },
+    /// `a * b + c`, fused — one rounding rather than two.
+    ///
+    /// A node rather than a fast-math flag on a multiply and an add, because
+    /// §22 emits no fast-math flags at all: a contraction happens where the
+    /// lowerer says it happens and nowhere else. `llvm.fma` selects
+    /// `vfmadd213pd` on the v3 baseline with no flags needed.
+    SimdFma {
+        a: Operand,
+        b: Operand,
+        c: Operand,
+    },
 }
 
 /// What happens if a call unwinds out of this point.

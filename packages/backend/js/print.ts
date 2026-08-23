@@ -274,6 +274,39 @@ function rvalue(module: Module, value: Rvalue): string {
             return `(${sym(module, module.interfaces[value.interface]?.name ?? 0)}) ${place(
                 value.source,
             )}`;
+        // The SIMD primitives. These are printed at all — rather than as one
+        // opaque `simd` — because DECISIONS §22 puts the algorithms in the
+        // lowerer precisely so that a `dot` reads as a multiply, a shuffle and
+        // two adds in a dump. A dump that would not show that gives the design
+        // away.
+        case "SimdLoad":
+            return `vload ${ty(module, value.ty)} (${place(value.source)})`;
+        case "SimdStore":
+            return `vstore ${operand(module, value.vector)}`;
+        case "SimdFromParts":
+            return `${ty(module, value.ty)} ( ${value.lanes
+                .map((lane) => operand(module, lane))
+                .join(", ")} )`;
+        case "SimdExtract":
+            return `lane ${value.lane} of ${operand(module, value.vector)}`;
+        case "SimdSplat":
+            return `splat ${ty(module, value.ty)} (${operand(module, value.value)})`;
+        case "SimdBinary":
+            return `${operand(module, value.lhs)} v${value.op.toLowerCase()} ${operand(
+                module,
+                value.rhs,
+            )}`;
+        case "SimdUnary":
+            return `v${value.op.toLowerCase()} ${operand(module, value.operand)}`;
+        case "SimdShuffle":
+            return `shuffle(${operand(module, value.lhs)}, ${operand(module, value.rhs)}, [${[
+                ...value.mask,
+            ].join(", ")}])`;
+        case "SimdFma":
+            return `fma(${operand(module, value.a)}, ${operand(module, value.b)}, ${operand(
+                module,
+                value.c,
+            )})`;
     }
 }
 
@@ -388,6 +421,8 @@ function tyKind(module: Module, kind: TyKind): string {
             return kind.value.toLowerCase();
         case "Float":
             return kind.value.toLowerCase();
+        case "Simd":
+            return `<${kind.lanes} x ${kind.elem.toLowerCase()}>`;
         case "Pointer":
             return `Pointer<${ty(module, kind.value)}>`;
         case "Reference":

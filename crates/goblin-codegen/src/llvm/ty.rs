@@ -89,6 +89,7 @@ impl Types {
         match layouts.repr(ty)? {
             Repr::Void => Ok("void".into()),
             Repr::Register(value) => Ok(scalar(value).into()),
+            Repr::Vector { elem, lanes } => Ok(format!("<{lanes} x {}>", scalar(elem))),
             Repr::Aggregate => self.aggregate(layouts, ty),
         }
     }

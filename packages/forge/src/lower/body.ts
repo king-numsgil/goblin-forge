@@ -300,6 +300,14 @@ export class BodyLowerer extends BoundaryLowerer {
      * constructor is an ordinary call taking `Reference<Self>`.
      */
     #new(expression: ts.NewExpression): Typed | undefined {
+        // `new dvec3(1, 2, 3)` builds an aggregate and never reaches a class:
+        // a linear-algebra type is a struct, so there is no vtable to install
+        // and no constructor to call (DECISIONS §22).
+        const linalg = this.linalgNew(expression);
+        if (linalg !== "not-linalg") {
+            return linalg;
+        }
+
         if (!ts.isIdentifier(expression.expression)) {
             this.outer.unsupported(expression, "an expression after `new`");
             return undefined;
@@ -3324,6 +3332,22 @@ export class BodyLowerer extends BoundaryLowerer {
         const closure = this.#closureCallee(expression.expression);
         if (closure !== undefined) {
             return this.#localFnCall(expression, closure.place, closure.type);
+        }
+
+        // `a.add(b)` and `dvec3.add(a, b)`, before `callableValue`.
+        //
+        // The static spelling is why this is *here* rather than with the other
+        // method paths below: `callableValue` asks what `dvec3.add` is worth as
+        // a value, and `dvec3` is a type name with no value at all — so it
+        // reports a name that does not resolve before anything has decided this
+        // was not an indirect call through a function pointer. The same shape
+        // as `POINTER_METHODS` being probed silently in `#methodCall`, and the
+        // same fix: answer first (DECISIONS §22).
+        if (ts.isPropertyAccessExpression(expression.expression)) {
+            const linalg = this.linalgCall(expression, expression.expression);
+            if (linalg !== "not-linalg") {
+                return linalg;
+            }
         }
 
         const callable = this.callableValue(expression.expression);

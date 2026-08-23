@@ -10,10 +10,10 @@
 // module, which is the failure mode this whole arrangement exists to remove.
 
 /** Fingerprint of the wire format these bindings were generated from. */
-export const SCHEMA_FINGERPRINT = 0x91475a73d647ba72n;
+export const SCHEMA_FINGERPRINT = 0x874c2b14eebe6d8fn;
 
 /** The same value as hex, for comparing against the addon's report. */
-export const SCHEMA_FINGERPRINT_HEX = "91475a73d647ba72";
+export const SCHEMA_FINGERPRINT_HEX = "874c2b14eebe6d8f";
 
 // ---------------------------------------------------------------------------
 // postcard writer
@@ -186,6 +186,7 @@ export type TyKind =
   | { kind: "Bool" }
   | { kind: "Int"; value: IntTy }
   | { kind: "Float"; value: FloatTy }
+  | { kind: "Simd"; elem: FloatTy; lanes: number }
   | { kind: "Pointer"; value: TyId }
   | { kind: "Reference"; value: TyId }
   | { kind: "FnPtr"; value: SigId }
@@ -390,6 +391,23 @@ export type CastKind =
   | "PtrToInt"
   | "IntToPtr";
 
+export type SimdBinOp =
+  | "Add"
+  | "Sub"
+  | "Mul"
+  | "Div"
+  | "Min"
+  | "Max";
+
+export type SimdUnOp =
+  | "Neg"
+  | "Abs"
+  | "Sqrt"
+  | "Floor"
+  | "Ceil"
+  | "Round"
+  | "Trunc";
+
 export type Rvalue =
   | { kind: "Use"; value: Operand }
   | { kind: "Default" }
@@ -407,6 +425,15 @@ export type Rvalue =
   | { kind: "ArrayPushSlot"; value: Place }
   | { kind: "SizeOf"; value: TyId }
   | { kind: "AlignOf"; value: TyId }
+  | { kind: "SimdLoad"; source: Place; ty: TyId }
+  | { kind: "SimdStore"; vector: Operand }
+  | { kind: "SimdFromParts"; lanes: Operand[]; ty: TyId }
+  | { kind: "SimdExtract"; vector: Operand; lane: number }
+  | { kind: "SimdSplat"; value: Operand; ty: TyId }
+  | { kind: "SimdBinary"; op: SimdBinOp; lhs: Operand; rhs: Operand }
+  | { kind: "SimdUnary"; op: SimdUnOp; operand: Operand }
+  | { kind: "SimdShuffle"; lhs: Operand; rhs: Operand; mask: Uint8Array; ty: TyId }
+  | { kind: "SimdFma"; a: Operand; b: Operand; c: Operand }
 ;
 
 export type BlockId = number & { readonly [GfIdBrand]: "BlockId" };
@@ -567,57 +594,63 @@ export function writeTyKind(w: Writer, v: TyKind): void {
       writeFloatTy(w, v.value);
       break;
     }
-    case "Pointer": {
+    case "Simd": {
       w.varint(4);
-      writeTyId(w, v.value);
+      writeFloatTy(w, v.elem);
+      w.u8(v.lanes);
       break;
     }
-    case "Reference": {
+    case "Pointer": {
       w.varint(5);
       writeTyId(w, v.value);
       break;
     }
-    case "FnPtr": {
+    case "Reference": {
       w.varint(6);
+      writeTyId(w, v.value);
+      break;
+    }
+    case "FnPtr": {
+      w.varint(7);
       writeSigId(w, v.value);
       break;
     }
     case "Str": {
-      w.varint(7);
-      break;
-    }
-    case "CStr": {
       w.varint(8);
       break;
     }
-    case "Array": {
+    case "CStr": {
       w.varint(9);
+      break;
+    }
+    case "Array": {
+      w.varint(10);
       writeTyId(w, v.value);
       break;
     }
     case "FixedArray": {
-      w.varint(10);
+      w.varint(11);
       writeTyId(w, v.element);
       w.varintBig(v.length);
       break;
     }
     case "Struct": {
-      w.varint(11);
+      w.varint(12);
       writeStructId(w, v.value);
       break;
     }
     case "Class": {
-      w.varint(12);
+      w.varint(13);
       writeClassId(w, v.value);
       break;
     }
     case "Interface": {
-      w.varint(13);
+      w.varint(14);
       writeInterfaceId(w, v.value);
       break;
     }
     case "Opaque": {
-      w.varint(14);
+      w.varint(15);
       writeSymId(w, v.value);
       break;
     }
@@ -939,6 +972,33 @@ export function writeCastKind(w: Writer, v: CastKind): void {
   w.varint(CastKindIndex[v]);
 }
 
+const SimdBinOpIndex: Record<SimdBinOp, number> = {
+  Add: 0,
+  Sub: 1,
+  Mul: 2,
+  Div: 3,
+  Min: 4,
+  Max: 5,
+};
+
+export function writeSimdBinOp(w: Writer, v: SimdBinOp): void {
+  w.varint(SimdBinOpIndex[v]);
+}
+
+const SimdUnOpIndex: Record<SimdUnOp, number> = {
+  Neg: 0,
+  Abs: 1,
+  Sqrt: 2,
+  Floor: 3,
+  Ceil: 4,
+  Round: 5,
+  Trunc: 6,
+};
+
+export function writeSimdUnOp(w: Writer, v: SimdUnOp): void {
+  w.varint(SimdUnOpIndex[v]);
+}
+
 export function writeRvalue(w: Writer, v: Rvalue): void {
   switch (v.kind) {
     case "Use": {
@@ -1028,6 +1088,63 @@ export function writeRvalue(w: Writer, v: Rvalue): void {
     case "AlignOf": {
       w.varint(15);
       writeTyId(w, v.value);
+      break;
+    }
+    case "SimdLoad": {
+      w.varint(16);
+      writePlace(w, v.source);
+      writeTyId(w, v.ty);
+      break;
+    }
+    case "SimdStore": {
+      w.varint(17);
+      writeOperand(w, v.vector);
+      break;
+    }
+    case "SimdFromParts": {
+      w.varint(18);
+      w.varint(v.lanes.length); for (const item of v.lanes) { writeOperand(w, item); }
+      writeTyId(w, v.ty);
+      break;
+    }
+    case "SimdExtract": {
+      w.varint(19);
+      writeOperand(w, v.vector);
+      w.u8(v.lane);
+      break;
+    }
+    case "SimdSplat": {
+      w.varint(20);
+      writeOperand(w, v.value);
+      writeTyId(w, v.ty);
+      break;
+    }
+    case "SimdBinary": {
+      w.varint(21);
+      writeSimdBinOp(w, v.op);
+      writeOperand(w, v.lhs);
+      writeOperand(w, v.rhs);
+      break;
+    }
+    case "SimdUnary": {
+      w.varint(22);
+      writeSimdUnOp(w, v.op);
+      writeOperand(w, v.operand);
+      break;
+    }
+    case "SimdShuffle": {
+      w.varint(23);
+      writeOperand(w, v.lhs);
+      writeOperand(w, v.rhs);
+      w.bytes(v.mask);
+      writeTyId(w, v.ty);
+      break;
+    }
+    case "SimdFma": {
+      w.varint(24);
+      writeOperand(w, v.a);
+      writeOperand(w, v.b);
+      writeOperand(w, v.c);
       break;
     }
   }

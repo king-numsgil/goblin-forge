@@ -14,6 +14,13 @@
 
 import ts from "typescript";
 
+import {
+    LINALG_MODULE,
+    LINALG_TYPES,
+    type LinalgType,
+    linalgStructName,
+} from "./linalg.ts";
+
 /** The twelve fixed widths. */
 export const SCALARS = [
     "i8",
@@ -342,6 +349,22 @@ export function erase(checker: ts.TypeChecker, type: ts.Type): MachineType {
         );
     }
 
+    // `dvec3` and its family, before the ambient-class path that would
+    // otherwise make them opaque handles. They are written as ambient classes
+    // because that is the one declaration giving a type *and* a value — so
+    // `new dvec3(…)`, `v.x`, `dvec3.add(a, b)` and `a.add(b)` all come from one
+    // place — but their layout is this compiler's rather than someone else's,
+    // and it comes from the table instead of from tsc.
+    //
+    // Asking tsc would not work even if it were wanted: a `dvec3` declares
+    // three data members and forty methods, and `contractOf` rejects that
+    // mixture outright. Reading the layout from the table is what keeps that
+    // rule intact rather than weakened for this one family (DECISIONS §22).
+    const linalg = linalgTypeOf(type);
+    if (linalg !== null) {
+        return linalgStruct(linalg);
+    }
+
     // Before the object case, and before `isArrayType`: a class is nominal, so
     // it must not fall through to structural erasure and become an aggregate
     // that happens to have the same fields.
@@ -498,6 +521,21 @@ function eraseWrapper(checker: ts.TypeChecker, type: ts.Type): MachineType | nul
                 return {kind: "reference", referent: erase(checker, referent)};
             }
 
+            // `Reference<dvec3>`, for exactly the reason the array check above
+            // exists. A `dvec3` declares three data members and forty methods,
+            // which is the mixture `contractOf` refuses — and it refuses by
+            // *throwing*, so a `Reference<dvec3>` would come back as "cannot be
+            // erased" rather than as a reference. That is what a chained
+            // `a.addMut(b).scaleMut(2)` produces, and the failure was a call
+            // target the compiler said it did not support.
+            //
+            // Like `Array<T>`, a linear-algebra type is neither a shape nor a
+            // contract: it is a built-in whose layout comes from a table
+            // (DECISIONS §22), so it answers before the question is asked.
+            if (linalgTypeOf(referent) !== null) {
+                return {kind: "reference", referent: erase(checker, referent)};
+            }
+
             const contract = contractOf(checker, referent);
             if (contract !== null) {
                 return contract;
@@ -603,6 +641,68 @@ export function classNameOf(type: ts.Type): string | null {
  * refused by erasure as a class it has never heard of, which is `GF0001` about
  * a declaration that was perfectly well formed.
  */
+/**
+ * `dvec3` and its family, recognised by **where they were declared**.
+ *
+ * DECISIONS §22. The name alone is not the question and must not become it: a
+ * flat table of names would match a `dvec3` declared in any `.d.ts` the project
+ * happens to include, and silently give a user's own type the compiler's
+ * arithmetic. So the declaration has to sit inside `declare module
+ * "std/linalg"`, which is the same rule `STD_MODULES` applies to `mi_malloc`.
+ *
+ * These are recognised *before* {@link ambientClassNameOf}, which would
+ * otherwise claim them: they are written as ambient classes, and an ambient
+ * class is normally an opaque handle whose layout lives in someone else's
+ * build. A `dvec3`'s layout lives here, in {@link LINALG_TYPES}.
+ */
+export function linalgTypeOf(type: ts.Type): LinalgType | null {
+    const symbol = type.getSymbol();
+    if (symbol === undefined) {
+        return null;
+    }
+    const declaration = symbol.declarations?.find(ts.isClassDeclaration);
+    if (declaration?.name === undefined) {
+        return null;
+    }
+    const found = LINALG_TYPES.get(declaration.name.text);
+    if (found === undefined) {
+        return null;
+    }
+    return declaringModuleOf(declaration) === LINALG_MODULE ? found : null;
+}
+
+/**
+ * The specifier of the `declare module "…"` a node sits inside, if any.
+ *
+ * An ambient module's name is a *string literal*, which is what distinguishes
+ * `declare module "std/linalg"` from a namespace called `linalg`. Asking for
+ * the literal rather than the identifier is what keeps a namespace of that name
+ * from answering yes.
+ */
+function declaringModuleOf(node: ts.Node): string | null {
+    for (let at: ts.Node | undefined = node.parent; at !== undefined; at = at.parent) {
+        if (ts.isModuleDeclaration(at) && ts.isStringLiteral(at.name)) {
+            return at.name.text;
+        }
+    }
+    return null;
+}
+
+/** The struct a linear-algebra type erases to: its fields, and nothing else. */
+export function linalgStruct(found: LinalgType): MachineType {
+    return {
+        kind: "struct",
+        name: linalgStructName(found),
+        fields: found.fields.map((field) => ({
+            name: field,
+            type:
+                found.element === "bool"
+                    ? {kind: "bool"}
+                    : {kind: "scalar", name: found.element},
+        })),
+    };
+}
+
 export function ambientClassNameOf(type: ts.Type): string | null {
     const symbol = type.getSymbol();
     if (symbol === undefined) {

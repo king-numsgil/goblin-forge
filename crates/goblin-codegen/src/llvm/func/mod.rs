@@ -38,6 +38,7 @@
 //! wraps. [`Emitter::binary`] is the one place a flag could go and it does not.
 
 mod ownership;
+mod simd;
 
 use std::collections::BTreeSet;
 
@@ -466,6 +467,19 @@ impl<'a, 'm> Emitter<'a, 'm> {
                     self.line(format!("{ptr} = alloca {ty}, align {align}"));
                     self.locals.push(Local::Slot { ptr, align });
                 }
+                // The vector type itself rather than bytes, because the
+                // alignment LLVM wants for one is its own — `<3 x double>`
+                // reserves 32 bytes and is 32-aligned even though a store
+                // through it touches 24 (DECISIONS §22).
+                Repr::Vector { elem, lanes } => {
+                    let ptr = format!("%p{index}");
+                    let align = self.layouts.layout(decl.ty)?.align.max(1);
+                    self.line(format!(
+                        "{ptr} = alloca <{lanes} x {}>, align {align}",
+                        scalar(elem)
+                    ));
+                    self.locals.push(Local::Slot { ptr, align });
+                }
                 Repr::Aggregate => {
                     let ptr = format!("%p{index}");
                     let layout = self.layouts.layout(decl.ty)?;
@@ -574,6 +588,7 @@ impl<'a, 'm> Emitter<'a, 'm> {
     fn value_type(&mut self, ty: TyId) -> Result<String> {
         match self.layouts.repr(ty)? {
             Repr::Register(value) => Ok(scalar(value).to_owned()),
+            Repr::Vector { elem, lanes } => Ok(format!("<{lanes} x {}>", scalar(elem))),
             Repr::Void => Ok("void".to_owned()),
             Repr::Aggregate => Ok("ptr".to_owned()),
         }
@@ -1098,6 +1113,10 @@ impl<'a, 'm> Emitter<'a, 'm> {
             Rvalue::TryInterface { interface, source } => {
                 self.try_interface(dest, *interface, source)
             }
+            // A vector written back into the struct it came from. `align` is
+            // the struct's — a `dvec3` is 8-aligned like any other struct of
+            // `f64`, and the store touches its 24 bytes and no more.
+            Rvalue::SimdStore { vector } => self.simd_store(dest, vector, align),
             other => internal_error!("{} into an aggregate has no lowering", rvalue_name(other)),
         }
     }
@@ -1163,6 +1182,17 @@ impl<'a, 'm> Emitter<'a, 'm> {
                     .ok_or_else(|| InternalError::new("`gf_array_push_slot` returned nothing"))?,
                 )
             }
+            // Vector arithmetic lives in `simd.rs`: one subject, and one that
+            // wants its own note about store size against alloc size rather
+            // than a paragraph wedged into this match.
+            Rvalue::SimdLoad { .. }
+            | Rvalue::SimdFromParts { .. }
+            | Rvalue::SimdExtract { .. }
+            | Rvalue::SimdSplat { .. }
+            | Rvalue::SimdBinary { .. }
+            | Rvalue::SimdUnary { .. }
+            | Rvalue::SimdShuffle { .. }
+            | Rvalue::SimdFma { .. } => Some(self.simd_rvalue(rvalue)?),
             other => internal_error!("{} has no lowering", rvalue_name(other)),
         })
     }
@@ -1626,6 +1656,9 @@ impl<'a, 'm> Emitter<'a, 'm> {
                 let value = self.load(&Place::local(LocalId::RETURN), ret)?;
                 self.line(format!("ret {}", value.used()));
             }
+            // A `dvec3` is returned as the struct it is; the vector form never
+            // leaves the function that computed it (DECISIONS §22).
+            Repr::Vector { .. } => internal_error!("a function cannot return a vector"),
             // A small struct goes back to C **in registers** under both
             // conventions, so it is taken apart rather than returned by
             // address. Two or more carriers travel as an anonymous struct,
@@ -2033,5 +2066,14 @@ fn rvalue_name(rvalue: &Rvalue) -> &'static str {
         Rvalue::ArrayPushSlot(_) => "`push`",
         Rvalue::SizeOf(_) => "`sizeOf`",
         Rvalue::AlignOf(_) => "`alignOf`",
+        Rvalue::SimdLoad { .. } => "a vector load",
+        Rvalue::SimdStore { .. } => "a vector store",
+        Rvalue::SimdFromParts { .. } => "a vector built from lanes",
+        Rvalue::SimdExtract { .. } => "a lane read",
+        Rvalue::SimdSplat { .. } => "a splat",
+        Rvalue::SimdBinary { .. } => "a vector binary operation",
+        Rvalue::SimdUnary { .. } => "a vector unary operation",
+        Rvalue::SimdShuffle { .. } => "a shuffle",
+        Rvalue::SimdFma { .. } => "a fused multiply-add",
     }
 }
