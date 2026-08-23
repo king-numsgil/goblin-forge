@@ -2071,6 +2071,78 @@ several wrong implementations.
 A singular matrix divides by zero and produces infinities, like every other
 total operation in this language (§21). There is no error to return.
 
+### A quaternion is four lanes and one different operation
+
+`dquat` shares four fifths of its arithmetic with `dvec4` and reaches the same
+arms of the lowerer for it: `add`, `sub`, `scale`, `negate`, `dot`, `length`,
+`lengthSq`, `normalize` and `equals` are the same operations on the same four
+numbers. Only seven kinds divert, and the routing is written as a set of those
+seven rather than as "quaternions go elsewhere", so the sharing is enforced
+rather than described.
+
+**It is a separate type because of `mul`.** An elementwise product of two
+rotations is not a rotation, and a `dvec4` that carried a `slerp` would let any
+four numbers claim to be one. That is the whole argument; everything else about
+a quaternion would have been fine as a vector.
+
+Two things it does that are easy to get wrong and produce a *rotation* rather
+than an error, so both are asserted by applying them to a known vector:
+
+- **`slerp` takes the short way round.** `q` and `-q` are the same rotation, so
+  an interpolation that ignores the sign of the dot product travels the long way
+  half the time — a three-hundred-degree spin where a sixty-degree one was
+  meant, depending on how the endpoints happened to be built. The sign flip is a
+  select on a splat, not a branch.
+- **It is normalised-linear, not the `sin` form.** True slerp divides by
+  `sin(theta)`, which goes to zero for nearly-parallel inputs and is the usual
+  source of a NaN here. This form has no such pole; the cost is a
+  non-uniform-velocity along the arc that nothing has ever noticed.
+
+`rotateVec` is the two-cross-product identity rather than a matrix build: fewer
+operations, and no dependency on the matrix types.
+
+### Integers and booleans get no vector unit, and a smaller surface
+
+Restating §22's rule with what it turned out to cost: AVX2 has no 64-bit
+integer multiply and no integer division, so a vectorised `lvec` would be part
+vectorised and part not — a cliff nothing in the type admits to. All of them are
+scalar, which is one lowering rule.
+
+The **surface is smaller, deliberately**. No `length`, `normalize`, `distance`
+or `lerp` on an integer vector: each is a question about a square root or a
+fractional part, and an integer answer to either is a different type wearing
+this one's name. `dot` and `lengthSq` *are* there, because both are exact in
+integers and both are what an integer vector is usually for. `negate` and `abs`
+exist only where the element is signed.
+
+`min` and `max` are the one place integers cost more than floats. There is no
+integer `llvm.minnum`, so each is a compare and a select — which is why the MIR
+grew `Rvalue::Select`. It is deliberately not the conditional operator: that
+short-circuits, which makes it control flow, and this is the case where both
+arms have already been computed and a branch per component would cost more than
+the operation it skipped.
+
+### A comparison produces a `bvec`, never a mask
+
+`a.lessThan(b)` is a struct of one-byte booleans, and `any`/`all` reduce it.
+
+**No masks anywhere in the MIR**, which is the same decision as §22's original
+one about lane 3: a mask would be a second representation of a boolean, live
+only inside vector expressions, and need a conversion at every boundary. So a
+comparison is one scalar compare per component whatever the element is, and the
+float and integer paths are one path.
+
+The cost is that `dvec4.lessThan` is four `fcmp` rather than one `cmppd`. That
+is a real cost and a visible place to optimise later; it buys a boolean vector
+that is an ordinary value — storable in a struct, passable to a function,
+printable — rather than a register-only thing.
+
+**`equalTo` is not `equals`.** `equals` asks one question about the whole vector
+and answers `boolean`; `equalTo` asks it per component and answers a `bvec`. GLM
+calls the second one `equal`, one letter from the first — near enough to be a
+typo that compiles and returns the wrong shape, so the name here is deliberately
+further away.
+
 ### Indexing is a literal, and it is a field
 
 `m[0]` is `m.c0` and `v[1]` is `v.y` — the spelling a shader uses, lowered to

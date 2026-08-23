@@ -1141,6 +1141,37 @@ impl<'a, 'm> Emitter<'a, 'm> {
                 let align = self.layouts.layout(*of)?.align.max(1);
                 Some(Val::new(self.value_type(ty)?, align.to_string()))
             }
+            // Both arms are already values, so this is one instruction and no
+            // branch. The condition is a `bool`, which is an `i8` here, and
+            // LLVM's `select` wants an `i1` — so it is truncated rather than
+            // compared, because a `bool` only ever holds 0 or 1.
+            Rvalue::Select {
+                cond,
+                if_true,
+                if_false,
+            } => {
+                let condition = self
+                    .operand(cond)?
+                    .ok_or_else(|| InternalError::new("a select with no condition"))?;
+                let yes = self
+                    .operand(if_true)?
+                    .ok_or_else(|| InternalError::new("a select with no true arm"))?;
+                let no = self
+                    .operand(if_false)?
+                    .ok_or_else(|| InternalError::new("a select with no false arm"))?;
+                let bit = self.tmp();
+                self.line(format!(
+                    "{bit} = trunc {} {} to i1",
+                    condition.ty, condition.name
+                ));
+                let out = self.tmp();
+                self.line(format!(
+                    "{out} = select i1 {bit}, {}, {}",
+                    yes.used(),
+                    no.used()
+                ));
+                Some(Val::new(yes.ty, out))
+            }
             // A `T[]` is a one-word handle, so an array literal is a value
             // rather than something built into a destination.
             Rvalue::Aggregate { ty: array, fields } => Some(self.build_array(*array, fields)?),
@@ -2066,6 +2097,7 @@ fn rvalue_name(rvalue: &Rvalue) -> &'static str {
         Rvalue::ArrayPushSlot(_) => "`push`",
         Rvalue::SizeOf(_) => "`sizeOf`",
         Rvalue::AlignOf(_) => "`alignOf`",
+        Rvalue::Select { .. } => "a select",
         Rvalue::SimdLoad { .. } => "a vector load",
         Rvalue::SimdStore { .. } => "a vector store",
         Rvalue::SimdFromParts { .. } => "a vector built from lanes",

@@ -279,6 +279,11 @@ function rvalue(module: Module, value: Rvalue): string {
         // lowerer precisely so that a `dot` reads as a multiply, a shuffle and
         // two adds in a dump. A dump that would not show that gives the design
         // away.
+        case "Select":
+            return `${operand(module, value.cond)} ? ${operand(module, value.ifTrue)} : ${operand(
+                module,
+                value.ifFalse,
+            )}`;
         case "SimdLoad":
             return `vload ${ty(module, value.ty)} (${place(value.source)})`;
         case "SimdStore":

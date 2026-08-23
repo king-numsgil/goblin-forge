@@ -180,11 +180,33 @@ a generator for the declarations. Adding an operation is a row in `LINALG_OPS`
 The backend is not involved either way, because it only ever sees SIMD
 primitives.
 
-Matrices live in `packages/forge/src/lower/linalg-matrix.ts`, reached from the
-shared dispatch through two `protected abstract` hooks. **A matrix is columns
-of a vector type** — `dmat3` is a struct of three `dvec3` — which is why
-`add`, `sub`, `scale`, `negate` and `equals` on a matrix reuse the vector arms
-unchanged and only five operations are matrix-specific.
+The lowering is one dispatch in `lower/linalg.ts` and four families reached
+from it through `protected abstract` hooks:
+
+| File | What it lowers |
+|---|---|
+| `linalg.ts` | float vectors, and the dispatch every family shares |
+| `linalg-matrix.ts` | matrices |
+| `linalg-scalar.ts` | integer and boolean vectors, and every comparison |
+| `linalg-quat.ts` | quaternions |
+
+Two reuse rules carry most of the weight, and both are enforced rather than
+described. **A matrix is columns of a vector type** — `dmat3` is a struct of
+three `dvec3` — so `add`, `sub`, `scale`, `negate` and `equals` reuse the
+vector arms and only five operations are matrix-specific. **A quaternion is
+four lanes**, so only the seven kinds in `QUAT_ONLY_KINDS` divert; everything
+else is the vector operation of the same name.
+
+Two traps worth knowing before touching the dispatch:
+
+- **A matrix has `lanes: null` too.** That field means "not one register", and
+  a matrix is not one either — its columns are. Routing on `lanes === null`
+  without also testing `family === "vec"` sends every matrix operation to the
+  integer path.
+- **`linalgMethodOf` searches `opsFor(type)`.** It used to consult two
+  prebuilt maps and silently answered from the *float vector* table for the
+  other three families — which worked for `add` and `dot`, because those names
+  are in every table, and failed for `any` and `slerp`.
 
 **After changing that table, run `bun run build:linalg`.** It rewrites the
 generated block of `global.d.ts` in place. Skipping it leaves the compiler

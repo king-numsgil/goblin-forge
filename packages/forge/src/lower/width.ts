@@ -23,6 +23,7 @@ import {
     linalgStruct,
     type LinalgType,
     type MachineType,
+    relatedType,
     type Operator,
     type OperatorInfo,
     OPERATORS,
@@ -1044,15 +1045,23 @@ export abstract class WidthPass extends Emitter {
                 return found.mutating
                     ? typed({kind: "reference", referent: linalgStruct(type)})
                     : value;
-            // `m.mulVec(v)` — a matrix operation whose result is one of its
-            // columns rather than a matrix.
-            case "column": {
-                const column = columnTypeOf(type);
-                if (column === undefined) {
-                    this.outer.unsupported(access, `\`${name}\`, which has no column type`);
+            // The results that are a *related* type rather than the receiver's:
+            // a matrix's column, the vector a quaternion rotates, the `bvec` a
+            // comparison produces, the matrix a quaternion converts to.
+            case "column":
+            case "axis":
+            case "boolVector":
+            case "matrix3":
+            case "matrix4": {
+                const related = relatedType(type, found.op.returns);
+                if (related === undefined) {
+                    this.outer.unsupported(
+                        access,
+                        `\`${name}\`, whose result type does not exist for \`${type.name}\``,
+                    );
                     return ERROR;
                 }
-                return typed(linalgStruct(column));
+                return typed(linalgStruct(related));
             }
             case "scalar":
                 return typed(

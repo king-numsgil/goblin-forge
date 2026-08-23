@@ -1472,6 +1472,11 @@ declare module "std/linalg" {
          * word at the site that pays for it.
          */
         static from(value: fvec2): dvec2;
+        static from(value: ivec2): dvec2;
+        static from(value: uvec2): dvec2;
+        static from(value: lvec2): dvec2;
+        static from(value: ulvec2): dvec2;
+        static from(value: bvec2): dvec2;
 
         static add(a: dvec2, b: dvec2): dvec2;
         add(other: dvec2): dvec2;
@@ -1562,6 +1567,24 @@ declare module "std/linalg" {
 
         static equals(a: dvec2, b: dvec2): boolean;
         equals(other: dvec2): boolean;
+
+        static lessThan(a: dvec2, b: dvec2): bvec2;
+        lessThan(other: dvec2): bvec2;
+
+        static lessThanEqual(a: dvec2, b: dvec2): bvec2;
+        lessThanEqual(other: dvec2): bvec2;
+
+        static greaterThan(a: dvec2, b: dvec2): bvec2;
+        greaterThan(other: dvec2): bvec2;
+
+        static greaterThanEqual(a: dvec2, b: dvec2): bvec2;
+        greaterThanEqual(other: dvec2): bvec2;
+
+        static equalTo(a: dvec2, b: dvec2): bvec2;
+        equalTo(other: dvec2): bvec2;
+
+        static notEqualTo(a: dvec2, b: dvec2): bvec2;
+        notEqualTo(other: dvec2): bvec2;
     }
 
     /**
@@ -1610,6 +1633,11 @@ declare module "std/linalg" {
         static from(value: aligned_dvec3): dvec3;
         static from(value: fvec3): dvec3;
         static from(value: aligned_fvec3): dvec3;
+        static from(value: ivec3): dvec3;
+        static from(value: uvec3): dvec3;
+        static from(value: lvec3): dvec3;
+        static from(value: ulvec3): dvec3;
+        static from(value: bvec3): dvec3;
 
         static add(a: dvec3, b: dvec3): dvec3;
         add(other: dvec3): dvec3;
@@ -1704,6 +1732,24 @@ declare module "std/linalg" {
 
         static equals(a: dvec3, b: dvec3): boolean;
         equals(other: dvec3): boolean;
+
+        static lessThan(a: dvec3, b: dvec3): bvec3;
+        lessThan(other: dvec3): bvec3;
+
+        static lessThanEqual(a: dvec3, b: dvec3): bvec3;
+        lessThanEqual(other: dvec3): bvec3;
+
+        static greaterThan(a: dvec3, b: dvec3): bvec3;
+        greaterThan(other: dvec3): bvec3;
+
+        static greaterThanEqual(a: dvec3, b: dvec3): bvec3;
+        greaterThanEqual(other: dvec3): bvec3;
+
+        static equalTo(a: dvec3, b: dvec3): bvec3;
+        equalTo(other: dvec3): bvec3;
+
+        static notEqualTo(a: dvec3, b: dvec3): bvec3;
+        notEqualTo(other: dvec3): bvec3;
     }
 
     /**
@@ -1753,6 +1799,11 @@ declare module "std/linalg" {
          * word at the site that pays for it.
          */
         static from(value: fvec4): dvec4;
+        static from(value: ivec4): dvec4;
+        static from(value: uvec4): dvec4;
+        static from(value: lvec4): dvec4;
+        static from(value: ulvec4): dvec4;
+        static from(value: bvec4): dvec4;
 
         static add(a: dvec4, b: dvec4): dvec4;
         add(other: dvec4): dvec4;
@@ -1843,6 +1894,24 @@ declare module "std/linalg" {
 
         static equals(a: dvec4, b: dvec4): boolean;
         equals(other: dvec4): boolean;
+
+        static lessThan(a: dvec4, b: dvec4): bvec4;
+        lessThan(other: dvec4): bvec4;
+
+        static lessThanEqual(a: dvec4, b: dvec4): bvec4;
+        lessThanEqual(other: dvec4): bvec4;
+
+        static greaterThan(a: dvec4, b: dvec4): bvec4;
+        greaterThan(other: dvec4): bvec4;
+
+        static greaterThanEqual(a: dvec4, b: dvec4): bvec4;
+        greaterThanEqual(other: dvec4): bvec4;
+
+        static equalTo(a: dvec4, b: dvec4): bvec4;
+        equalTo(other: dvec4): bvec4;
+
+        static notEqualTo(a: dvec4, b: dvec4): bvec4;
+        notEqualTo(other: dvec4): bvec4;
     }
 
     /**
@@ -1892,6 +1961,11 @@ declare module "std/linalg" {
         static from(value: dvec3): aligned_dvec3;
         static from(value: fvec3): aligned_dvec3;
         static from(value: aligned_fvec3): aligned_dvec3;
+        static from(value: ivec3): aligned_dvec3;
+        static from(value: uvec3): aligned_dvec3;
+        static from(value: lvec3): aligned_dvec3;
+        static from(value: ulvec3): aligned_dvec3;
+        static from(value: bvec3): aligned_dvec3;
 
         static add(a: aligned_dvec3, b: aligned_dvec3): aligned_dvec3;
         add(other: aligned_dvec3): aligned_dvec3;
@@ -1986,6 +2060,2550 @@ declare module "std/linalg" {
 
         static equals(a: aligned_dvec3, b: aligned_dvec3): boolean;
         equals(other: aligned_dvec3): boolean;
+
+        static lessThan(a: aligned_dvec3, b: aligned_dvec3): bvec3;
+        lessThan(other: aligned_dvec3): bvec3;
+
+        static lessThanEqual(a: aligned_dvec3, b: aligned_dvec3): bvec3;
+        lessThanEqual(other: aligned_dvec3): bvec3;
+
+        static greaterThan(a: aligned_dvec3, b: aligned_dvec3): bvec3;
+        greaterThan(other: aligned_dvec3): bvec3;
+
+        static greaterThanEqual(a: aligned_dvec3, b: aligned_dvec3): bvec3;
+        greaterThanEqual(other: aligned_dvec3): bvec3;
+
+        static equalTo(a: aligned_dvec3, b: aligned_dvec3): bvec3;
+        equalTo(other: aligned_dvec3): bvec3;
+
+        static notEqualTo(a: aligned_dvec3, b: aligned_dvec3): bvec3;
+        notEqualTo(other: aligned_dvec3): bvec3;
+    }
+
+    /**
+     * `fvec2` — 2 `f32`.
+     *
+     * Exactly 2 components and no padding — 8 bytes — so an array of
+     * them is the layout a vertex buffer wants.
+     */
+    export class fvec2 {
+        private readonly __linalg: "fvec2";
+
+        constructor(x: f32, y: f32);
+
+        x: f32;
+        y: f32;
+
+        [index: number]: f32;
+
+        /** Every component zero. */
+        static zero(): fvec2;
+
+        /** Every component one. */
+        static one(): fvec2;
+
+        /** Every component the same value. */
+        static splat(value: f32): fvec2;
+
+        /** The x-axis: 1 in component 0, 0 elsewhere. */
+        static unitX(): fvec2;
+
+        /** The y-axis: 1 in component 1, 0 elsewhere. */
+        static unitY(): fvec2;
+
+        /**
+         * Convert from another 2-component vector.
+         *
+         * Explicit because nothing here converts on its own: an `fvec3` is not a
+         * narrower `dvec3`, and a conversion that costs precision should cost a
+         * word at the site that pays for it.
+         */
+        static from(value: dvec2): fvec2;
+        static from(value: ivec2): fvec2;
+        static from(value: uvec2): fvec2;
+        static from(value: lvec2): fvec2;
+        static from(value: ulvec2): fvec2;
+        static from(value: bvec2): fvec2;
+
+        static add(a: fvec2, b: fvec2): fvec2;
+        add(other: fvec2): fvec2;
+        addMut(other: fvec2): Reference<fvec2>;
+
+        static sub(a: fvec2, b: fvec2): fvec2;
+        sub(other: fvec2): fvec2;
+        subMut(other: fvec2): Reference<fvec2>;
+
+        static mul(a: fvec2, b: fvec2): fvec2;
+        mul(other: fvec2): fvec2;
+        mulMut(other: fvec2): Reference<fvec2>;
+
+        static div(a: fvec2, b: fvec2): fvec2;
+        div(other: fvec2): fvec2;
+        divMut(other: fvec2): Reference<fvec2>;
+
+        static min(a: fvec2, b: fvec2): fvec2;
+        min(other: fvec2): fvec2;
+        minMut(other: fvec2): Reference<fvec2>;
+
+        static max(a: fvec2, b: fvec2): fvec2;
+        max(other: fvec2): fvec2;
+        maxMut(other: fvec2): Reference<fvec2>;
+
+        static scale(a: fvec2, by: f32): fvec2;
+        scale(by: f32): fvec2;
+        scaleMut(by: f32): Reference<fvec2>;
+
+        static addScaled(a: fvec2, b: fvec2, t: f32): fvec2;
+        addScaled(other: fvec2, t: f32): fvec2;
+        addScaledMut(other: fvec2, t: f32): Reference<fvec2>;
+
+        static negate(a: fvec2): fvec2;
+        negate(): fvec2;
+        negateMut(): Reference<fvec2>;
+
+        static abs(a: fvec2): fvec2;
+        abs(): fvec2;
+        absMut(): Reference<fvec2>;
+
+        static sqrt(a: fvec2): fvec2;
+        sqrt(): fvec2;
+        sqrtMut(): Reference<fvec2>;
+
+        static floor(a: fvec2): fvec2;
+        floor(): fvec2;
+        floorMut(): Reference<fvec2>;
+
+        static ceil(a: fvec2): fvec2;
+        ceil(): fvec2;
+        ceilMut(): Reference<fvec2>;
+
+        static round(a: fvec2): fvec2;
+        round(): fvec2;
+        roundMut(): Reference<fvec2>;
+
+        static trunc(a: fvec2): fvec2;
+        trunc(): fvec2;
+        truncMut(): Reference<fvec2>;
+
+        static normalize(a: fvec2): fvec2;
+        normalize(): fvec2;
+        normalizeMut(): Reference<fvec2>;
+
+        static lerp(a: fvec2, b: fvec2, t: f32): fvec2;
+        lerp(other: fvec2, t: f32): fvec2;
+        lerpMut(other: fvec2, t: f32): Reference<fvec2>;
+
+        static clamp(a: fvec2, low: fvec2, high: fvec2): fvec2;
+        clamp(low: fvec2, high: fvec2): fvec2;
+        clampMut(low: fvec2, high: fvec2): Reference<fvec2>;
+
+        static dot(a: fvec2, b: fvec2): f32;
+        dot(other: fvec2): f32;
+
+        static lengthSq(a: fvec2): f32;
+        lengthSq(): f32;
+
+        static length(a: fvec2): f32;
+        length(): f32;
+
+        static distance(a: fvec2, b: fvec2): f32;
+        distance(other: fvec2): f32;
+
+        static distanceSq(a: fvec2, b: fvec2): f32;
+        distanceSq(other: fvec2): f32;
+
+        static equals(a: fvec2, b: fvec2): boolean;
+        equals(other: fvec2): boolean;
+
+        static lessThan(a: fvec2, b: fvec2): bvec2;
+        lessThan(other: fvec2): bvec2;
+
+        static lessThanEqual(a: fvec2, b: fvec2): bvec2;
+        lessThanEqual(other: fvec2): bvec2;
+
+        static greaterThan(a: fvec2, b: fvec2): bvec2;
+        greaterThan(other: fvec2): bvec2;
+
+        static greaterThanEqual(a: fvec2, b: fvec2): bvec2;
+        greaterThanEqual(other: fvec2): bvec2;
+
+        static equalTo(a: fvec2, b: fvec2): bvec2;
+        equalTo(other: fvec2): bvec2;
+
+        static notEqualTo(a: fvec2, b: fvec2): bvec2;
+        notEqualTo(other: fvec2): bvec2;
+    }
+
+    /**
+     * `fvec3` — 3 `f32`.
+     *
+     * Exactly 3 components and no padding — 12 bytes — so an array of
+     * them is the layout a vertex buffer wants.
+     * `aligned_fvec3` is the same maths with a lane of padding, and faster.
+     */
+    export class fvec3 {
+        private readonly __linalg: "fvec3";
+
+        constructor(x: f32, y: f32, z: f32);
+
+        x: f32;
+        y: f32;
+        z: f32;
+
+        [index: number]: f32;
+
+        /** Every component zero. */
+        static zero(): fvec3;
+
+        /** Every component one. */
+        static one(): fvec3;
+
+        /** Every component the same value. */
+        static splat(value: f32): fvec3;
+
+        /** The x-axis: 1 in component 0, 0 elsewhere. */
+        static unitX(): fvec3;
+
+        /** The y-axis: 1 in component 1, 0 elsewhere. */
+        static unitY(): fvec3;
+
+        /** The z-axis: 1 in component 2, 0 elsewhere. */
+        static unitZ(): fvec3;
+
+        /**
+         * Convert from another 3-component vector.
+         *
+         * Explicit because nothing here converts on its own: an `fvec3` is not a
+         * narrower `dvec3`, and a conversion that costs precision should cost a
+         * word at the site that pays for it.
+         */
+        static from(value: dvec3): fvec3;
+        static from(value: aligned_dvec3): fvec3;
+        static from(value: aligned_fvec3): fvec3;
+        static from(value: ivec3): fvec3;
+        static from(value: uvec3): fvec3;
+        static from(value: lvec3): fvec3;
+        static from(value: ulvec3): fvec3;
+        static from(value: bvec3): fvec3;
+
+        static add(a: fvec3, b: fvec3): fvec3;
+        add(other: fvec3): fvec3;
+        addMut(other: fvec3): Reference<fvec3>;
+
+        static sub(a: fvec3, b: fvec3): fvec3;
+        sub(other: fvec3): fvec3;
+        subMut(other: fvec3): Reference<fvec3>;
+
+        static mul(a: fvec3, b: fvec3): fvec3;
+        mul(other: fvec3): fvec3;
+        mulMut(other: fvec3): Reference<fvec3>;
+
+        static div(a: fvec3, b: fvec3): fvec3;
+        div(other: fvec3): fvec3;
+        divMut(other: fvec3): Reference<fvec3>;
+
+        static min(a: fvec3, b: fvec3): fvec3;
+        min(other: fvec3): fvec3;
+        minMut(other: fvec3): Reference<fvec3>;
+
+        static max(a: fvec3, b: fvec3): fvec3;
+        max(other: fvec3): fvec3;
+        maxMut(other: fvec3): Reference<fvec3>;
+
+        static scale(a: fvec3, by: f32): fvec3;
+        scale(by: f32): fvec3;
+        scaleMut(by: f32): Reference<fvec3>;
+
+        static addScaled(a: fvec3, b: fvec3, t: f32): fvec3;
+        addScaled(other: fvec3, t: f32): fvec3;
+        addScaledMut(other: fvec3, t: f32): Reference<fvec3>;
+
+        static negate(a: fvec3): fvec3;
+        negate(): fvec3;
+        negateMut(): Reference<fvec3>;
+
+        static abs(a: fvec3): fvec3;
+        abs(): fvec3;
+        absMut(): Reference<fvec3>;
+
+        static sqrt(a: fvec3): fvec3;
+        sqrt(): fvec3;
+        sqrtMut(): Reference<fvec3>;
+
+        static floor(a: fvec3): fvec3;
+        floor(): fvec3;
+        floorMut(): Reference<fvec3>;
+
+        static ceil(a: fvec3): fvec3;
+        ceil(): fvec3;
+        ceilMut(): Reference<fvec3>;
+
+        static round(a: fvec3): fvec3;
+        round(): fvec3;
+        roundMut(): Reference<fvec3>;
+
+        static trunc(a: fvec3): fvec3;
+        trunc(): fvec3;
+        truncMut(): Reference<fvec3>;
+
+        static normalize(a: fvec3): fvec3;
+        normalize(): fvec3;
+        normalizeMut(): Reference<fvec3>;
+
+        static lerp(a: fvec3, b: fvec3, t: f32): fvec3;
+        lerp(other: fvec3, t: f32): fvec3;
+        lerpMut(other: fvec3, t: f32): Reference<fvec3>;
+
+        static clamp(a: fvec3, low: fvec3, high: fvec3): fvec3;
+        clamp(low: fvec3, high: fvec3): fvec3;
+        clampMut(low: fvec3, high: fvec3): Reference<fvec3>;
+
+        static cross(a: fvec3, b: fvec3): fvec3;
+        cross(other: fvec3): fvec3;
+        crossMut(other: fvec3): Reference<fvec3>;
+
+        static dot(a: fvec3, b: fvec3): f32;
+        dot(other: fvec3): f32;
+
+        static lengthSq(a: fvec3): f32;
+        lengthSq(): f32;
+
+        static length(a: fvec3): f32;
+        length(): f32;
+
+        static distance(a: fvec3, b: fvec3): f32;
+        distance(other: fvec3): f32;
+
+        static distanceSq(a: fvec3, b: fvec3): f32;
+        distanceSq(other: fvec3): f32;
+
+        static equals(a: fvec3, b: fvec3): boolean;
+        equals(other: fvec3): boolean;
+
+        static lessThan(a: fvec3, b: fvec3): bvec3;
+        lessThan(other: fvec3): bvec3;
+
+        static lessThanEqual(a: fvec3, b: fvec3): bvec3;
+        lessThanEqual(other: fvec3): bvec3;
+
+        static greaterThan(a: fvec3, b: fvec3): bvec3;
+        greaterThan(other: fvec3): bvec3;
+
+        static greaterThanEqual(a: fvec3, b: fvec3): bvec3;
+        greaterThanEqual(other: fvec3): bvec3;
+
+        static equalTo(a: fvec3, b: fvec3): bvec3;
+        equalTo(other: fvec3): bvec3;
+
+        static notEqualTo(a: fvec3, b: fvec3): bvec3;
+        notEqualTo(other: fvec3): bvec3;
+    }
+
+    /**
+     * `fvec4` — 4 `f32`.
+     *
+     * Exactly 4 components and no padding — 16 bytes — so an array of
+     * them is the layout a vertex buffer wants.
+     */
+    export class fvec4 {
+        private readonly __linalg: "fvec4";
+
+        constructor(x: f32, y: f32, z: f32, w: f32);
+
+        x: f32;
+        y: f32;
+        z: f32;
+        w: f32;
+
+        [index: number]: f32;
+
+        /** Every component zero. */
+        static zero(): fvec4;
+
+        /** Every component one. */
+        static one(): fvec4;
+
+        /** Every component the same value. */
+        static splat(value: f32): fvec4;
+
+        /** The x-axis: 1 in component 0, 0 elsewhere. */
+        static unitX(): fvec4;
+
+        /** The y-axis: 1 in component 1, 0 elsewhere. */
+        static unitY(): fvec4;
+
+        /** The z-axis: 1 in component 2, 0 elsewhere. */
+        static unitZ(): fvec4;
+
+        /** The w-axis: 1 in component 3, 0 elsewhere. */
+        static unitW(): fvec4;
+
+        /**
+         * Convert from another 4-component vector.
+         *
+         * Explicit because nothing here converts on its own: an `fvec3` is not a
+         * narrower `dvec3`, and a conversion that costs precision should cost a
+         * word at the site that pays for it.
+         */
+        static from(value: dvec4): fvec4;
+        static from(value: ivec4): fvec4;
+        static from(value: uvec4): fvec4;
+        static from(value: lvec4): fvec4;
+        static from(value: ulvec4): fvec4;
+        static from(value: bvec4): fvec4;
+
+        static add(a: fvec4, b: fvec4): fvec4;
+        add(other: fvec4): fvec4;
+        addMut(other: fvec4): Reference<fvec4>;
+
+        static sub(a: fvec4, b: fvec4): fvec4;
+        sub(other: fvec4): fvec4;
+        subMut(other: fvec4): Reference<fvec4>;
+
+        static mul(a: fvec4, b: fvec4): fvec4;
+        mul(other: fvec4): fvec4;
+        mulMut(other: fvec4): Reference<fvec4>;
+
+        static div(a: fvec4, b: fvec4): fvec4;
+        div(other: fvec4): fvec4;
+        divMut(other: fvec4): Reference<fvec4>;
+
+        static min(a: fvec4, b: fvec4): fvec4;
+        min(other: fvec4): fvec4;
+        minMut(other: fvec4): Reference<fvec4>;
+
+        static max(a: fvec4, b: fvec4): fvec4;
+        max(other: fvec4): fvec4;
+        maxMut(other: fvec4): Reference<fvec4>;
+
+        static scale(a: fvec4, by: f32): fvec4;
+        scale(by: f32): fvec4;
+        scaleMut(by: f32): Reference<fvec4>;
+
+        static addScaled(a: fvec4, b: fvec4, t: f32): fvec4;
+        addScaled(other: fvec4, t: f32): fvec4;
+        addScaledMut(other: fvec4, t: f32): Reference<fvec4>;
+
+        static negate(a: fvec4): fvec4;
+        negate(): fvec4;
+        negateMut(): Reference<fvec4>;
+
+        static abs(a: fvec4): fvec4;
+        abs(): fvec4;
+        absMut(): Reference<fvec4>;
+
+        static sqrt(a: fvec4): fvec4;
+        sqrt(): fvec4;
+        sqrtMut(): Reference<fvec4>;
+
+        static floor(a: fvec4): fvec4;
+        floor(): fvec4;
+        floorMut(): Reference<fvec4>;
+
+        static ceil(a: fvec4): fvec4;
+        ceil(): fvec4;
+        ceilMut(): Reference<fvec4>;
+
+        static round(a: fvec4): fvec4;
+        round(): fvec4;
+        roundMut(): Reference<fvec4>;
+
+        static trunc(a: fvec4): fvec4;
+        trunc(): fvec4;
+        truncMut(): Reference<fvec4>;
+
+        static normalize(a: fvec4): fvec4;
+        normalize(): fvec4;
+        normalizeMut(): Reference<fvec4>;
+
+        static lerp(a: fvec4, b: fvec4, t: f32): fvec4;
+        lerp(other: fvec4, t: f32): fvec4;
+        lerpMut(other: fvec4, t: f32): Reference<fvec4>;
+
+        static clamp(a: fvec4, low: fvec4, high: fvec4): fvec4;
+        clamp(low: fvec4, high: fvec4): fvec4;
+        clampMut(low: fvec4, high: fvec4): Reference<fvec4>;
+
+        static dot(a: fvec4, b: fvec4): f32;
+        dot(other: fvec4): f32;
+
+        static lengthSq(a: fvec4): f32;
+        lengthSq(): f32;
+
+        static length(a: fvec4): f32;
+        length(): f32;
+
+        static distance(a: fvec4, b: fvec4): f32;
+        distance(other: fvec4): f32;
+
+        static distanceSq(a: fvec4, b: fvec4): f32;
+        distanceSq(other: fvec4): f32;
+
+        static equals(a: fvec4, b: fvec4): boolean;
+        equals(other: fvec4): boolean;
+
+        static lessThan(a: fvec4, b: fvec4): bvec4;
+        lessThan(other: fvec4): bvec4;
+
+        static lessThanEqual(a: fvec4, b: fvec4): bvec4;
+        lessThanEqual(other: fvec4): bvec4;
+
+        static greaterThan(a: fvec4, b: fvec4): bvec4;
+        greaterThan(other: fvec4): bvec4;
+
+        static greaterThanEqual(a: fvec4, b: fvec4): bvec4;
+        greaterThanEqual(other: fvec4): bvec4;
+
+        static equalTo(a: fvec4, b: fvec4): bvec4;
+        equalTo(other: fvec4): bvec4;
+
+        static notEqualTo(a: fvec4, b: fvec4): bvec4;
+        notEqualTo(other: fvec4): bvec4;
+    }
+
+    /**
+     * `aligned_fvec3` — 3 `f32`, padded to a whole register.
+     *
+     * Carries a lane of padding, so arithmetic is one instruction rather than a
+     * 128-bit operation and a scalar one. 16 bytes against
+     * `fvec3`'s 12: faster in a loop, wasteful in a vertex
+     * buffer. Pick deliberately.
+     */
+    export class aligned_fvec3 {
+        private readonly __linalg: "aligned_fvec3";
+
+        constructor(x: f32, y: f32, z: f32);
+
+        x: f32;
+        y: f32;
+        z: f32;
+
+        [index: number]: f32;
+
+        /** Every component zero. */
+        static zero(): aligned_fvec3;
+
+        /** Every component one. */
+        static one(): aligned_fvec3;
+
+        /** Every component the same value. */
+        static splat(value: f32): aligned_fvec3;
+
+        /** The x-axis: 1 in component 0, 0 elsewhere. */
+        static unitX(): aligned_fvec3;
+
+        /** The y-axis: 1 in component 1, 0 elsewhere. */
+        static unitY(): aligned_fvec3;
+
+        /** The z-axis: 1 in component 2, 0 elsewhere. */
+        static unitZ(): aligned_fvec3;
+
+        /**
+         * Convert from another 3-component vector.
+         *
+         * Explicit because nothing here converts on its own: an `fvec3` is not a
+         * narrower `dvec3`, and a conversion that costs precision should cost a
+         * word at the site that pays for it.
+         */
+        static from(value: dvec3): aligned_fvec3;
+        static from(value: aligned_dvec3): aligned_fvec3;
+        static from(value: fvec3): aligned_fvec3;
+        static from(value: ivec3): aligned_fvec3;
+        static from(value: uvec3): aligned_fvec3;
+        static from(value: lvec3): aligned_fvec3;
+        static from(value: ulvec3): aligned_fvec3;
+        static from(value: bvec3): aligned_fvec3;
+
+        static add(a: aligned_fvec3, b: aligned_fvec3): aligned_fvec3;
+        add(other: aligned_fvec3): aligned_fvec3;
+        addMut(other: aligned_fvec3): Reference<aligned_fvec3>;
+
+        static sub(a: aligned_fvec3, b: aligned_fvec3): aligned_fvec3;
+        sub(other: aligned_fvec3): aligned_fvec3;
+        subMut(other: aligned_fvec3): Reference<aligned_fvec3>;
+
+        static mul(a: aligned_fvec3, b: aligned_fvec3): aligned_fvec3;
+        mul(other: aligned_fvec3): aligned_fvec3;
+        mulMut(other: aligned_fvec3): Reference<aligned_fvec3>;
+
+        static div(a: aligned_fvec3, b: aligned_fvec3): aligned_fvec3;
+        div(other: aligned_fvec3): aligned_fvec3;
+        divMut(other: aligned_fvec3): Reference<aligned_fvec3>;
+
+        static min(a: aligned_fvec3, b: aligned_fvec3): aligned_fvec3;
+        min(other: aligned_fvec3): aligned_fvec3;
+        minMut(other: aligned_fvec3): Reference<aligned_fvec3>;
+
+        static max(a: aligned_fvec3, b: aligned_fvec3): aligned_fvec3;
+        max(other: aligned_fvec3): aligned_fvec3;
+        maxMut(other: aligned_fvec3): Reference<aligned_fvec3>;
+
+        static scale(a: aligned_fvec3, by: f32): aligned_fvec3;
+        scale(by: f32): aligned_fvec3;
+        scaleMut(by: f32): Reference<aligned_fvec3>;
+
+        static addScaled(a: aligned_fvec3, b: aligned_fvec3, t: f32): aligned_fvec3;
+        addScaled(other: aligned_fvec3, t: f32): aligned_fvec3;
+        addScaledMut(other: aligned_fvec3, t: f32): Reference<aligned_fvec3>;
+
+        static negate(a: aligned_fvec3): aligned_fvec3;
+        negate(): aligned_fvec3;
+        negateMut(): Reference<aligned_fvec3>;
+
+        static abs(a: aligned_fvec3): aligned_fvec3;
+        abs(): aligned_fvec3;
+        absMut(): Reference<aligned_fvec3>;
+
+        static sqrt(a: aligned_fvec3): aligned_fvec3;
+        sqrt(): aligned_fvec3;
+        sqrtMut(): Reference<aligned_fvec3>;
+
+        static floor(a: aligned_fvec3): aligned_fvec3;
+        floor(): aligned_fvec3;
+        floorMut(): Reference<aligned_fvec3>;
+
+        static ceil(a: aligned_fvec3): aligned_fvec3;
+        ceil(): aligned_fvec3;
+        ceilMut(): Reference<aligned_fvec3>;
+
+        static round(a: aligned_fvec3): aligned_fvec3;
+        round(): aligned_fvec3;
+        roundMut(): Reference<aligned_fvec3>;
+
+        static trunc(a: aligned_fvec3): aligned_fvec3;
+        trunc(): aligned_fvec3;
+        truncMut(): Reference<aligned_fvec3>;
+
+        static normalize(a: aligned_fvec3): aligned_fvec3;
+        normalize(): aligned_fvec3;
+        normalizeMut(): Reference<aligned_fvec3>;
+
+        static lerp(a: aligned_fvec3, b: aligned_fvec3, t: f32): aligned_fvec3;
+        lerp(other: aligned_fvec3, t: f32): aligned_fvec3;
+        lerpMut(other: aligned_fvec3, t: f32): Reference<aligned_fvec3>;
+
+        static clamp(a: aligned_fvec3, low: aligned_fvec3, high: aligned_fvec3): aligned_fvec3;
+        clamp(low: aligned_fvec3, high: aligned_fvec3): aligned_fvec3;
+        clampMut(low: aligned_fvec3, high: aligned_fvec3): Reference<aligned_fvec3>;
+
+        static cross(a: aligned_fvec3, b: aligned_fvec3): aligned_fvec3;
+        cross(other: aligned_fvec3): aligned_fvec3;
+        crossMut(other: aligned_fvec3): Reference<aligned_fvec3>;
+
+        static dot(a: aligned_fvec3, b: aligned_fvec3): f32;
+        dot(other: aligned_fvec3): f32;
+
+        static lengthSq(a: aligned_fvec3): f32;
+        lengthSq(): f32;
+
+        static length(a: aligned_fvec3): f32;
+        length(): f32;
+
+        static distance(a: aligned_fvec3, b: aligned_fvec3): f32;
+        distance(other: aligned_fvec3): f32;
+
+        static distanceSq(a: aligned_fvec3, b: aligned_fvec3): f32;
+        distanceSq(other: aligned_fvec3): f32;
+
+        static equals(a: aligned_fvec3, b: aligned_fvec3): boolean;
+        equals(other: aligned_fvec3): boolean;
+
+        static lessThan(a: aligned_fvec3, b: aligned_fvec3): bvec3;
+        lessThan(other: aligned_fvec3): bvec3;
+
+        static lessThanEqual(a: aligned_fvec3, b: aligned_fvec3): bvec3;
+        lessThanEqual(other: aligned_fvec3): bvec3;
+
+        static greaterThan(a: aligned_fvec3, b: aligned_fvec3): bvec3;
+        greaterThan(other: aligned_fvec3): bvec3;
+
+        static greaterThanEqual(a: aligned_fvec3, b: aligned_fvec3): bvec3;
+        greaterThanEqual(other: aligned_fvec3): bvec3;
+
+        static equalTo(a: aligned_fvec3, b: aligned_fvec3): bvec3;
+        equalTo(other: aligned_fvec3): bvec3;
+
+        static notEqualTo(a: aligned_fvec3, b: aligned_fvec3): bvec3;
+        notEqualTo(other: aligned_fvec3): bvec3;
+    }
+
+    /**
+     * `ivec2` — 2 `i32`.
+     *
+     * Exactly 2 components and no padding — 16 bytes — so an array of
+     * them is the layout a vertex buffer wants.
+     */
+    export class ivec2 {
+        private readonly __linalg: "ivec2";
+
+        constructor(x: i32, y: i32);
+
+        x: i32;
+        y: i32;
+
+        [index: number]: i32;
+
+        /** Every component zero. */
+        static zero(): ivec2;
+
+        /** Every component one. */
+        static one(): ivec2;
+
+        /** Every component the same value. */
+        static splat(value: i32): ivec2;
+
+        /** The x-axis: 1 in component 0, 0 elsewhere. */
+        static unitX(): ivec2;
+
+        /** The y-axis: 1 in component 1, 0 elsewhere. */
+        static unitY(): ivec2;
+
+        /**
+         * Convert from another 2-component vector.
+         *
+         * Explicit because nothing here converts on its own: an `fvec3` is not a
+         * narrower `dvec3`, and a conversion that costs precision should cost a
+         * word at the site that pays for it.
+         */
+        static from(value: dvec2): ivec2;
+        static from(value: fvec2): ivec2;
+        static from(value: uvec2): ivec2;
+        static from(value: lvec2): ivec2;
+        static from(value: ulvec2): ivec2;
+        static from(value: bvec2): ivec2;
+
+        static add(a: ivec2, b: ivec2): ivec2;
+        add(other: ivec2): ivec2;
+        addMut(other: ivec2): Reference<ivec2>;
+
+        static sub(a: ivec2, b: ivec2): ivec2;
+        sub(other: ivec2): ivec2;
+        subMut(other: ivec2): Reference<ivec2>;
+
+        static mul(a: ivec2, b: ivec2): ivec2;
+        mul(other: ivec2): ivec2;
+        mulMut(other: ivec2): Reference<ivec2>;
+
+        static div(a: ivec2, b: ivec2): ivec2;
+        div(other: ivec2): ivec2;
+        divMut(other: ivec2): Reference<ivec2>;
+
+        static min(a: ivec2, b: ivec2): ivec2;
+        min(other: ivec2): ivec2;
+        minMut(other: ivec2): Reference<ivec2>;
+
+        static max(a: ivec2, b: ivec2): ivec2;
+        max(other: ivec2): ivec2;
+        maxMut(other: ivec2): Reference<ivec2>;
+
+        static rem(a: ivec2, b: ivec2): ivec2;
+        rem(other: ivec2): ivec2;
+        remMut(other: ivec2): Reference<ivec2>;
+
+        static bitAnd(a: ivec2, b: ivec2): ivec2;
+        bitAnd(other: ivec2): ivec2;
+        bitAndMut(other: ivec2): Reference<ivec2>;
+
+        static bitOr(a: ivec2, b: ivec2): ivec2;
+        bitOr(other: ivec2): ivec2;
+        bitOrMut(other: ivec2): Reference<ivec2>;
+
+        static bitXor(a: ivec2, b: ivec2): ivec2;
+        bitXor(other: ivec2): ivec2;
+        bitXorMut(other: ivec2): Reference<ivec2>;
+
+        static shl(a: ivec2, b: ivec2): ivec2;
+        shl(other: ivec2): ivec2;
+        shlMut(other: ivec2): Reference<ivec2>;
+
+        static shr(a: ivec2, b: ivec2): ivec2;
+        shr(other: ivec2): ivec2;
+        shrMut(other: ivec2): Reference<ivec2>;
+
+        static scale(a: ivec2, by: i32): ivec2;
+        scale(by: i32): ivec2;
+        scaleMut(by: i32): Reference<ivec2>;
+
+        static negate(a: ivec2): ivec2;
+        negate(): ivec2;
+        negateMut(): Reference<ivec2>;
+
+        static abs(a: ivec2): ivec2;
+        abs(): ivec2;
+        absMut(): Reference<ivec2>;
+
+        static clamp(a: ivec2, low: ivec2, high: ivec2): ivec2;
+        clamp(low: ivec2, high: ivec2): ivec2;
+        clampMut(low: ivec2, high: ivec2): Reference<ivec2>;
+
+        static dot(a: ivec2, b: ivec2): i32;
+        dot(other: ivec2): i32;
+
+        static lengthSq(a: ivec2): i32;
+        lengthSq(): i32;
+
+        static equals(a: ivec2, b: ivec2): boolean;
+        equals(other: ivec2): boolean;
+
+        static lessThan(a: ivec2, b: ivec2): bvec2;
+        lessThan(other: ivec2): bvec2;
+
+        static lessThanEqual(a: ivec2, b: ivec2): bvec2;
+        lessThanEqual(other: ivec2): bvec2;
+
+        static greaterThan(a: ivec2, b: ivec2): bvec2;
+        greaterThan(other: ivec2): bvec2;
+
+        static greaterThanEqual(a: ivec2, b: ivec2): bvec2;
+        greaterThanEqual(other: ivec2): bvec2;
+
+        static equalTo(a: ivec2, b: ivec2): bvec2;
+        equalTo(other: ivec2): bvec2;
+
+        static notEqualTo(a: ivec2, b: ivec2): bvec2;
+        notEqualTo(other: ivec2): bvec2;
+    }
+
+    /**
+     * `ivec3` — 3 `i32`.
+     *
+     * Exactly 3 components and no padding — 24 bytes — so an array of
+     * them is the layout a vertex buffer wants.
+     */
+    export class ivec3 {
+        private readonly __linalg: "ivec3";
+
+        constructor(x: i32, y: i32, z: i32);
+
+        x: i32;
+        y: i32;
+        z: i32;
+
+        [index: number]: i32;
+
+        /** Every component zero. */
+        static zero(): ivec3;
+
+        /** Every component one. */
+        static one(): ivec3;
+
+        /** Every component the same value. */
+        static splat(value: i32): ivec3;
+
+        /** The x-axis: 1 in component 0, 0 elsewhere. */
+        static unitX(): ivec3;
+
+        /** The y-axis: 1 in component 1, 0 elsewhere. */
+        static unitY(): ivec3;
+
+        /** The z-axis: 1 in component 2, 0 elsewhere. */
+        static unitZ(): ivec3;
+
+        /**
+         * Convert from another 3-component vector.
+         *
+         * Explicit because nothing here converts on its own: an `fvec3` is not a
+         * narrower `dvec3`, and a conversion that costs precision should cost a
+         * word at the site that pays for it.
+         */
+        static from(value: dvec3): ivec3;
+        static from(value: aligned_dvec3): ivec3;
+        static from(value: fvec3): ivec3;
+        static from(value: aligned_fvec3): ivec3;
+        static from(value: uvec3): ivec3;
+        static from(value: lvec3): ivec3;
+        static from(value: ulvec3): ivec3;
+        static from(value: bvec3): ivec3;
+
+        static add(a: ivec3, b: ivec3): ivec3;
+        add(other: ivec3): ivec3;
+        addMut(other: ivec3): Reference<ivec3>;
+
+        static sub(a: ivec3, b: ivec3): ivec3;
+        sub(other: ivec3): ivec3;
+        subMut(other: ivec3): Reference<ivec3>;
+
+        static mul(a: ivec3, b: ivec3): ivec3;
+        mul(other: ivec3): ivec3;
+        mulMut(other: ivec3): Reference<ivec3>;
+
+        static div(a: ivec3, b: ivec3): ivec3;
+        div(other: ivec3): ivec3;
+        divMut(other: ivec3): Reference<ivec3>;
+
+        static min(a: ivec3, b: ivec3): ivec3;
+        min(other: ivec3): ivec3;
+        minMut(other: ivec3): Reference<ivec3>;
+
+        static max(a: ivec3, b: ivec3): ivec3;
+        max(other: ivec3): ivec3;
+        maxMut(other: ivec3): Reference<ivec3>;
+
+        static rem(a: ivec3, b: ivec3): ivec3;
+        rem(other: ivec3): ivec3;
+        remMut(other: ivec3): Reference<ivec3>;
+
+        static bitAnd(a: ivec3, b: ivec3): ivec3;
+        bitAnd(other: ivec3): ivec3;
+        bitAndMut(other: ivec3): Reference<ivec3>;
+
+        static bitOr(a: ivec3, b: ivec3): ivec3;
+        bitOr(other: ivec3): ivec3;
+        bitOrMut(other: ivec3): Reference<ivec3>;
+
+        static bitXor(a: ivec3, b: ivec3): ivec3;
+        bitXor(other: ivec3): ivec3;
+        bitXorMut(other: ivec3): Reference<ivec3>;
+
+        static shl(a: ivec3, b: ivec3): ivec3;
+        shl(other: ivec3): ivec3;
+        shlMut(other: ivec3): Reference<ivec3>;
+
+        static shr(a: ivec3, b: ivec3): ivec3;
+        shr(other: ivec3): ivec3;
+        shrMut(other: ivec3): Reference<ivec3>;
+
+        static scale(a: ivec3, by: i32): ivec3;
+        scale(by: i32): ivec3;
+        scaleMut(by: i32): Reference<ivec3>;
+
+        static negate(a: ivec3): ivec3;
+        negate(): ivec3;
+        negateMut(): Reference<ivec3>;
+
+        static abs(a: ivec3): ivec3;
+        abs(): ivec3;
+        absMut(): Reference<ivec3>;
+
+        static clamp(a: ivec3, low: ivec3, high: ivec3): ivec3;
+        clamp(low: ivec3, high: ivec3): ivec3;
+        clampMut(low: ivec3, high: ivec3): Reference<ivec3>;
+
+        static dot(a: ivec3, b: ivec3): i32;
+        dot(other: ivec3): i32;
+
+        static lengthSq(a: ivec3): i32;
+        lengthSq(): i32;
+
+        static equals(a: ivec3, b: ivec3): boolean;
+        equals(other: ivec3): boolean;
+
+        static lessThan(a: ivec3, b: ivec3): bvec3;
+        lessThan(other: ivec3): bvec3;
+
+        static lessThanEqual(a: ivec3, b: ivec3): bvec3;
+        lessThanEqual(other: ivec3): bvec3;
+
+        static greaterThan(a: ivec3, b: ivec3): bvec3;
+        greaterThan(other: ivec3): bvec3;
+
+        static greaterThanEqual(a: ivec3, b: ivec3): bvec3;
+        greaterThanEqual(other: ivec3): bvec3;
+
+        static equalTo(a: ivec3, b: ivec3): bvec3;
+        equalTo(other: ivec3): bvec3;
+
+        static notEqualTo(a: ivec3, b: ivec3): bvec3;
+        notEqualTo(other: ivec3): bvec3;
+    }
+
+    /**
+     * `ivec4` — 4 `i32`.
+     *
+     * Exactly 4 components and no padding — 32 bytes — so an array of
+     * them is the layout a vertex buffer wants.
+     */
+    export class ivec4 {
+        private readonly __linalg: "ivec4";
+
+        constructor(x: i32, y: i32, z: i32, w: i32);
+
+        x: i32;
+        y: i32;
+        z: i32;
+        w: i32;
+
+        [index: number]: i32;
+
+        /** Every component zero. */
+        static zero(): ivec4;
+
+        /** Every component one. */
+        static one(): ivec4;
+
+        /** Every component the same value. */
+        static splat(value: i32): ivec4;
+
+        /** The x-axis: 1 in component 0, 0 elsewhere. */
+        static unitX(): ivec4;
+
+        /** The y-axis: 1 in component 1, 0 elsewhere. */
+        static unitY(): ivec4;
+
+        /** The z-axis: 1 in component 2, 0 elsewhere. */
+        static unitZ(): ivec4;
+
+        /** The w-axis: 1 in component 3, 0 elsewhere. */
+        static unitW(): ivec4;
+
+        /**
+         * Convert from another 4-component vector.
+         *
+         * Explicit because nothing here converts on its own: an `fvec3` is not a
+         * narrower `dvec3`, and a conversion that costs precision should cost a
+         * word at the site that pays for it.
+         */
+        static from(value: dvec4): ivec4;
+        static from(value: fvec4): ivec4;
+        static from(value: uvec4): ivec4;
+        static from(value: lvec4): ivec4;
+        static from(value: ulvec4): ivec4;
+        static from(value: bvec4): ivec4;
+
+        static add(a: ivec4, b: ivec4): ivec4;
+        add(other: ivec4): ivec4;
+        addMut(other: ivec4): Reference<ivec4>;
+
+        static sub(a: ivec4, b: ivec4): ivec4;
+        sub(other: ivec4): ivec4;
+        subMut(other: ivec4): Reference<ivec4>;
+
+        static mul(a: ivec4, b: ivec4): ivec4;
+        mul(other: ivec4): ivec4;
+        mulMut(other: ivec4): Reference<ivec4>;
+
+        static div(a: ivec4, b: ivec4): ivec4;
+        div(other: ivec4): ivec4;
+        divMut(other: ivec4): Reference<ivec4>;
+
+        static min(a: ivec4, b: ivec4): ivec4;
+        min(other: ivec4): ivec4;
+        minMut(other: ivec4): Reference<ivec4>;
+
+        static max(a: ivec4, b: ivec4): ivec4;
+        max(other: ivec4): ivec4;
+        maxMut(other: ivec4): Reference<ivec4>;
+
+        static rem(a: ivec4, b: ivec4): ivec4;
+        rem(other: ivec4): ivec4;
+        remMut(other: ivec4): Reference<ivec4>;
+
+        static bitAnd(a: ivec4, b: ivec4): ivec4;
+        bitAnd(other: ivec4): ivec4;
+        bitAndMut(other: ivec4): Reference<ivec4>;
+
+        static bitOr(a: ivec4, b: ivec4): ivec4;
+        bitOr(other: ivec4): ivec4;
+        bitOrMut(other: ivec4): Reference<ivec4>;
+
+        static bitXor(a: ivec4, b: ivec4): ivec4;
+        bitXor(other: ivec4): ivec4;
+        bitXorMut(other: ivec4): Reference<ivec4>;
+
+        static shl(a: ivec4, b: ivec4): ivec4;
+        shl(other: ivec4): ivec4;
+        shlMut(other: ivec4): Reference<ivec4>;
+
+        static shr(a: ivec4, b: ivec4): ivec4;
+        shr(other: ivec4): ivec4;
+        shrMut(other: ivec4): Reference<ivec4>;
+
+        static scale(a: ivec4, by: i32): ivec4;
+        scale(by: i32): ivec4;
+        scaleMut(by: i32): Reference<ivec4>;
+
+        static negate(a: ivec4): ivec4;
+        negate(): ivec4;
+        negateMut(): Reference<ivec4>;
+
+        static abs(a: ivec4): ivec4;
+        abs(): ivec4;
+        absMut(): Reference<ivec4>;
+
+        static clamp(a: ivec4, low: ivec4, high: ivec4): ivec4;
+        clamp(low: ivec4, high: ivec4): ivec4;
+        clampMut(low: ivec4, high: ivec4): Reference<ivec4>;
+
+        static dot(a: ivec4, b: ivec4): i32;
+        dot(other: ivec4): i32;
+
+        static lengthSq(a: ivec4): i32;
+        lengthSq(): i32;
+
+        static equals(a: ivec4, b: ivec4): boolean;
+        equals(other: ivec4): boolean;
+
+        static lessThan(a: ivec4, b: ivec4): bvec4;
+        lessThan(other: ivec4): bvec4;
+
+        static lessThanEqual(a: ivec4, b: ivec4): bvec4;
+        lessThanEqual(other: ivec4): bvec4;
+
+        static greaterThan(a: ivec4, b: ivec4): bvec4;
+        greaterThan(other: ivec4): bvec4;
+
+        static greaterThanEqual(a: ivec4, b: ivec4): bvec4;
+        greaterThanEqual(other: ivec4): bvec4;
+
+        static equalTo(a: ivec4, b: ivec4): bvec4;
+        equalTo(other: ivec4): bvec4;
+
+        static notEqualTo(a: ivec4, b: ivec4): bvec4;
+        notEqualTo(other: ivec4): bvec4;
+    }
+
+    /**
+     * `uvec2` — 2 `u32`.
+     *
+     * Exactly 2 components and no padding — 16 bytes — so an array of
+     * them is the layout a vertex buffer wants.
+     */
+    export class uvec2 {
+        private readonly __linalg: "uvec2";
+
+        constructor(x: u32, y: u32);
+
+        x: u32;
+        y: u32;
+
+        [index: number]: u32;
+
+        /** Every component zero. */
+        static zero(): uvec2;
+
+        /** Every component one. */
+        static one(): uvec2;
+
+        /** Every component the same value. */
+        static splat(value: u32): uvec2;
+
+        /** The x-axis: 1 in component 0, 0 elsewhere. */
+        static unitX(): uvec2;
+
+        /** The y-axis: 1 in component 1, 0 elsewhere. */
+        static unitY(): uvec2;
+
+        /**
+         * Convert from another 2-component vector.
+         *
+         * Explicit because nothing here converts on its own: an `fvec3` is not a
+         * narrower `dvec3`, and a conversion that costs precision should cost a
+         * word at the site that pays for it.
+         */
+        static from(value: dvec2): uvec2;
+        static from(value: fvec2): uvec2;
+        static from(value: ivec2): uvec2;
+        static from(value: lvec2): uvec2;
+        static from(value: ulvec2): uvec2;
+        static from(value: bvec2): uvec2;
+
+        static add(a: uvec2, b: uvec2): uvec2;
+        add(other: uvec2): uvec2;
+        addMut(other: uvec2): Reference<uvec2>;
+
+        static sub(a: uvec2, b: uvec2): uvec2;
+        sub(other: uvec2): uvec2;
+        subMut(other: uvec2): Reference<uvec2>;
+
+        static mul(a: uvec2, b: uvec2): uvec2;
+        mul(other: uvec2): uvec2;
+        mulMut(other: uvec2): Reference<uvec2>;
+
+        static div(a: uvec2, b: uvec2): uvec2;
+        div(other: uvec2): uvec2;
+        divMut(other: uvec2): Reference<uvec2>;
+
+        static min(a: uvec2, b: uvec2): uvec2;
+        min(other: uvec2): uvec2;
+        minMut(other: uvec2): Reference<uvec2>;
+
+        static max(a: uvec2, b: uvec2): uvec2;
+        max(other: uvec2): uvec2;
+        maxMut(other: uvec2): Reference<uvec2>;
+
+        static rem(a: uvec2, b: uvec2): uvec2;
+        rem(other: uvec2): uvec2;
+        remMut(other: uvec2): Reference<uvec2>;
+
+        static bitAnd(a: uvec2, b: uvec2): uvec2;
+        bitAnd(other: uvec2): uvec2;
+        bitAndMut(other: uvec2): Reference<uvec2>;
+
+        static bitOr(a: uvec2, b: uvec2): uvec2;
+        bitOr(other: uvec2): uvec2;
+        bitOrMut(other: uvec2): Reference<uvec2>;
+
+        static bitXor(a: uvec2, b: uvec2): uvec2;
+        bitXor(other: uvec2): uvec2;
+        bitXorMut(other: uvec2): Reference<uvec2>;
+
+        static shl(a: uvec2, b: uvec2): uvec2;
+        shl(other: uvec2): uvec2;
+        shlMut(other: uvec2): Reference<uvec2>;
+
+        static shr(a: uvec2, b: uvec2): uvec2;
+        shr(other: uvec2): uvec2;
+        shrMut(other: uvec2): Reference<uvec2>;
+
+        static scale(a: uvec2, by: u32): uvec2;
+        scale(by: u32): uvec2;
+        scaleMut(by: u32): Reference<uvec2>;
+
+        static clamp(a: uvec2, low: uvec2, high: uvec2): uvec2;
+        clamp(low: uvec2, high: uvec2): uvec2;
+        clampMut(low: uvec2, high: uvec2): Reference<uvec2>;
+
+        static dot(a: uvec2, b: uvec2): u32;
+        dot(other: uvec2): u32;
+
+        static lengthSq(a: uvec2): u32;
+        lengthSq(): u32;
+
+        static equals(a: uvec2, b: uvec2): boolean;
+        equals(other: uvec2): boolean;
+
+        static lessThan(a: uvec2, b: uvec2): bvec2;
+        lessThan(other: uvec2): bvec2;
+
+        static lessThanEqual(a: uvec2, b: uvec2): bvec2;
+        lessThanEqual(other: uvec2): bvec2;
+
+        static greaterThan(a: uvec2, b: uvec2): bvec2;
+        greaterThan(other: uvec2): bvec2;
+
+        static greaterThanEqual(a: uvec2, b: uvec2): bvec2;
+        greaterThanEqual(other: uvec2): bvec2;
+
+        static equalTo(a: uvec2, b: uvec2): bvec2;
+        equalTo(other: uvec2): bvec2;
+
+        static notEqualTo(a: uvec2, b: uvec2): bvec2;
+        notEqualTo(other: uvec2): bvec2;
+    }
+
+    /**
+     * `uvec3` — 3 `u32`.
+     *
+     * Exactly 3 components and no padding — 24 bytes — so an array of
+     * them is the layout a vertex buffer wants.
+     */
+    export class uvec3 {
+        private readonly __linalg: "uvec3";
+
+        constructor(x: u32, y: u32, z: u32);
+
+        x: u32;
+        y: u32;
+        z: u32;
+
+        [index: number]: u32;
+
+        /** Every component zero. */
+        static zero(): uvec3;
+
+        /** Every component one. */
+        static one(): uvec3;
+
+        /** Every component the same value. */
+        static splat(value: u32): uvec3;
+
+        /** The x-axis: 1 in component 0, 0 elsewhere. */
+        static unitX(): uvec3;
+
+        /** The y-axis: 1 in component 1, 0 elsewhere. */
+        static unitY(): uvec3;
+
+        /** The z-axis: 1 in component 2, 0 elsewhere. */
+        static unitZ(): uvec3;
+
+        /**
+         * Convert from another 3-component vector.
+         *
+         * Explicit because nothing here converts on its own: an `fvec3` is not a
+         * narrower `dvec3`, and a conversion that costs precision should cost a
+         * word at the site that pays for it.
+         */
+        static from(value: dvec3): uvec3;
+        static from(value: aligned_dvec3): uvec3;
+        static from(value: fvec3): uvec3;
+        static from(value: aligned_fvec3): uvec3;
+        static from(value: ivec3): uvec3;
+        static from(value: lvec3): uvec3;
+        static from(value: ulvec3): uvec3;
+        static from(value: bvec3): uvec3;
+
+        static add(a: uvec3, b: uvec3): uvec3;
+        add(other: uvec3): uvec3;
+        addMut(other: uvec3): Reference<uvec3>;
+
+        static sub(a: uvec3, b: uvec3): uvec3;
+        sub(other: uvec3): uvec3;
+        subMut(other: uvec3): Reference<uvec3>;
+
+        static mul(a: uvec3, b: uvec3): uvec3;
+        mul(other: uvec3): uvec3;
+        mulMut(other: uvec3): Reference<uvec3>;
+
+        static div(a: uvec3, b: uvec3): uvec3;
+        div(other: uvec3): uvec3;
+        divMut(other: uvec3): Reference<uvec3>;
+
+        static min(a: uvec3, b: uvec3): uvec3;
+        min(other: uvec3): uvec3;
+        minMut(other: uvec3): Reference<uvec3>;
+
+        static max(a: uvec3, b: uvec3): uvec3;
+        max(other: uvec3): uvec3;
+        maxMut(other: uvec3): Reference<uvec3>;
+
+        static rem(a: uvec3, b: uvec3): uvec3;
+        rem(other: uvec3): uvec3;
+        remMut(other: uvec3): Reference<uvec3>;
+
+        static bitAnd(a: uvec3, b: uvec3): uvec3;
+        bitAnd(other: uvec3): uvec3;
+        bitAndMut(other: uvec3): Reference<uvec3>;
+
+        static bitOr(a: uvec3, b: uvec3): uvec3;
+        bitOr(other: uvec3): uvec3;
+        bitOrMut(other: uvec3): Reference<uvec3>;
+
+        static bitXor(a: uvec3, b: uvec3): uvec3;
+        bitXor(other: uvec3): uvec3;
+        bitXorMut(other: uvec3): Reference<uvec3>;
+
+        static shl(a: uvec3, b: uvec3): uvec3;
+        shl(other: uvec3): uvec3;
+        shlMut(other: uvec3): Reference<uvec3>;
+
+        static shr(a: uvec3, b: uvec3): uvec3;
+        shr(other: uvec3): uvec3;
+        shrMut(other: uvec3): Reference<uvec3>;
+
+        static scale(a: uvec3, by: u32): uvec3;
+        scale(by: u32): uvec3;
+        scaleMut(by: u32): Reference<uvec3>;
+
+        static clamp(a: uvec3, low: uvec3, high: uvec3): uvec3;
+        clamp(low: uvec3, high: uvec3): uvec3;
+        clampMut(low: uvec3, high: uvec3): Reference<uvec3>;
+
+        static dot(a: uvec3, b: uvec3): u32;
+        dot(other: uvec3): u32;
+
+        static lengthSq(a: uvec3): u32;
+        lengthSq(): u32;
+
+        static equals(a: uvec3, b: uvec3): boolean;
+        equals(other: uvec3): boolean;
+
+        static lessThan(a: uvec3, b: uvec3): bvec3;
+        lessThan(other: uvec3): bvec3;
+
+        static lessThanEqual(a: uvec3, b: uvec3): bvec3;
+        lessThanEqual(other: uvec3): bvec3;
+
+        static greaterThan(a: uvec3, b: uvec3): bvec3;
+        greaterThan(other: uvec3): bvec3;
+
+        static greaterThanEqual(a: uvec3, b: uvec3): bvec3;
+        greaterThanEqual(other: uvec3): bvec3;
+
+        static equalTo(a: uvec3, b: uvec3): bvec3;
+        equalTo(other: uvec3): bvec3;
+
+        static notEqualTo(a: uvec3, b: uvec3): bvec3;
+        notEqualTo(other: uvec3): bvec3;
+    }
+
+    /**
+     * `uvec4` — 4 `u32`.
+     *
+     * Exactly 4 components and no padding — 32 bytes — so an array of
+     * them is the layout a vertex buffer wants.
+     */
+    export class uvec4 {
+        private readonly __linalg: "uvec4";
+
+        constructor(x: u32, y: u32, z: u32, w: u32);
+
+        x: u32;
+        y: u32;
+        z: u32;
+        w: u32;
+
+        [index: number]: u32;
+
+        /** Every component zero. */
+        static zero(): uvec4;
+
+        /** Every component one. */
+        static one(): uvec4;
+
+        /** Every component the same value. */
+        static splat(value: u32): uvec4;
+
+        /** The x-axis: 1 in component 0, 0 elsewhere. */
+        static unitX(): uvec4;
+
+        /** The y-axis: 1 in component 1, 0 elsewhere. */
+        static unitY(): uvec4;
+
+        /** The z-axis: 1 in component 2, 0 elsewhere. */
+        static unitZ(): uvec4;
+
+        /** The w-axis: 1 in component 3, 0 elsewhere. */
+        static unitW(): uvec4;
+
+        /**
+         * Convert from another 4-component vector.
+         *
+         * Explicit because nothing here converts on its own: an `fvec3` is not a
+         * narrower `dvec3`, and a conversion that costs precision should cost a
+         * word at the site that pays for it.
+         */
+        static from(value: dvec4): uvec4;
+        static from(value: fvec4): uvec4;
+        static from(value: ivec4): uvec4;
+        static from(value: lvec4): uvec4;
+        static from(value: ulvec4): uvec4;
+        static from(value: bvec4): uvec4;
+
+        static add(a: uvec4, b: uvec4): uvec4;
+        add(other: uvec4): uvec4;
+        addMut(other: uvec4): Reference<uvec4>;
+
+        static sub(a: uvec4, b: uvec4): uvec4;
+        sub(other: uvec4): uvec4;
+        subMut(other: uvec4): Reference<uvec4>;
+
+        static mul(a: uvec4, b: uvec4): uvec4;
+        mul(other: uvec4): uvec4;
+        mulMut(other: uvec4): Reference<uvec4>;
+
+        static div(a: uvec4, b: uvec4): uvec4;
+        div(other: uvec4): uvec4;
+        divMut(other: uvec4): Reference<uvec4>;
+
+        static min(a: uvec4, b: uvec4): uvec4;
+        min(other: uvec4): uvec4;
+        minMut(other: uvec4): Reference<uvec4>;
+
+        static max(a: uvec4, b: uvec4): uvec4;
+        max(other: uvec4): uvec4;
+        maxMut(other: uvec4): Reference<uvec4>;
+
+        static rem(a: uvec4, b: uvec4): uvec4;
+        rem(other: uvec4): uvec4;
+        remMut(other: uvec4): Reference<uvec4>;
+
+        static bitAnd(a: uvec4, b: uvec4): uvec4;
+        bitAnd(other: uvec4): uvec4;
+        bitAndMut(other: uvec4): Reference<uvec4>;
+
+        static bitOr(a: uvec4, b: uvec4): uvec4;
+        bitOr(other: uvec4): uvec4;
+        bitOrMut(other: uvec4): Reference<uvec4>;
+
+        static bitXor(a: uvec4, b: uvec4): uvec4;
+        bitXor(other: uvec4): uvec4;
+        bitXorMut(other: uvec4): Reference<uvec4>;
+
+        static shl(a: uvec4, b: uvec4): uvec4;
+        shl(other: uvec4): uvec4;
+        shlMut(other: uvec4): Reference<uvec4>;
+
+        static shr(a: uvec4, b: uvec4): uvec4;
+        shr(other: uvec4): uvec4;
+        shrMut(other: uvec4): Reference<uvec4>;
+
+        static scale(a: uvec4, by: u32): uvec4;
+        scale(by: u32): uvec4;
+        scaleMut(by: u32): Reference<uvec4>;
+
+        static clamp(a: uvec4, low: uvec4, high: uvec4): uvec4;
+        clamp(low: uvec4, high: uvec4): uvec4;
+        clampMut(low: uvec4, high: uvec4): Reference<uvec4>;
+
+        static dot(a: uvec4, b: uvec4): u32;
+        dot(other: uvec4): u32;
+
+        static lengthSq(a: uvec4): u32;
+        lengthSq(): u32;
+
+        static equals(a: uvec4, b: uvec4): boolean;
+        equals(other: uvec4): boolean;
+
+        static lessThan(a: uvec4, b: uvec4): bvec4;
+        lessThan(other: uvec4): bvec4;
+
+        static lessThanEqual(a: uvec4, b: uvec4): bvec4;
+        lessThanEqual(other: uvec4): bvec4;
+
+        static greaterThan(a: uvec4, b: uvec4): bvec4;
+        greaterThan(other: uvec4): bvec4;
+
+        static greaterThanEqual(a: uvec4, b: uvec4): bvec4;
+        greaterThanEqual(other: uvec4): bvec4;
+
+        static equalTo(a: uvec4, b: uvec4): bvec4;
+        equalTo(other: uvec4): bvec4;
+
+        static notEqualTo(a: uvec4, b: uvec4): bvec4;
+        notEqualTo(other: uvec4): bvec4;
+    }
+
+    /**
+     * `lvec2` — 2 `i64`.
+     *
+     * Exactly 2 components and no padding — 16 bytes — so an array of
+     * them is the layout a vertex buffer wants.
+     */
+    export class lvec2 {
+        private readonly __linalg: "lvec2";
+
+        constructor(x: i64, y: i64);
+
+        x: i64;
+        y: i64;
+
+        [index: number]: i64;
+
+        /** Every component zero. */
+        static zero(): lvec2;
+
+        /** Every component one. */
+        static one(): lvec2;
+
+        /** Every component the same value. */
+        static splat(value: i64): lvec2;
+
+        /** The x-axis: 1 in component 0, 0 elsewhere. */
+        static unitX(): lvec2;
+
+        /** The y-axis: 1 in component 1, 0 elsewhere. */
+        static unitY(): lvec2;
+
+        /**
+         * Convert from another 2-component vector.
+         *
+         * Explicit because nothing here converts on its own: an `fvec3` is not a
+         * narrower `dvec3`, and a conversion that costs precision should cost a
+         * word at the site that pays for it.
+         */
+        static from(value: dvec2): lvec2;
+        static from(value: fvec2): lvec2;
+        static from(value: ivec2): lvec2;
+        static from(value: uvec2): lvec2;
+        static from(value: ulvec2): lvec2;
+        static from(value: bvec2): lvec2;
+
+        static add(a: lvec2, b: lvec2): lvec2;
+        add(other: lvec2): lvec2;
+        addMut(other: lvec2): Reference<lvec2>;
+
+        static sub(a: lvec2, b: lvec2): lvec2;
+        sub(other: lvec2): lvec2;
+        subMut(other: lvec2): Reference<lvec2>;
+
+        static mul(a: lvec2, b: lvec2): lvec2;
+        mul(other: lvec2): lvec2;
+        mulMut(other: lvec2): Reference<lvec2>;
+
+        static div(a: lvec2, b: lvec2): lvec2;
+        div(other: lvec2): lvec2;
+        divMut(other: lvec2): Reference<lvec2>;
+
+        static min(a: lvec2, b: lvec2): lvec2;
+        min(other: lvec2): lvec2;
+        minMut(other: lvec2): Reference<lvec2>;
+
+        static max(a: lvec2, b: lvec2): lvec2;
+        max(other: lvec2): lvec2;
+        maxMut(other: lvec2): Reference<lvec2>;
+
+        static rem(a: lvec2, b: lvec2): lvec2;
+        rem(other: lvec2): lvec2;
+        remMut(other: lvec2): Reference<lvec2>;
+
+        static bitAnd(a: lvec2, b: lvec2): lvec2;
+        bitAnd(other: lvec2): lvec2;
+        bitAndMut(other: lvec2): Reference<lvec2>;
+
+        static bitOr(a: lvec2, b: lvec2): lvec2;
+        bitOr(other: lvec2): lvec2;
+        bitOrMut(other: lvec2): Reference<lvec2>;
+
+        static bitXor(a: lvec2, b: lvec2): lvec2;
+        bitXor(other: lvec2): lvec2;
+        bitXorMut(other: lvec2): Reference<lvec2>;
+
+        static shl(a: lvec2, b: lvec2): lvec2;
+        shl(other: lvec2): lvec2;
+        shlMut(other: lvec2): Reference<lvec2>;
+
+        static shr(a: lvec2, b: lvec2): lvec2;
+        shr(other: lvec2): lvec2;
+        shrMut(other: lvec2): Reference<lvec2>;
+
+        static scale(a: lvec2, by: i64): lvec2;
+        scale(by: i64): lvec2;
+        scaleMut(by: i64): Reference<lvec2>;
+
+        static negate(a: lvec2): lvec2;
+        negate(): lvec2;
+        negateMut(): Reference<lvec2>;
+
+        static abs(a: lvec2): lvec2;
+        abs(): lvec2;
+        absMut(): Reference<lvec2>;
+
+        static clamp(a: lvec2, low: lvec2, high: lvec2): lvec2;
+        clamp(low: lvec2, high: lvec2): lvec2;
+        clampMut(low: lvec2, high: lvec2): Reference<lvec2>;
+
+        static dot(a: lvec2, b: lvec2): i64;
+        dot(other: lvec2): i64;
+
+        static lengthSq(a: lvec2): i64;
+        lengthSq(): i64;
+
+        static equals(a: lvec2, b: lvec2): boolean;
+        equals(other: lvec2): boolean;
+
+        static lessThan(a: lvec2, b: lvec2): bvec2;
+        lessThan(other: lvec2): bvec2;
+
+        static lessThanEqual(a: lvec2, b: lvec2): bvec2;
+        lessThanEqual(other: lvec2): bvec2;
+
+        static greaterThan(a: lvec2, b: lvec2): bvec2;
+        greaterThan(other: lvec2): bvec2;
+
+        static greaterThanEqual(a: lvec2, b: lvec2): bvec2;
+        greaterThanEqual(other: lvec2): bvec2;
+
+        static equalTo(a: lvec2, b: lvec2): bvec2;
+        equalTo(other: lvec2): bvec2;
+
+        static notEqualTo(a: lvec2, b: lvec2): bvec2;
+        notEqualTo(other: lvec2): bvec2;
+    }
+
+    /**
+     * `lvec3` — 3 `i64`.
+     *
+     * Exactly 3 components and no padding — 24 bytes — so an array of
+     * them is the layout a vertex buffer wants.
+     */
+    export class lvec3 {
+        private readonly __linalg: "lvec3";
+
+        constructor(x: i64, y: i64, z: i64);
+
+        x: i64;
+        y: i64;
+        z: i64;
+
+        [index: number]: i64;
+
+        /** Every component zero. */
+        static zero(): lvec3;
+
+        /** Every component one. */
+        static one(): lvec3;
+
+        /** Every component the same value. */
+        static splat(value: i64): lvec3;
+
+        /** The x-axis: 1 in component 0, 0 elsewhere. */
+        static unitX(): lvec3;
+
+        /** The y-axis: 1 in component 1, 0 elsewhere. */
+        static unitY(): lvec3;
+
+        /** The z-axis: 1 in component 2, 0 elsewhere. */
+        static unitZ(): lvec3;
+
+        /**
+         * Convert from another 3-component vector.
+         *
+         * Explicit because nothing here converts on its own: an `fvec3` is not a
+         * narrower `dvec3`, and a conversion that costs precision should cost a
+         * word at the site that pays for it.
+         */
+        static from(value: dvec3): lvec3;
+        static from(value: aligned_dvec3): lvec3;
+        static from(value: fvec3): lvec3;
+        static from(value: aligned_fvec3): lvec3;
+        static from(value: ivec3): lvec3;
+        static from(value: uvec3): lvec3;
+        static from(value: ulvec3): lvec3;
+        static from(value: bvec3): lvec3;
+
+        static add(a: lvec3, b: lvec3): lvec3;
+        add(other: lvec3): lvec3;
+        addMut(other: lvec3): Reference<lvec3>;
+
+        static sub(a: lvec3, b: lvec3): lvec3;
+        sub(other: lvec3): lvec3;
+        subMut(other: lvec3): Reference<lvec3>;
+
+        static mul(a: lvec3, b: lvec3): lvec3;
+        mul(other: lvec3): lvec3;
+        mulMut(other: lvec3): Reference<lvec3>;
+
+        static div(a: lvec3, b: lvec3): lvec3;
+        div(other: lvec3): lvec3;
+        divMut(other: lvec3): Reference<lvec3>;
+
+        static min(a: lvec3, b: lvec3): lvec3;
+        min(other: lvec3): lvec3;
+        minMut(other: lvec3): Reference<lvec3>;
+
+        static max(a: lvec3, b: lvec3): lvec3;
+        max(other: lvec3): lvec3;
+        maxMut(other: lvec3): Reference<lvec3>;
+
+        static rem(a: lvec3, b: lvec3): lvec3;
+        rem(other: lvec3): lvec3;
+        remMut(other: lvec3): Reference<lvec3>;
+
+        static bitAnd(a: lvec3, b: lvec3): lvec3;
+        bitAnd(other: lvec3): lvec3;
+        bitAndMut(other: lvec3): Reference<lvec3>;
+
+        static bitOr(a: lvec3, b: lvec3): lvec3;
+        bitOr(other: lvec3): lvec3;
+        bitOrMut(other: lvec3): Reference<lvec3>;
+
+        static bitXor(a: lvec3, b: lvec3): lvec3;
+        bitXor(other: lvec3): lvec3;
+        bitXorMut(other: lvec3): Reference<lvec3>;
+
+        static shl(a: lvec3, b: lvec3): lvec3;
+        shl(other: lvec3): lvec3;
+        shlMut(other: lvec3): Reference<lvec3>;
+
+        static shr(a: lvec3, b: lvec3): lvec3;
+        shr(other: lvec3): lvec3;
+        shrMut(other: lvec3): Reference<lvec3>;
+
+        static scale(a: lvec3, by: i64): lvec3;
+        scale(by: i64): lvec3;
+        scaleMut(by: i64): Reference<lvec3>;
+
+        static negate(a: lvec3): lvec3;
+        negate(): lvec3;
+        negateMut(): Reference<lvec3>;
+
+        static abs(a: lvec3): lvec3;
+        abs(): lvec3;
+        absMut(): Reference<lvec3>;
+
+        static clamp(a: lvec3, low: lvec3, high: lvec3): lvec3;
+        clamp(low: lvec3, high: lvec3): lvec3;
+        clampMut(low: lvec3, high: lvec3): Reference<lvec3>;
+
+        static dot(a: lvec3, b: lvec3): i64;
+        dot(other: lvec3): i64;
+
+        static lengthSq(a: lvec3): i64;
+        lengthSq(): i64;
+
+        static equals(a: lvec3, b: lvec3): boolean;
+        equals(other: lvec3): boolean;
+
+        static lessThan(a: lvec3, b: lvec3): bvec3;
+        lessThan(other: lvec3): bvec3;
+
+        static lessThanEqual(a: lvec3, b: lvec3): bvec3;
+        lessThanEqual(other: lvec3): bvec3;
+
+        static greaterThan(a: lvec3, b: lvec3): bvec3;
+        greaterThan(other: lvec3): bvec3;
+
+        static greaterThanEqual(a: lvec3, b: lvec3): bvec3;
+        greaterThanEqual(other: lvec3): bvec3;
+
+        static equalTo(a: lvec3, b: lvec3): bvec3;
+        equalTo(other: lvec3): bvec3;
+
+        static notEqualTo(a: lvec3, b: lvec3): bvec3;
+        notEqualTo(other: lvec3): bvec3;
+    }
+
+    /**
+     * `lvec4` — 4 `i64`.
+     *
+     * Exactly 4 components and no padding — 32 bytes — so an array of
+     * them is the layout a vertex buffer wants.
+     */
+    export class lvec4 {
+        private readonly __linalg: "lvec4";
+
+        constructor(x: i64, y: i64, z: i64, w: i64);
+
+        x: i64;
+        y: i64;
+        z: i64;
+        w: i64;
+
+        [index: number]: i64;
+
+        /** Every component zero. */
+        static zero(): lvec4;
+
+        /** Every component one. */
+        static one(): lvec4;
+
+        /** Every component the same value. */
+        static splat(value: i64): lvec4;
+
+        /** The x-axis: 1 in component 0, 0 elsewhere. */
+        static unitX(): lvec4;
+
+        /** The y-axis: 1 in component 1, 0 elsewhere. */
+        static unitY(): lvec4;
+
+        /** The z-axis: 1 in component 2, 0 elsewhere. */
+        static unitZ(): lvec4;
+
+        /** The w-axis: 1 in component 3, 0 elsewhere. */
+        static unitW(): lvec4;
+
+        /**
+         * Convert from another 4-component vector.
+         *
+         * Explicit because nothing here converts on its own: an `fvec3` is not a
+         * narrower `dvec3`, and a conversion that costs precision should cost a
+         * word at the site that pays for it.
+         */
+        static from(value: dvec4): lvec4;
+        static from(value: fvec4): lvec4;
+        static from(value: ivec4): lvec4;
+        static from(value: uvec4): lvec4;
+        static from(value: ulvec4): lvec4;
+        static from(value: bvec4): lvec4;
+
+        static add(a: lvec4, b: lvec4): lvec4;
+        add(other: lvec4): lvec4;
+        addMut(other: lvec4): Reference<lvec4>;
+
+        static sub(a: lvec4, b: lvec4): lvec4;
+        sub(other: lvec4): lvec4;
+        subMut(other: lvec4): Reference<lvec4>;
+
+        static mul(a: lvec4, b: lvec4): lvec4;
+        mul(other: lvec4): lvec4;
+        mulMut(other: lvec4): Reference<lvec4>;
+
+        static div(a: lvec4, b: lvec4): lvec4;
+        div(other: lvec4): lvec4;
+        divMut(other: lvec4): Reference<lvec4>;
+
+        static min(a: lvec4, b: lvec4): lvec4;
+        min(other: lvec4): lvec4;
+        minMut(other: lvec4): Reference<lvec4>;
+
+        static max(a: lvec4, b: lvec4): lvec4;
+        max(other: lvec4): lvec4;
+        maxMut(other: lvec4): Reference<lvec4>;
+
+        static rem(a: lvec4, b: lvec4): lvec4;
+        rem(other: lvec4): lvec4;
+        remMut(other: lvec4): Reference<lvec4>;
+
+        static bitAnd(a: lvec4, b: lvec4): lvec4;
+        bitAnd(other: lvec4): lvec4;
+        bitAndMut(other: lvec4): Reference<lvec4>;
+
+        static bitOr(a: lvec4, b: lvec4): lvec4;
+        bitOr(other: lvec4): lvec4;
+        bitOrMut(other: lvec4): Reference<lvec4>;
+
+        static bitXor(a: lvec4, b: lvec4): lvec4;
+        bitXor(other: lvec4): lvec4;
+        bitXorMut(other: lvec4): Reference<lvec4>;
+
+        static shl(a: lvec4, b: lvec4): lvec4;
+        shl(other: lvec4): lvec4;
+        shlMut(other: lvec4): Reference<lvec4>;
+
+        static shr(a: lvec4, b: lvec4): lvec4;
+        shr(other: lvec4): lvec4;
+        shrMut(other: lvec4): Reference<lvec4>;
+
+        static scale(a: lvec4, by: i64): lvec4;
+        scale(by: i64): lvec4;
+        scaleMut(by: i64): Reference<lvec4>;
+
+        static negate(a: lvec4): lvec4;
+        negate(): lvec4;
+        negateMut(): Reference<lvec4>;
+
+        static abs(a: lvec4): lvec4;
+        abs(): lvec4;
+        absMut(): Reference<lvec4>;
+
+        static clamp(a: lvec4, low: lvec4, high: lvec4): lvec4;
+        clamp(low: lvec4, high: lvec4): lvec4;
+        clampMut(low: lvec4, high: lvec4): Reference<lvec4>;
+
+        static dot(a: lvec4, b: lvec4): i64;
+        dot(other: lvec4): i64;
+
+        static lengthSq(a: lvec4): i64;
+        lengthSq(): i64;
+
+        static equals(a: lvec4, b: lvec4): boolean;
+        equals(other: lvec4): boolean;
+
+        static lessThan(a: lvec4, b: lvec4): bvec4;
+        lessThan(other: lvec4): bvec4;
+
+        static lessThanEqual(a: lvec4, b: lvec4): bvec4;
+        lessThanEqual(other: lvec4): bvec4;
+
+        static greaterThan(a: lvec4, b: lvec4): bvec4;
+        greaterThan(other: lvec4): bvec4;
+
+        static greaterThanEqual(a: lvec4, b: lvec4): bvec4;
+        greaterThanEqual(other: lvec4): bvec4;
+
+        static equalTo(a: lvec4, b: lvec4): bvec4;
+        equalTo(other: lvec4): bvec4;
+
+        static notEqualTo(a: lvec4, b: lvec4): bvec4;
+        notEqualTo(other: lvec4): bvec4;
+    }
+
+    /**
+     * `ulvec2` — 2 `u64`.
+     *
+     * Exactly 2 components and no padding — 16 bytes — so an array of
+     * them is the layout a vertex buffer wants.
+     */
+    export class ulvec2 {
+        private readonly __linalg: "ulvec2";
+
+        constructor(x: u64, y: u64);
+
+        x: u64;
+        y: u64;
+
+        [index: number]: u64;
+
+        /** Every component zero. */
+        static zero(): ulvec2;
+
+        /** Every component one. */
+        static one(): ulvec2;
+
+        /** Every component the same value. */
+        static splat(value: u64): ulvec2;
+
+        /** The x-axis: 1 in component 0, 0 elsewhere. */
+        static unitX(): ulvec2;
+
+        /** The y-axis: 1 in component 1, 0 elsewhere. */
+        static unitY(): ulvec2;
+
+        /**
+         * Convert from another 2-component vector.
+         *
+         * Explicit because nothing here converts on its own: an `fvec3` is not a
+         * narrower `dvec3`, and a conversion that costs precision should cost a
+         * word at the site that pays for it.
+         */
+        static from(value: dvec2): ulvec2;
+        static from(value: fvec2): ulvec2;
+        static from(value: ivec2): ulvec2;
+        static from(value: uvec2): ulvec2;
+        static from(value: lvec2): ulvec2;
+        static from(value: bvec2): ulvec2;
+
+        static add(a: ulvec2, b: ulvec2): ulvec2;
+        add(other: ulvec2): ulvec2;
+        addMut(other: ulvec2): Reference<ulvec2>;
+
+        static sub(a: ulvec2, b: ulvec2): ulvec2;
+        sub(other: ulvec2): ulvec2;
+        subMut(other: ulvec2): Reference<ulvec2>;
+
+        static mul(a: ulvec2, b: ulvec2): ulvec2;
+        mul(other: ulvec2): ulvec2;
+        mulMut(other: ulvec2): Reference<ulvec2>;
+
+        static div(a: ulvec2, b: ulvec2): ulvec2;
+        div(other: ulvec2): ulvec2;
+        divMut(other: ulvec2): Reference<ulvec2>;
+
+        static min(a: ulvec2, b: ulvec2): ulvec2;
+        min(other: ulvec2): ulvec2;
+        minMut(other: ulvec2): Reference<ulvec2>;
+
+        static max(a: ulvec2, b: ulvec2): ulvec2;
+        max(other: ulvec2): ulvec2;
+        maxMut(other: ulvec2): Reference<ulvec2>;
+
+        static rem(a: ulvec2, b: ulvec2): ulvec2;
+        rem(other: ulvec2): ulvec2;
+        remMut(other: ulvec2): Reference<ulvec2>;
+
+        static bitAnd(a: ulvec2, b: ulvec2): ulvec2;
+        bitAnd(other: ulvec2): ulvec2;
+        bitAndMut(other: ulvec2): Reference<ulvec2>;
+
+        static bitOr(a: ulvec2, b: ulvec2): ulvec2;
+        bitOr(other: ulvec2): ulvec2;
+        bitOrMut(other: ulvec2): Reference<ulvec2>;
+
+        static bitXor(a: ulvec2, b: ulvec2): ulvec2;
+        bitXor(other: ulvec2): ulvec2;
+        bitXorMut(other: ulvec2): Reference<ulvec2>;
+
+        static shl(a: ulvec2, b: ulvec2): ulvec2;
+        shl(other: ulvec2): ulvec2;
+        shlMut(other: ulvec2): Reference<ulvec2>;
+
+        static shr(a: ulvec2, b: ulvec2): ulvec2;
+        shr(other: ulvec2): ulvec2;
+        shrMut(other: ulvec2): Reference<ulvec2>;
+
+        static scale(a: ulvec2, by: u64): ulvec2;
+        scale(by: u64): ulvec2;
+        scaleMut(by: u64): Reference<ulvec2>;
+
+        static clamp(a: ulvec2, low: ulvec2, high: ulvec2): ulvec2;
+        clamp(low: ulvec2, high: ulvec2): ulvec2;
+        clampMut(low: ulvec2, high: ulvec2): Reference<ulvec2>;
+
+        static dot(a: ulvec2, b: ulvec2): u64;
+        dot(other: ulvec2): u64;
+
+        static lengthSq(a: ulvec2): u64;
+        lengthSq(): u64;
+
+        static equals(a: ulvec2, b: ulvec2): boolean;
+        equals(other: ulvec2): boolean;
+
+        static lessThan(a: ulvec2, b: ulvec2): bvec2;
+        lessThan(other: ulvec2): bvec2;
+
+        static lessThanEqual(a: ulvec2, b: ulvec2): bvec2;
+        lessThanEqual(other: ulvec2): bvec2;
+
+        static greaterThan(a: ulvec2, b: ulvec2): bvec2;
+        greaterThan(other: ulvec2): bvec2;
+
+        static greaterThanEqual(a: ulvec2, b: ulvec2): bvec2;
+        greaterThanEqual(other: ulvec2): bvec2;
+
+        static equalTo(a: ulvec2, b: ulvec2): bvec2;
+        equalTo(other: ulvec2): bvec2;
+
+        static notEqualTo(a: ulvec2, b: ulvec2): bvec2;
+        notEqualTo(other: ulvec2): bvec2;
+    }
+
+    /**
+     * `ulvec3` — 3 `u64`.
+     *
+     * Exactly 3 components and no padding — 24 bytes — so an array of
+     * them is the layout a vertex buffer wants.
+     */
+    export class ulvec3 {
+        private readonly __linalg: "ulvec3";
+
+        constructor(x: u64, y: u64, z: u64);
+
+        x: u64;
+        y: u64;
+        z: u64;
+
+        [index: number]: u64;
+
+        /** Every component zero. */
+        static zero(): ulvec3;
+
+        /** Every component one. */
+        static one(): ulvec3;
+
+        /** Every component the same value. */
+        static splat(value: u64): ulvec3;
+
+        /** The x-axis: 1 in component 0, 0 elsewhere. */
+        static unitX(): ulvec3;
+
+        /** The y-axis: 1 in component 1, 0 elsewhere. */
+        static unitY(): ulvec3;
+
+        /** The z-axis: 1 in component 2, 0 elsewhere. */
+        static unitZ(): ulvec3;
+
+        /**
+         * Convert from another 3-component vector.
+         *
+         * Explicit because nothing here converts on its own: an `fvec3` is not a
+         * narrower `dvec3`, and a conversion that costs precision should cost a
+         * word at the site that pays for it.
+         */
+        static from(value: dvec3): ulvec3;
+        static from(value: aligned_dvec3): ulvec3;
+        static from(value: fvec3): ulvec3;
+        static from(value: aligned_fvec3): ulvec3;
+        static from(value: ivec3): ulvec3;
+        static from(value: uvec3): ulvec3;
+        static from(value: lvec3): ulvec3;
+        static from(value: bvec3): ulvec3;
+
+        static add(a: ulvec3, b: ulvec3): ulvec3;
+        add(other: ulvec3): ulvec3;
+        addMut(other: ulvec3): Reference<ulvec3>;
+
+        static sub(a: ulvec3, b: ulvec3): ulvec3;
+        sub(other: ulvec3): ulvec3;
+        subMut(other: ulvec3): Reference<ulvec3>;
+
+        static mul(a: ulvec3, b: ulvec3): ulvec3;
+        mul(other: ulvec3): ulvec3;
+        mulMut(other: ulvec3): Reference<ulvec3>;
+
+        static div(a: ulvec3, b: ulvec3): ulvec3;
+        div(other: ulvec3): ulvec3;
+        divMut(other: ulvec3): Reference<ulvec3>;
+
+        static min(a: ulvec3, b: ulvec3): ulvec3;
+        min(other: ulvec3): ulvec3;
+        minMut(other: ulvec3): Reference<ulvec3>;
+
+        static max(a: ulvec3, b: ulvec3): ulvec3;
+        max(other: ulvec3): ulvec3;
+        maxMut(other: ulvec3): Reference<ulvec3>;
+
+        static rem(a: ulvec3, b: ulvec3): ulvec3;
+        rem(other: ulvec3): ulvec3;
+        remMut(other: ulvec3): Reference<ulvec3>;
+
+        static bitAnd(a: ulvec3, b: ulvec3): ulvec3;
+        bitAnd(other: ulvec3): ulvec3;
+        bitAndMut(other: ulvec3): Reference<ulvec3>;
+
+        static bitOr(a: ulvec3, b: ulvec3): ulvec3;
+        bitOr(other: ulvec3): ulvec3;
+        bitOrMut(other: ulvec3): Reference<ulvec3>;
+
+        static bitXor(a: ulvec3, b: ulvec3): ulvec3;
+        bitXor(other: ulvec3): ulvec3;
+        bitXorMut(other: ulvec3): Reference<ulvec3>;
+
+        static shl(a: ulvec3, b: ulvec3): ulvec3;
+        shl(other: ulvec3): ulvec3;
+        shlMut(other: ulvec3): Reference<ulvec3>;
+
+        static shr(a: ulvec3, b: ulvec3): ulvec3;
+        shr(other: ulvec3): ulvec3;
+        shrMut(other: ulvec3): Reference<ulvec3>;
+
+        static scale(a: ulvec3, by: u64): ulvec3;
+        scale(by: u64): ulvec3;
+        scaleMut(by: u64): Reference<ulvec3>;
+
+        static clamp(a: ulvec3, low: ulvec3, high: ulvec3): ulvec3;
+        clamp(low: ulvec3, high: ulvec3): ulvec3;
+        clampMut(low: ulvec3, high: ulvec3): Reference<ulvec3>;
+
+        static dot(a: ulvec3, b: ulvec3): u64;
+        dot(other: ulvec3): u64;
+
+        static lengthSq(a: ulvec3): u64;
+        lengthSq(): u64;
+
+        static equals(a: ulvec3, b: ulvec3): boolean;
+        equals(other: ulvec3): boolean;
+
+        static lessThan(a: ulvec3, b: ulvec3): bvec3;
+        lessThan(other: ulvec3): bvec3;
+
+        static lessThanEqual(a: ulvec3, b: ulvec3): bvec3;
+        lessThanEqual(other: ulvec3): bvec3;
+
+        static greaterThan(a: ulvec3, b: ulvec3): bvec3;
+        greaterThan(other: ulvec3): bvec3;
+
+        static greaterThanEqual(a: ulvec3, b: ulvec3): bvec3;
+        greaterThanEqual(other: ulvec3): bvec3;
+
+        static equalTo(a: ulvec3, b: ulvec3): bvec3;
+        equalTo(other: ulvec3): bvec3;
+
+        static notEqualTo(a: ulvec3, b: ulvec3): bvec3;
+        notEqualTo(other: ulvec3): bvec3;
+    }
+
+    /**
+     * `ulvec4` — 4 `u64`.
+     *
+     * Exactly 4 components and no padding — 32 bytes — so an array of
+     * them is the layout a vertex buffer wants.
+     */
+    export class ulvec4 {
+        private readonly __linalg: "ulvec4";
+
+        constructor(x: u64, y: u64, z: u64, w: u64);
+
+        x: u64;
+        y: u64;
+        z: u64;
+        w: u64;
+
+        [index: number]: u64;
+
+        /** Every component zero. */
+        static zero(): ulvec4;
+
+        /** Every component one. */
+        static one(): ulvec4;
+
+        /** Every component the same value. */
+        static splat(value: u64): ulvec4;
+
+        /** The x-axis: 1 in component 0, 0 elsewhere. */
+        static unitX(): ulvec4;
+
+        /** The y-axis: 1 in component 1, 0 elsewhere. */
+        static unitY(): ulvec4;
+
+        /** The z-axis: 1 in component 2, 0 elsewhere. */
+        static unitZ(): ulvec4;
+
+        /** The w-axis: 1 in component 3, 0 elsewhere. */
+        static unitW(): ulvec4;
+
+        /**
+         * Convert from another 4-component vector.
+         *
+         * Explicit because nothing here converts on its own: an `fvec3` is not a
+         * narrower `dvec3`, and a conversion that costs precision should cost a
+         * word at the site that pays for it.
+         */
+        static from(value: dvec4): ulvec4;
+        static from(value: fvec4): ulvec4;
+        static from(value: ivec4): ulvec4;
+        static from(value: uvec4): ulvec4;
+        static from(value: lvec4): ulvec4;
+        static from(value: bvec4): ulvec4;
+
+        static add(a: ulvec4, b: ulvec4): ulvec4;
+        add(other: ulvec4): ulvec4;
+        addMut(other: ulvec4): Reference<ulvec4>;
+
+        static sub(a: ulvec4, b: ulvec4): ulvec4;
+        sub(other: ulvec4): ulvec4;
+        subMut(other: ulvec4): Reference<ulvec4>;
+
+        static mul(a: ulvec4, b: ulvec4): ulvec4;
+        mul(other: ulvec4): ulvec4;
+        mulMut(other: ulvec4): Reference<ulvec4>;
+
+        static div(a: ulvec4, b: ulvec4): ulvec4;
+        div(other: ulvec4): ulvec4;
+        divMut(other: ulvec4): Reference<ulvec4>;
+
+        static min(a: ulvec4, b: ulvec4): ulvec4;
+        min(other: ulvec4): ulvec4;
+        minMut(other: ulvec4): Reference<ulvec4>;
+
+        static max(a: ulvec4, b: ulvec4): ulvec4;
+        max(other: ulvec4): ulvec4;
+        maxMut(other: ulvec4): Reference<ulvec4>;
+
+        static rem(a: ulvec4, b: ulvec4): ulvec4;
+        rem(other: ulvec4): ulvec4;
+        remMut(other: ulvec4): Reference<ulvec4>;
+
+        static bitAnd(a: ulvec4, b: ulvec4): ulvec4;
+        bitAnd(other: ulvec4): ulvec4;
+        bitAndMut(other: ulvec4): Reference<ulvec4>;
+
+        static bitOr(a: ulvec4, b: ulvec4): ulvec4;
+        bitOr(other: ulvec4): ulvec4;
+        bitOrMut(other: ulvec4): Reference<ulvec4>;
+
+        static bitXor(a: ulvec4, b: ulvec4): ulvec4;
+        bitXor(other: ulvec4): ulvec4;
+        bitXorMut(other: ulvec4): Reference<ulvec4>;
+
+        static shl(a: ulvec4, b: ulvec4): ulvec4;
+        shl(other: ulvec4): ulvec4;
+        shlMut(other: ulvec4): Reference<ulvec4>;
+
+        static shr(a: ulvec4, b: ulvec4): ulvec4;
+        shr(other: ulvec4): ulvec4;
+        shrMut(other: ulvec4): Reference<ulvec4>;
+
+        static scale(a: ulvec4, by: u64): ulvec4;
+        scale(by: u64): ulvec4;
+        scaleMut(by: u64): Reference<ulvec4>;
+
+        static clamp(a: ulvec4, low: ulvec4, high: ulvec4): ulvec4;
+        clamp(low: ulvec4, high: ulvec4): ulvec4;
+        clampMut(low: ulvec4, high: ulvec4): Reference<ulvec4>;
+
+        static dot(a: ulvec4, b: ulvec4): u64;
+        dot(other: ulvec4): u64;
+
+        static lengthSq(a: ulvec4): u64;
+        lengthSq(): u64;
+
+        static equals(a: ulvec4, b: ulvec4): boolean;
+        equals(other: ulvec4): boolean;
+
+        static lessThan(a: ulvec4, b: ulvec4): bvec4;
+        lessThan(other: ulvec4): bvec4;
+
+        static lessThanEqual(a: ulvec4, b: ulvec4): bvec4;
+        lessThanEqual(other: ulvec4): bvec4;
+
+        static greaterThan(a: ulvec4, b: ulvec4): bvec4;
+        greaterThan(other: ulvec4): bvec4;
+
+        static greaterThanEqual(a: ulvec4, b: ulvec4): bvec4;
+        greaterThanEqual(other: ulvec4): bvec4;
+
+        static equalTo(a: ulvec4, b: ulvec4): bvec4;
+        equalTo(other: ulvec4): bvec4;
+
+        static notEqualTo(a: ulvec4, b: ulvec4): bvec4;
+        notEqualTo(other: ulvec4): bvec4;
+    }
+
+    /**
+     * `bvec2` — 2 `boolean`.
+     *
+     * Exactly 2 components and no padding — 16 bytes — so an array of
+     * them is the layout a vertex buffer wants.
+     */
+    export class bvec2 {
+        private readonly __linalg: "bvec2";
+
+        constructor(x: boolean, y: boolean);
+
+        x: boolean;
+        y: boolean;
+
+        [index: number]: boolean;
+
+        /** Every component zero. */
+        static zero(): bvec2;
+
+        /** Every component one. */
+        static one(): bvec2;
+
+        /** Every component the same value. */
+        static splat(value: boolean): bvec2;
+
+        /** The x-axis: 1 in component 0, 0 elsewhere. */
+        static unitX(): bvec2;
+
+        /** The y-axis: 1 in component 1, 0 elsewhere. */
+        static unitY(): bvec2;
+
+        /**
+         * Convert from another 2-component vector.
+         *
+         * Explicit because nothing here converts on its own: an `fvec3` is not a
+         * narrower `dvec3`, and a conversion that costs precision should cost a
+         * word at the site that pays for it.
+         */
+        static from(value: dvec2): bvec2;
+        static from(value: fvec2): bvec2;
+        static from(value: ivec2): bvec2;
+        static from(value: uvec2): bvec2;
+        static from(value: lvec2): bvec2;
+        static from(value: ulvec2): bvec2;
+
+        static and(a: bvec2, b: bvec2): bvec2;
+        and(other: bvec2): bvec2;
+        andMut(other: bvec2): Reference<bvec2>;
+
+        static or(a: bvec2, b: bvec2): bvec2;
+        or(other: bvec2): bvec2;
+        orMut(other: bvec2): Reference<bvec2>;
+
+        static xor(a: bvec2, b: bvec2): bvec2;
+        xor(other: bvec2): bvec2;
+        xorMut(other: bvec2): Reference<bvec2>;
+
+        static not(a: bvec2): bvec2;
+        not(): bvec2;
+        notMut(): Reference<bvec2>;
+
+        static any(a: bvec2): boolean;
+        any(): boolean;
+
+        static all(a: bvec2): boolean;
+        all(): boolean;
+
+        static equals(a: bvec2, b: bvec2): boolean;
+        equals(other: bvec2): boolean;
+    }
+
+    /**
+     * `bvec3` — 3 `boolean`.
+     *
+     * Exactly 3 components and no padding — 24 bytes — so an array of
+     * them is the layout a vertex buffer wants.
+     */
+    export class bvec3 {
+        private readonly __linalg: "bvec3";
+
+        constructor(x: boolean, y: boolean, z: boolean);
+
+        x: boolean;
+        y: boolean;
+        z: boolean;
+
+        [index: number]: boolean;
+
+        /** Every component zero. */
+        static zero(): bvec3;
+
+        /** Every component one. */
+        static one(): bvec3;
+
+        /** Every component the same value. */
+        static splat(value: boolean): bvec3;
+
+        /** The x-axis: 1 in component 0, 0 elsewhere. */
+        static unitX(): bvec3;
+
+        /** The y-axis: 1 in component 1, 0 elsewhere. */
+        static unitY(): bvec3;
+
+        /** The z-axis: 1 in component 2, 0 elsewhere. */
+        static unitZ(): bvec3;
+
+        /**
+         * Convert from another 3-component vector.
+         *
+         * Explicit because nothing here converts on its own: an `fvec3` is not a
+         * narrower `dvec3`, and a conversion that costs precision should cost a
+         * word at the site that pays for it.
+         */
+        static from(value: dvec3): bvec3;
+        static from(value: aligned_dvec3): bvec3;
+        static from(value: fvec3): bvec3;
+        static from(value: aligned_fvec3): bvec3;
+        static from(value: ivec3): bvec3;
+        static from(value: uvec3): bvec3;
+        static from(value: lvec3): bvec3;
+        static from(value: ulvec3): bvec3;
+
+        static and(a: bvec3, b: bvec3): bvec3;
+        and(other: bvec3): bvec3;
+        andMut(other: bvec3): Reference<bvec3>;
+
+        static or(a: bvec3, b: bvec3): bvec3;
+        or(other: bvec3): bvec3;
+        orMut(other: bvec3): Reference<bvec3>;
+
+        static xor(a: bvec3, b: bvec3): bvec3;
+        xor(other: bvec3): bvec3;
+        xorMut(other: bvec3): Reference<bvec3>;
+
+        static not(a: bvec3): bvec3;
+        not(): bvec3;
+        notMut(): Reference<bvec3>;
+
+        static any(a: bvec3): boolean;
+        any(): boolean;
+
+        static all(a: bvec3): boolean;
+        all(): boolean;
+
+        static equals(a: bvec3, b: bvec3): boolean;
+        equals(other: bvec3): boolean;
+    }
+
+    /**
+     * `bvec4` — 4 `boolean`.
+     *
+     * Exactly 4 components and no padding — 32 bytes — so an array of
+     * them is the layout a vertex buffer wants.
+     */
+    export class bvec4 {
+        private readonly __linalg: "bvec4";
+
+        constructor(x: boolean, y: boolean, z: boolean, w: boolean);
+
+        x: boolean;
+        y: boolean;
+        z: boolean;
+        w: boolean;
+
+        [index: number]: boolean;
+
+        /** Every component zero. */
+        static zero(): bvec4;
+
+        /** Every component one. */
+        static one(): bvec4;
+
+        /** Every component the same value. */
+        static splat(value: boolean): bvec4;
+
+        /** The x-axis: 1 in component 0, 0 elsewhere. */
+        static unitX(): bvec4;
+
+        /** The y-axis: 1 in component 1, 0 elsewhere. */
+        static unitY(): bvec4;
+
+        /** The z-axis: 1 in component 2, 0 elsewhere. */
+        static unitZ(): bvec4;
+
+        /** The w-axis: 1 in component 3, 0 elsewhere. */
+        static unitW(): bvec4;
+
+        /**
+         * Convert from another 4-component vector.
+         *
+         * Explicit because nothing here converts on its own: an `fvec3` is not a
+         * narrower `dvec3`, and a conversion that costs precision should cost a
+         * word at the site that pays for it.
+         */
+        static from(value: dvec4): bvec4;
+        static from(value: fvec4): bvec4;
+        static from(value: ivec4): bvec4;
+        static from(value: uvec4): bvec4;
+        static from(value: lvec4): bvec4;
+        static from(value: ulvec4): bvec4;
+
+        static and(a: bvec4, b: bvec4): bvec4;
+        and(other: bvec4): bvec4;
+        andMut(other: bvec4): Reference<bvec4>;
+
+        static or(a: bvec4, b: bvec4): bvec4;
+        or(other: bvec4): bvec4;
+        orMut(other: bvec4): Reference<bvec4>;
+
+        static xor(a: bvec4, b: bvec4): bvec4;
+        xor(other: bvec4): bvec4;
+        xorMut(other: bvec4): Reference<bvec4>;
+
+        static not(a: bvec4): bvec4;
+        not(): bvec4;
+        notMut(): Reference<bvec4>;
+
+        static any(a: bvec4): boolean;
+        any(): boolean;
+
+        static all(a: bvec4): boolean;
+        all(): boolean;
+
+        static equals(a: bvec4, b: bvec4): boolean;
+        equals(other: bvec4): boolean;
     }
 
     /**
@@ -2359,316 +4977,25 @@ declare module "std/linalg" {
     }
 
     /**
-     * `fvec2` — 2 `f32`.
+     * `dquat` — 4 `f64`.
      *
-     * Exactly 2 components and no padding — 8 bytes — so an array of
+     * Exactly 4 components and no padding — 32 bytes — so an array of
      * them is the layout a vertex buffer wants.
      */
-    export class fvec2 {
-        private readonly __linalg: "fvec2";
+    export class dquat {
+        private readonly __linalg: "dquat";
 
-        constructor(x: f32, y: f32);
+        constructor(x: f64, y: f64, z: f64, w: f64);
 
-        x: f32;
-        y: f32;
+        x: f64;
+        y: f64;
+        z: f64;
+        w: f64;
 
-        [index: number]: f32;
+        [index: number]: f64;
 
-        /** Every component zero. */
-        static zero(): fvec2;
-
-        /** Every component one. */
-        static one(): fvec2;
-
-        /** Every component the same value. */
-        static splat(value: f32): fvec2;
-
-        /** The x-axis: 1 in component 0, 0 elsewhere. */
-        static unitX(): fvec2;
-
-        /** The y-axis: 1 in component 1, 0 elsewhere. */
-        static unitY(): fvec2;
-
-        /**
-         * Convert from another 2-component vector.
-         *
-         * Explicit because nothing here converts on its own: an `fvec3` is not a
-         * narrower `dvec3`, and a conversion that costs precision should cost a
-         * word at the site that pays for it.
-         */
-        static from(value: dvec2): fvec2;
-
-        static add(a: fvec2, b: fvec2): fvec2;
-        add(other: fvec2): fvec2;
-        addMut(other: fvec2): Reference<fvec2>;
-
-        static sub(a: fvec2, b: fvec2): fvec2;
-        sub(other: fvec2): fvec2;
-        subMut(other: fvec2): Reference<fvec2>;
-
-        static mul(a: fvec2, b: fvec2): fvec2;
-        mul(other: fvec2): fvec2;
-        mulMut(other: fvec2): Reference<fvec2>;
-
-        static div(a: fvec2, b: fvec2): fvec2;
-        div(other: fvec2): fvec2;
-        divMut(other: fvec2): Reference<fvec2>;
-
-        static min(a: fvec2, b: fvec2): fvec2;
-        min(other: fvec2): fvec2;
-        minMut(other: fvec2): Reference<fvec2>;
-
-        static max(a: fvec2, b: fvec2): fvec2;
-        max(other: fvec2): fvec2;
-        maxMut(other: fvec2): Reference<fvec2>;
-
-        static scale(a: fvec2, by: f32): fvec2;
-        scale(by: f32): fvec2;
-        scaleMut(by: f32): Reference<fvec2>;
-
-        static addScaled(a: fvec2, b: fvec2, t: f32): fvec2;
-        addScaled(other: fvec2, t: f32): fvec2;
-        addScaledMut(other: fvec2, t: f32): Reference<fvec2>;
-
-        static negate(a: fvec2): fvec2;
-        negate(): fvec2;
-        negateMut(): Reference<fvec2>;
-
-        static abs(a: fvec2): fvec2;
-        abs(): fvec2;
-        absMut(): Reference<fvec2>;
-
-        static sqrt(a: fvec2): fvec2;
-        sqrt(): fvec2;
-        sqrtMut(): Reference<fvec2>;
-
-        static floor(a: fvec2): fvec2;
-        floor(): fvec2;
-        floorMut(): Reference<fvec2>;
-
-        static ceil(a: fvec2): fvec2;
-        ceil(): fvec2;
-        ceilMut(): Reference<fvec2>;
-
-        static round(a: fvec2): fvec2;
-        round(): fvec2;
-        roundMut(): Reference<fvec2>;
-
-        static trunc(a: fvec2): fvec2;
-        trunc(): fvec2;
-        truncMut(): Reference<fvec2>;
-
-        static normalize(a: fvec2): fvec2;
-        normalize(): fvec2;
-        normalizeMut(): Reference<fvec2>;
-
-        static lerp(a: fvec2, b: fvec2, t: f32): fvec2;
-        lerp(other: fvec2, t: f32): fvec2;
-        lerpMut(other: fvec2, t: f32): Reference<fvec2>;
-
-        static clamp(a: fvec2, low: fvec2, high: fvec2): fvec2;
-        clamp(low: fvec2, high: fvec2): fvec2;
-        clampMut(low: fvec2, high: fvec2): Reference<fvec2>;
-
-        static dot(a: fvec2, b: fvec2): f32;
-        dot(other: fvec2): f32;
-
-        static lengthSq(a: fvec2): f32;
-        lengthSq(): f32;
-
-        static length(a: fvec2): f32;
-        length(): f32;
-
-        static distance(a: fvec2, b: fvec2): f32;
-        distance(other: fvec2): f32;
-
-        static distanceSq(a: fvec2, b: fvec2): f32;
-        distanceSq(other: fvec2): f32;
-
-        static equals(a: fvec2, b: fvec2): boolean;
-        equals(other: fvec2): boolean;
-    }
-
-    /**
-     * `fvec3` — 3 `f32`.
-     *
-     * Exactly 3 components and no padding — 12 bytes — so an array of
-     * them is the layout a vertex buffer wants.
-     * `aligned_fvec3` is the same maths with a lane of padding, and faster.
-     */
-    export class fvec3 {
-        private readonly __linalg: "fvec3";
-
-        constructor(x: f32, y: f32, z: f32);
-
-        x: f32;
-        y: f32;
-        z: f32;
-
-        [index: number]: f32;
-
-        /** Every component zero. */
-        static zero(): fvec3;
-
-        /** Every component one. */
-        static one(): fvec3;
-
-        /** Every component the same value. */
-        static splat(value: f32): fvec3;
-
-        /** The x-axis: 1 in component 0, 0 elsewhere. */
-        static unitX(): fvec3;
-
-        /** The y-axis: 1 in component 1, 0 elsewhere. */
-        static unitY(): fvec3;
-
-        /** The z-axis: 1 in component 2, 0 elsewhere. */
-        static unitZ(): fvec3;
-
-        /**
-         * Convert from another 3-component vector.
-         *
-         * Explicit because nothing here converts on its own: an `fvec3` is not a
-         * narrower `dvec3`, and a conversion that costs precision should cost a
-         * word at the site that pays for it.
-         */
-        static from(value: dvec3): fvec3;
-        static from(value: aligned_dvec3): fvec3;
-        static from(value: aligned_fvec3): fvec3;
-
-        static add(a: fvec3, b: fvec3): fvec3;
-        add(other: fvec3): fvec3;
-        addMut(other: fvec3): Reference<fvec3>;
-
-        static sub(a: fvec3, b: fvec3): fvec3;
-        sub(other: fvec3): fvec3;
-        subMut(other: fvec3): Reference<fvec3>;
-
-        static mul(a: fvec3, b: fvec3): fvec3;
-        mul(other: fvec3): fvec3;
-        mulMut(other: fvec3): Reference<fvec3>;
-
-        static div(a: fvec3, b: fvec3): fvec3;
-        div(other: fvec3): fvec3;
-        divMut(other: fvec3): Reference<fvec3>;
-
-        static min(a: fvec3, b: fvec3): fvec3;
-        min(other: fvec3): fvec3;
-        minMut(other: fvec3): Reference<fvec3>;
-
-        static max(a: fvec3, b: fvec3): fvec3;
-        max(other: fvec3): fvec3;
-        maxMut(other: fvec3): Reference<fvec3>;
-
-        static scale(a: fvec3, by: f32): fvec3;
-        scale(by: f32): fvec3;
-        scaleMut(by: f32): Reference<fvec3>;
-
-        static addScaled(a: fvec3, b: fvec3, t: f32): fvec3;
-        addScaled(other: fvec3, t: f32): fvec3;
-        addScaledMut(other: fvec3, t: f32): Reference<fvec3>;
-
-        static negate(a: fvec3): fvec3;
-        negate(): fvec3;
-        negateMut(): Reference<fvec3>;
-
-        static abs(a: fvec3): fvec3;
-        abs(): fvec3;
-        absMut(): Reference<fvec3>;
-
-        static sqrt(a: fvec3): fvec3;
-        sqrt(): fvec3;
-        sqrtMut(): Reference<fvec3>;
-
-        static floor(a: fvec3): fvec3;
-        floor(): fvec3;
-        floorMut(): Reference<fvec3>;
-
-        static ceil(a: fvec3): fvec3;
-        ceil(): fvec3;
-        ceilMut(): Reference<fvec3>;
-
-        static round(a: fvec3): fvec3;
-        round(): fvec3;
-        roundMut(): Reference<fvec3>;
-
-        static trunc(a: fvec3): fvec3;
-        trunc(): fvec3;
-        truncMut(): Reference<fvec3>;
-
-        static normalize(a: fvec3): fvec3;
-        normalize(): fvec3;
-        normalizeMut(): Reference<fvec3>;
-
-        static lerp(a: fvec3, b: fvec3, t: f32): fvec3;
-        lerp(other: fvec3, t: f32): fvec3;
-        lerpMut(other: fvec3, t: f32): Reference<fvec3>;
-
-        static clamp(a: fvec3, low: fvec3, high: fvec3): fvec3;
-        clamp(low: fvec3, high: fvec3): fvec3;
-        clampMut(low: fvec3, high: fvec3): Reference<fvec3>;
-
-        static cross(a: fvec3, b: fvec3): fvec3;
-        cross(other: fvec3): fvec3;
-        crossMut(other: fvec3): Reference<fvec3>;
-
-        static dot(a: fvec3, b: fvec3): f32;
-        dot(other: fvec3): f32;
-
-        static lengthSq(a: fvec3): f32;
-        lengthSq(): f32;
-
-        static length(a: fvec3): f32;
-        length(): f32;
-
-        static distance(a: fvec3, b: fvec3): f32;
-        distance(other: fvec3): f32;
-
-        static distanceSq(a: fvec3, b: fvec3): f32;
-        distanceSq(other: fvec3): f32;
-
-        static equals(a: fvec3, b: fvec3): boolean;
-        equals(other: fvec3): boolean;
-    }
-
-    /**
-     * `fvec4` — 4 `f32`.
-     *
-     * Exactly 4 components and no padding — 16 bytes — so an array of
-     * them is the layout a vertex buffer wants.
-     */
-    export class fvec4 {
-        private readonly __linalg: "fvec4";
-
-        constructor(x: f32, y: f32, z: f32, w: f32);
-
-        x: f32;
-        y: f32;
-        z: f32;
-        w: f32;
-
-        [index: number]: f32;
-
-        /** Every component zero. */
-        static zero(): fvec4;
-
-        /** Every component one. */
-        static one(): fvec4;
-
-        /** Every component the same value. */
-        static splat(value: f32): fvec4;
-
-        /** The x-axis: 1 in component 0, 0 elsewhere. */
-        static unitX(): fvec4;
-
-        /** The y-axis: 1 in component 1, 0 elsewhere. */
-        static unitY(): fvec4;
-
-        /** The z-axis: 1 in component 2, 0 elsewhere. */
-        static unitZ(): fvec4;
-
-        /** The w-axis: 1 in component 3, 0 elsewhere. */
-        static unitW(): fvec4;
+        /** The rotation that does nothing: `(0, 0, 0, 1)`. */
+        static identity(): dquat;
 
         /**
          * Convert from another 4-component vector.
@@ -2677,240 +5004,77 @@ declare module "std/linalg" {
          * narrower `dvec3`, and a conversion that costs precision should cost a
          * word at the site that pays for it.
          */
-        static from(value: dvec4): fvec4;
+        static from(value: fquat): dquat;
 
-        static add(a: fvec4, b: fvec4): fvec4;
-        add(other: fvec4): fvec4;
-        addMut(other: fvec4): Reference<fvec4>;
+        /** A right-handed rotation about an axis. The axis is normalised first. */
+        static fromAxisAngle(axis: dvec3, angle: f64): dquat;
 
-        static sub(a: fvec4, b: fvec4): fvec4;
-        sub(other: fvec4): fvec4;
-        subMut(other: fvec4): Reference<fvec4>;
+        /** Intrinsic Tait-Bryan angles in radians, applied **yaw, then pitch, then roll** — rotations about y, then x, then z. */
+        static fromEuler(pitch: f64, yaw: f64, roll: f64): dquat;
 
-        static mul(a: fvec4, b: fvec4): fvec4;
-        mul(other: fvec4): fvec4;
-        mulMut(other: fvec4): Reference<fvec4>;
+        /** The rotation a matrix represents. The matrix is assumed orthonormal. */
+        static fromRotation(basis: dmat3): dquat;
 
-        static div(a: fvec4, b: fvec4): fvec4;
-        div(other: fvec4): fvec4;
-        divMut(other: fvec4): Reference<fvec4>;
+        static add(a: dquat, b: dquat): dquat;
+        add(other: dquat): dquat;
+        addMut(other: dquat): Reference<dquat>;
 
-        static min(a: fvec4, b: fvec4): fvec4;
-        min(other: fvec4): fvec4;
-        minMut(other: fvec4): Reference<fvec4>;
+        static sub(a: dquat, b: dquat): dquat;
+        sub(other: dquat): dquat;
+        subMut(other: dquat): Reference<dquat>;
 
-        static max(a: fvec4, b: fvec4): fvec4;
-        max(other: fvec4): fvec4;
-        maxMut(other: fvec4): Reference<fvec4>;
+        static scale(a: dquat, by: f64): dquat;
+        scale(by: f64): dquat;
+        scaleMut(by: f64): Reference<dquat>;
 
-        static scale(a: fvec4, by: f32): fvec4;
-        scale(by: f32): fvec4;
-        scaleMut(by: f32): Reference<fvec4>;
+        static negate(a: dquat): dquat;
+        negate(): dquat;
+        negateMut(): Reference<dquat>;
 
-        static addScaled(a: fvec4, b: fvec4, t: f32): fvec4;
-        addScaled(other: fvec4, t: f32): fvec4;
-        addScaledMut(other: fvec4, t: f32): Reference<fvec4>;
+        static mul(a: dquat, b: dquat): dquat;
+        mul(other: dquat): dquat;
+        mulMut(other: dquat): Reference<dquat>;
 
-        static negate(a: fvec4): fvec4;
-        negate(): fvec4;
-        negateMut(): Reference<fvec4>;
+        static conjugate(a: dquat): dquat;
+        conjugate(): dquat;
+        conjugateMut(): Reference<dquat>;
 
-        static abs(a: fvec4): fvec4;
-        abs(): fvec4;
-        absMut(): Reference<fvec4>;
+        static inverse(a: dquat): dquat;
+        inverse(): dquat;
+        inverseMut(): Reference<dquat>;
 
-        static sqrt(a: fvec4): fvec4;
-        sqrt(): fvec4;
-        sqrtMut(): Reference<fvec4>;
+        static normalize(a: dquat): dquat;
+        normalize(): dquat;
+        normalizeMut(): Reference<dquat>;
 
-        static floor(a: fvec4): fvec4;
-        floor(): fvec4;
-        floorMut(): Reference<fvec4>;
+        static slerp(a: dquat, b: dquat, p1: f64): dquat;
+        slerp(other: dquat, p1: f64): dquat;
+        slerpMut(other: dquat, p1: f64): Reference<dquat>;
 
-        static ceil(a: fvec4): fvec4;
-        ceil(): fvec4;
-        ceilMut(): Reference<fvec4>;
+        static nlerp(a: dquat, b: dquat, p1: f64): dquat;
+        nlerp(other: dquat, p1: f64): dquat;
+        nlerpMut(other: dquat, p1: f64): Reference<dquat>;
 
-        static round(a: fvec4): fvec4;
-        round(): fvec4;
-        roundMut(): Reference<fvec4>;
+        static rotateVec(a: dquat, b: dvec3): dvec3;
+        rotateVec(other: dvec3): dvec3;
 
-        static trunc(a: fvec4): fvec4;
-        trunc(): fvec4;
-        truncMut(): Reference<fvec4>;
+        static toMat3(a: dquat): dmat3;
+        toMat3(): dmat3;
 
-        static normalize(a: fvec4): fvec4;
-        normalize(): fvec4;
-        normalizeMut(): Reference<fvec4>;
+        static toMat4(a: dquat): dmat4;
+        toMat4(): dmat4;
 
-        static lerp(a: fvec4, b: fvec4, t: f32): fvec4;
-        lerp(other: fvec4, t: f32): fvec4;
-        lerpMut(other: fvec4, t: f32): Reference<fvec4>;
+        static dot(a: dquat, b: dquat): f64;
+        dot(other: dquat): f64;
 
-        static clamp(a: fvec4, low: fvec4, high: fvec4): fvec4;
-        clamp(low: fvec4, high: fvec4): fvec4;
-        clampMut(low: fvec4, high: fvec4): Reference<fvec4>;
+        static length(a: dquat): f64;
+        length(): f64;
 
-        static dot(a: fvec4, b: fvec4): f32;
-        dot(other: fvec4): f32;
+        static lengthSq(a: dquat): f64;
+        lengthSq(): f64;
 
-        static lengthSq(a: fvec4): f32;
-        lengthSq(): f32;
-
-        static length(a: fvec4): f32;
-        length(): f32;
-
-        static distance(a: fvec4, b: fvec4): f32;
-        distance(other: fvec4): f32;
-
-        static distanceSq(a: fvec4, b: fvec4): f32;
-        distanceSq(other: fvec4): f32;
-
-        static equals(a: fvec4, b: fvec4): boolean;
-        equals(other: fvec4): boolean;
-    }
-
-    /**
-     * `aligned_fvec3` — 3 `f32`, padded to a whole register.
-     *
-     * Carries a lane of padding, so arithmetic is one instruction rather than a
-     * 128-bit operation and a scalar one. 16 bytes against
-     * `fvec3`'s 12: faster in a loop, wasteful in a vertex
-     * buffer. Pick deliberately.
-     */
-    export class aligned_fvec3 {
-        private readonly __linalg: "aligned_fvec3";
-
-        constructor(x: f32, y: f32, z: f32);
-
-        x: f32;
-        y: f32;
-        z: f32;
-
-        [index: number]: f32;
-
-        /** Every component zero. */
-        static zero(): aligned_fvec3;
-
-        /** Every component one. */
-        static one(): aligned_fvec3;
-
-        /** Every component the same value. */
-        static splat(value: f32): aligned_fvec3;
-
-        /** The x-axis: 1 in component 0, 0 elsewhere. */
-        static unitX(): aligned_fvec3;
-
-        /** The y-axis: 1 in component 1, 0 elsewhere. */
-        static unitY(): aligned_fvec3;
-
-        /** The z-axis: 1 in component 2, 0 elsewhere. */
-        static unitZ(): aligned_fvec3;
-
-        /**
-         * Convert from another 3-component vector.
-         *
-         * Explicit because nothing here converts on its own: an `fvec3` is not a
-         * narrower `dvec3`, and a conversion that costs precision should cost a
-         * word at the site that pays for it.
-         */
-        static from(value: dvec3): aligned_fvec3;
-        static from(value: aligned_dvec3): aligned_fvec3;
-        static from(value: fvec3): aligned_fvec3;
-
-        static add(a: aligned_fvec3, b: aligned_fvec3): aligned_fvec3;
-        add(other: aligned_fvec3): aligned_fvec3;
-        addMut(other: aligned_fvec3): Reference<aligned_fvec3>;
-
-        static sub(a: aligned_fvec3, b: aligned_fvec3): aligned_fvec3;
-        sub(other: aligned_fvec3): aligned_fvec3;
-        subMut(other: aligned_fvec3): Reference<aligned_fvec3>;
-
-        static mul(a: aligned_fvec3, b: aligned_fvec3): aligned_fvec3;
-        mul(other: aligned_fvec3): aligned_fvec3;
-        mulMut(other: aligned_fvec3): Reference<aligned_fvec3>;
-
-        static div(a: aligned_fvec3, b: aligned_fvec3): aligned_fvec3;
-        div(other: aligned_fvec3): aligned_fvec3;
-        divMut(other: aligned_fvec3): Reference<aligned_fvec3>;
-
-        static min(a: aligned_fvec3, b: aligned_fvec3): aligned_fvec3;
-        min(other: aligned_fvec3): aligned_fvec3;
-        minMut(other: aligned_fvec3): Reference<aligned_fvec3>;
-
-        static max(a: aligned_fvec3, b: aligned_fvec3): aligned_fvec3;
-        max(other: aligned_fvec3): aligned_fvec3;
-        maxMut(other: aligned_fvec3): Reference<aligned_fvec3>;
-
-        static scale(a: aligned_fvec3, by: f32): aligned_fvec3;
-        scale(by: f32): aligned_fvec3;
-        scaleMut(by: f32): Reference<aligned_fvec3>;
-
-        static addScaled(a: aligned_fvec3, b: aligned_fvec3, t: f32): aligned_fvec3;
-        addScaled(other: aligned_fvec3, t: f32): aligned_fvec3;
-        addScaledMut(other: aligned_fvec3, t: f32): Reference<aligned_fvec3>;
-
-        static negate(a: aligned_fvec3): aligned_fvec3;
-        negate(): aligned_fvec3;
-        negateMut(): Reference<aligned_fvec3>;
-
-        static abs(a: aligned_fvec3): aligned_fvec3;
-        abs(): aligned_fvec3;
-        absMut(): Reference<aligned_fvec3>;
-
-        static sqrt(a: aligned_fvec3): aligned_fvec3;
-        sqrt(): aligned_fvec3;
-        sqrtMut(): Reference<aligned_fvec3>;
-
-        static floor(a: aligned_fvec3): aligned_fvec3;
-        floor(): aligned_fvec3;
-        floorMut(): Reference<aligned_fvec3>;
-
-        static ceil(a: aligned_fvec3): aligned_fvec3;
-        ceil(): aligned_fvec3;
-        ceilMut(): Reference<aligned_fvec3>;
-
-        static round(a: aligned_fvec3): aligned_fvec3;
-        round(): aligned_fvec3;
-        roundMut(): Reference<aligned_fvec3>;
-
-        static trunc(a: aligned_fvec3): aligned_fvec3;
-        trunc(): aligned_fvec3;
-        truncMut(): Reference<aligned_fvec3>;
-
-        static normalize(a: aligned_fvec3): aligned_fvec3;
-        normalize(): aligned_fvec3;
-        normalizeMut(): Reference<aligned_fvec3>;
-
-        static lerp(a: aligned_fvec3, b: aligned_fvec3, t: f32): aligned_fvec3;
-        lerp(other: aligned_fvec3, t: f32): aligned_fvec3;
-        lerpMut(other: aligned_fvec3, t: f32): Reference<aligned_fvec3>;
-
-        static clamp(a: aligned_fvec3, low: aligned_fvec3, high: aligned_fvec3): aligned_fvec3;
-        clamp(low: aligned_fvec3, high: aligned_fvec3): aligned_fvec3;
-        clampMut(low: aligned_fvec3, high: aligned_fvec3): Reference<aligned_fvec3>;
-
-        static cross(a: aligned_fvec3, b: aligned_fvec3): aligned_fvec3;
-        cross(other: aligned_fvec3): aligned_fvec3;
-        crossMut(other: aligned_fvec3): Reference<aligned_fvec3>;
-
-        static dot(a: aligned_fvec3, b: aligned_fvec3): f32;
-        dot(other: aligned_fvec3): f32;
-
-        static lengthSq(a: aligned_fvec3): f32;
-        lengthSq(): f32;
-
-        static length(a: aligned_fvec3): f32;
-        length(): f32;
-
-        static distance(a: aligned_fvec3, b: aligned_fvec3): f32;
-        distance(other: aligned_fvec3): f32;
-
-        static distanceSq(a: aligned_fvec3, b: aligned_fvec3): f32;
-        distanceSq(other: aligned_fvec3): f32;
-
-        static equals(a: aligned_fvec3, b: aligned_fvec3): boolean;
-        equals(other: aligned_fvec3): boolean;
+        static equals(a: dquat, b: dquat): boolean;
+        equals(other: dquat): boolean;
     }
 
     /**
@@ -3281,6 +5445,107 @@ declare module "std/linalg" {
 
         static equals(a: aligned_fmat3, b: aligned_fmat3): boolean;
         equals(other: aligned_fmat3): boolean;
+    }
+
+    /**
+     * `fquat` — 4 `f32`.
+     *
+     * Exactly 4 components and no padding — 16 bytes — so an array of
+     * them is the layout a vertex buffer wants.
+     */
+    export class fquat {
+        private readonly __linalg: "fquat";
+
+        constructor(x: f32, y: f32, z: f32, w: f32);
+
+        x: f32;
+        y: f32;
+        z: f32;
+        w: f32;
+
+        [index: number]: f32;
+
+        /** The rotation that does nothing: `(0, 0, 0, 1)`. */
+        static identity(): fquat;
+
+        /**
+         * Convert from another 4-component vector.
+         *
+         * Explicit because nothing here converts on its own: an `fvec3` is not a
+         * narrower `dvec3`, and a conversion that costs precision should cost a
+         * word at the site that pays for it.
+         */
+        static from(value: dquat): fquat;
+
+        /** A right-handed rotation about an axis. The axis is normalised first. */
+        static fromAxisAngle(axis: fvec3, angle: f32): fquat;
+
+        /** Intrinsic Tait-Bryan angles in radians, applied **yaw, then pitch, then roll** — rotations about y, then x, then z. */
+        static fromEuler(pitch: f32, yaw: f32, roll: f32): fquat;
+
+        /** The rotation a matrix represents. The matrix is assumed orthonormal. */
+        static fromRotation(basis: fmat3): fquat;
+
+        static add(a: fquat, b: fquat): fquat;
+        add(other: fquat): fquat;
+        addMut(other: fquat): Reference<fquat>;
+
+        static sub(a: fquat, b: fquat): fquat;
+        sub(other: fquat): fquat;
+        subMut(other: fquat): Reference<fquat>;
+
+        static scale(a: fquat, by: f32): fquat;
+        scale(by: f32): fquat;
+        scaleMut(by: f32): Reference<fquat>;
+
+        static negate(a: fquat): fquat;
+        negate(): fquat;
+        negateMut(): Reference<fquat>;
+
+        static mul(a: fquat, b: fquat): fquat;
+        mul(other: fquat): fquat;
+        mulMut(other: fquat): Reference<fquat>;
+
+        static conjugate(a: fquat): fquat;
+        conjugate(): fquat;
+        conjugateMut(): Reference<fquat>;
+
+        static inverse(a: fquat): fquat;
+        inverse(): fquat;
+        inverseMut(): Reference<fquat>;
+
+        static normalize(a: fquat): fquat;
+        normalize(): fquat;
+        normalizeMut(): Reference<fquat>;
+
+        static slerp(a: fquat, b: fquat, p1: f32): fquat;
+        slerp(other: fquat, p1: f32): fquat;
+        slerpMut(other: fquat, p1: f32): Reference<fquat>;
+
+        static nlerp(a: fquat, b: fquat, p1: f32): fquat;
+        nlerp(other: fquat, p1: f32): fquat;
+        nlerpMut(other: fquat, p1: f32): Reference<fquat>;
+
+        static rotateVec(a: fquat, b: fvec3): fvec3;
+        rotateVec(other: fvec3): fvec3;
+
+        static toMat3(a: fquat): fmat3;
+        toMat3(): fmat3;
+
+        static toMat4(a: fquat): fmat4;
+        toMat4(): fmat4;
+
+        static dot(a: fquat, b: fquat): f32;
+        dot(other: fquat): f32;
+
+        static length(a: fquat): f32;
+        length(): f32;
+
+        static lengthSq(a: fquat): f32;
+        lengthSq(): f32;
+
+        static equals(a: fquat, b: fquat): boolean;
+        equals(other: fquat): boolean;
     }
 }
 

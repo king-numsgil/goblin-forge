@@ -656,11 +656,6 @@ export abstract class MatrixLowerer extends LinalgLowerer {
         return padded;
     }
 
-    /** A value that is about to be read again. */
-    private reread(value: Typed): Typed {
-        return {operand: this.repeatable(value), type: value.type};
-    }
-
     /** `sin` and `cos` of one angle argument, each computed once. */
     private angleOf(
         at: ts.CallExpression,

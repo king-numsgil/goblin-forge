@@ -51,6 +51,17 @@ export type LinalgPrefix = keyof typeof LINALG_ELEMENTS;
 /** The prefixes whose arithmetic goes through the vector unit. */
 export const SIMD_PREFIXES: readonly LinalgPrefix[] = ["d", "f"];
 
+/** Every prefix that has vectors, in declaration order. */
+export const VEC_PREFIXES: readonly LinalgPrefix[] = ["d", "f", "i", "u", "l", "ul", "b"];
+
+/** The integer prefixes whose element is signed, and so can be negated. */
+export const SIGNED_PREFIXES: readonly LinalgPrefix[] = ["d", "f", "i", "l"];
+
+/** Whether a prefix's element is an integer — no `sqrt`, no `lerp`, no NaN. */
+export function isIntegerPrefix(prefix: LinalgPrefix): boolean {
+    return prefix === "i" || prefix === "u" || prefix === "l" || prefix === "ul";
+}
+
 export interface LinalgType {
     /** `aligned_dvec3` — the name written in source. */
     readonly name: string;
@@ -64,8 +75,15 @@ export interface LinalgType {
      * existing rule that nested aggregates are inline, its columns are ordinary
      * field projections, and every column operation is a vector operation that
      * already worked.
+     *
+     * A quaternion is four lanes like a `vec4` and shares most of its
+     * arithmetic — `add`, `dot`, `length`, `normalize` are the same operations
+     * on the same four lanes. It is a family of its own because its `mul` is
+     * the Hamilton product rather than elementwise, and because a `dvec4` that
+     * happened to have a `slerp` would let any four numbers be treated as a
+     * rotation.
      */
-    readonly family: "vec" | "mat";
+    readonly family: "vec" | "mat" | "quat";
 
     readonly prefix: LinalgPrefix;
 
@@ -193,24 +211,95 @@ function matrix(prefix: LinalgPrefix, order: number, padded: boolean): LinalgTyp
 }
 
 /**
+ * A quaternion: `x`, `y`, `z`, `w`, with `w` the scalar part.
+ *
+ * Four lanes, always — there is no packed form to want, because four `f64` is
+ * already exactly one AVX register and four `f32` exactly one SSE register.
+ * `w` last is GLM's memory order and the one every serialised format uses; the
+ * *constructor* takes it last too, so what you write is what is stored.
+ */
+function quaternion(prefix: LinalgPrefix): LinalgType {
+    const components = [...COMPONENTS];
+    return {
+        name: `${prefix}quat`,
+        family: "quat",
+        prefix,
+        element: LINALG_ELEMENTS[prefix],
+        components,
+        fields: components,
+        lanes: 4,
+        padded: false,
+    };
+}
+
+/**
  * Every type `std/linalg` declares, by name.
  *
- * Vectors and square matrices. Quaternions are entries in this same table when
- * they land, which is the property the table exists for — a `quat` is four
- * lanes and a multiplication rule, and it needs no machinery this does not
- * already have.
+ * Vectors for all seven elements, square matrices and quaternions for the two
+ * float ones. Matrices and quaternions are float-only because neither has a
+ * meaning at integer precision: an integer rotation is not a rotation, and an
+ * integer inverse is not an inverse.
  */
 export const LINALG_TYPES: ReadonlyMap<string, LinalgType> = new Map(
-    SIMD_PREFIXES.flatMap((prefix) => [
-        ...[2, 3, 4].map((size) => vector(prefix, size, false)),
-        // Only `vec3` has a padded form to want: a `vec2` and a `vec4` already
-        // fill their register exactly, and padding either would cost space for
-        // no instruction saved.
-        vector(prefix, 3, true),
-        ...[2, 3, 4].map((order) => matrix(prefix, order, false)),
-        matrix(prefix, 3, true),
-    ]).map((type): [string, LinalgType] => [type.name, type]),
+    [
+        ...VEC_PREFIXES.flatMap((prefix) => [
+            ...[2, 3, 4].map((size) => vector(prefix, size, false)),
+            // Only `vec3` has a padded form, and only where there is a vector
+            // unit to pad *for*: a `vec2` and a `vec4` already fill their
+            // register exactly, and an integer vector never reaches one.
+            ...(SIMD_PREFIXES.includes(prefix) ? [vector(prefix, 3, true)] : []),
+        ]),
+        ...SIMD_PREFIXES.flatMap((prefix) => [
+            ...[2, 3, 4].map((order) => matrix(prefix, order, false)),
+            matrix(prefix, 3, true),
+            quaternion(prefix),
+        ]),
+    ].map((type): [string, LinalgType] => [type.name, type]),
 );
+
+/** The boolean vector of the same width — what a comparison produces. */
+export function boolVectorOf(type: LinalgType): LinalgType | undefined {
+    return LINALG_TYPES.get(`bvec${type.components.length}`);
+}
+
+/** The unpadded three-component vector of the same element. */
+export function axisVectorOf(type: LinalgType): LinalgType | undefined {
+    return LINALG_TYPES.get(`${type.prefix}vec3`);
+}
+
+/** The square matrix of a given order with the same element. */
+export function matrixOf(type: LinalgType, order: number): LinalgType | undefined {
+    return LINALG_TYPES.get(`${type.prefix}mat${order}`);
+}
+
+/**
+ * The type a parameter or a result names, relative to the receiver's.
+ *
+ * One function so that the width pass, the lowerer and the generator cannot
+ * disagree about what `axis` means on a `dquat`. `undefined` is the honest
+ * answer for `scalar` and `bool`, which name no linear-algebra type at all.
+ */
+export function relatedType(
+    type: LinalgType,
+    kind: LinalgReturn | LinalgParam,
+): LinalgType | undefined {
+    switch (kind) {
+        case "vector":
+            return type;
+        case "column":
+            return columnTypeOf(type);
+        case "axis":
+            return axisVectorOf(type);
+        case "boolVector":
+            return boolVectorOf(type);
+        case "matrix3":
+            return matrixOf(type, 3);
+        case "matrix4":
+            return matrixOf(type, 4);
+        default:
+            return undefined;
+    }
+}
 
 /** A matrix's column type, resolved. */
 export function columnTypeOf(type: LinalgType): LinalgType | undefined {
@@ -260,7 +349,26 @@ export type LinalgOpKind =
     | "matMulVec"
     | "transpose"
     | "determinant"
-    | "inverse";
+    | "inverse"
+    // -- comparisons ----------------------------------------------------------
+    /** Component-wise, producing a `bvec`. */
+    | "compare"
+    /** `any`, `all` and `not`, on a `bvec`. */
+    | "anyOf"
+    | "allOf"
+    // -- quaternions ----------------------------------------------------------
+    /** The Hamilton product — **not** elementwise, which is why quats differ. */
+    | "quatMul"
+    /** Negate the vector part, keep the scalar part. */
+    | "conjugate"
+    /** The conjugate over the squared length. */
+    | "quatInverse"
+    /** `q * v * q⁻¹`, as the two-cross-product form. */
+    | "rotateVec"
+    /** Spherical and normalised-linear interpolation. */
+    | "slerp"
+    | "nlerp"
+    | "toMatrix";
 
 /**
  * The MIR's elementwise binary operations, by their own names.
@@ -278,16 +386,49 @@ export type LinalgBinOp = "Add" | "Sub" | "Mul" | "Div" | "Min" | "Max";
 export type LinalgUnOp = "Neg" | "Abs" | "Sqrt" | "Floor" | "Ceil" | "Round" | "Trunc";
 
 /**
+ * The comparisons, by the MIR's *scalar* `BinOp` names.
+ *
+ * Scalar rather than SIMD because a comparison produces a `bvec` — a struct of
+ * `bool` — and never a mask: DECISIONS §22 keeps masks out of the MIR
+ * altogether, so a comparison is one scalar compare per component whatever the
+ * element type is.
+ */
+export type LinalgCmpOp = "Eq" | "Ne" | "Lt" | "Le" | "Gt" | "Ge";
+
+/**
+ * The integer-only elementwise operations, by the MIR's scalar `BinOp` names.
+ *
+ * These have no SIMD spelling in this compiler and need none: they exist on
+ * integer and boolean vectors, which are scalar-lowered anyway.
+ */
+export type LinalgBitOp = "Rem" | "BitAnd" | "BitOr" | "BitXor" | "Shl" | "Shr";
+
+/**
  * What one parameter of an operation is.
  *
  * `vector` means *the receiver's own type* — a `dvec3` for a `dvec3` operation,
- * a `dmat4` for a `dmat4` one. `column` is a matrix's column vector, which is
- * what `mulVec` takes, and means nothing on a vector.
+ * a `dmat4` for a `dmat4` one. The rest name a *related* type: `column` is a
+ * matrix's column vector, `axis` the three-component vector of the same
+ * element, which is what a quaternion rotates.
  */
-export type LinalgParam = "vector" | "scalar" | "column";
+export type LinalgParam = "vector" | "scalar" | "column" | "axis";
 
-/** What an operation hands back, in the same vocabulary. */
-export type LinalgReturn = "vector" | "scalar" | "bool" | "column";
+/**
+ * What an operation hands back, in the same vocabulary.
+ *
+ * `boolVector` is the `bvec` of the receiver's width, which is what a
+ * component-wise comparison produces; `matrix3` and `matrix4` are what a
+ * quaternion converts to.
+ */
+export type LinalgReturn =
+    | "vector"
+    | "scalar"
+    | "bool"
+    | "column"
+    | "axis"
+    | "boolVector"
+    | "matrix3"
+    | "matrix4";
 
 interface LinalgOpBase {
     readonly name: string;
@@ -303,6 +444,14 @@ interface LinalgOpBase {
      * this exists rather than being asserted at the call site.
      */
     readonly components?: number;
+
+    /**
+     * Declared only where the element is signed.
+     *
+     * `negate` on a `uvec3` would produce a value the width rules make
+     * unwritable as a literal, so the type simply does not have it.
+     */
+    readonly signedOnly?: boolean;
 }
 
 /**
@@ -327,8 +476,20 @@ export type LinalgOp =
           readonly op: LinalgUnOp;
       })
     | (LinalgOpBase & {
+          readonly kind: "compare";
+          readonly op: LinalgCmpOp;
+      })
+    | (LinalgOpBase & {
+          /** Elementwise, by a scalar `BinOp` with no vector spelling. */
+          readonly kind: "bitwise";
+          readonly op: LinalgBitOp;
+      })
+    | (LinalgOpBase & {
           /** Everything the lowerer composes, which needs no single machine op. */
-          readonly kind: Exclude<LinalgOpKind, "elementwise" | "scaled" | "unary">;
+          readonly kind: Exclude<
+              LinalgOpKind,
+              "elementwise" | "scaled" | "unary" | "compare" | "bitwise"
+          >;
       });
 
 /**
@@ -343,6 +504,30 @@ export type LinalgOp =
  * because a table that repeats a rule is a table with somewhere for the rule to
  * be broken.
  */
+/**
+ * The component-wise comparisons, shared by the float and integer tables.
+ *
+ * **`equalTo` is not `equals`.** `equals` asks one question about the whole
+ * vector and answers `boolean`; `equalTo` asks it per component and answers a
+ * `bvec`, which `any` and `all` then reduce. GLM calls the second one `equal`,
+ * one letter from the first — near enough to be a typo that compiles, so the
+ * name here is deliberately further away.
+ */
+const COMPARISONS: readonly LinalgOp[] = [
+    {name: "lessThan", kind: "compare", op: "Lt", params: ["vector"], returns: "boolVector"},
+    {name: "lessThanEqual", kind: "compare", op: "Le", params: ["vector"], returns: "boolVector"},
+    {name: "greaterThan", kind: "compare", op: "Gt", params: ["vector"], returns: "boolVector"},
+    {
+        name: "greaterThanEqual",
+        kind: "compare",
+        op: "Ge",
+        params: ["vector"],
+        returns: "boolVector",
+    },
+    {name: "equalTo", kind: "compare", op: "Eq", params: ["vector"], returns: "boolVector"},
+    {name: "notEqualTo", kind: "compare", op: "Ne", params: ["vector"], returns: "boolVector"},
+];
+
 export const LINALG_OPS: readonly LinalgOp[] = [
     {name: "add", kind: "elementwise", op: "Add", params: ["vector"], returns: "vector"},
     {name: "sub", kind: "elementwise", op: "Sub", params: ["vector"], returns: "vector"},
@@ -373,6 +558,102 @@ export const LINALG_OPS: readonly LinalgOp[] = [
     {name: "distance", kind: "distance", params: ["vector"], returns: "scalar"},
     {name: "distanceSq", kind: "distanceSq", params: ["vector"], returns: "scalar"},
 
+    {name: "equals", kind: "equals", params: ["vector"], returns: "bool"},
+    ...COMPARISONS,
+];
+
+/**
+ * The integer vector operations.
+ *
+ * No `length`, `normalize` or `distance`: each needs a square root, and an
+ * integer square root is either a lie or a different type. No `lerp`, `floor`
+ * or `round` for the same reason — they are all questions about a fractional
+ * part that does not exist. `lengthSq` and `dot` *are* here, because both are
+ * exact in integers and both are what an integer vector is usually for.
+ *
+ * `min` and `max` are here and are the one place integers cost more than
+ * floats: there is no `llvm.minnum` for them, so each is a compare and a
+ * `Select` per component.
+ */
+export const LINALG_INT_OPS: readonly LinalgOp[] = [
+    {name: "add", kind: "elementwise", op: "Add", params: ["vector"], returns: "vector"},
+    {name: "sub", kind: "elementwise", op: "Sub", params: ["vector"], returns: "vector"},
+    {name: "mul", kind: "elementwise", op: "Mul", params: ["vector"], returns: "vector"},
+    {name: "div", kind: "elementwise", op: "Div", params: ["vector"], returns: "vector"},
+    {name: "min", kind: "elementwise", op: "Min", params: ["vector"], returns: "vector"},
+    {name: "max", kind: "elementwise", op: "Max", params: ["vector"], returns: "vector"},
+    {name: "rem", kind: "bitwise", op: "Rem", params: ["vector"], returns: "vector"},
+
+    {name: "bitAnd", kind: "bitwise", op: "BitAnd", params: ["vector"], returns: "vector"},
+    {name: "bitOr", kind: "bitwise", op: "BitOr", params: ["vector"], returns: "vector"},
+    {name: "bitXor", kind: "bitwise", op: "BitXor", params: ["vector"], returns: "vector"},
+    {name: "shl", kind: "bitwise", op: "Shl", params: ["vector"], returns: "vector"},
+    {name: "shr", kind: "bitwise", op: "Shr", params: ["vector"], returns: "vector"},
+
+    {name: "scale", kind: "scaled", op: "Mul", params: ["scalar"], returns: "vector"},
+    // Signed only: negating a `u32` walks straight past the range check that
+    // makes `-1` unwritable in the first place (REWRITE-PLAN §10).
+    {name: "negate", kind: "unary", op: "Neg", params: [], returns: "vector", signedOnly: true},
+    {name: "abs", kind: "unary", op: "Abs", params: [], returns: "vector", signedOnly: true},
+
+    {name: "clamp", kind: "clamp", params: ["vector", "vector"], returns: "vector"},
+    {name: "dot", kind: "dot", params: ["vector"], returns: "scalar"},
+    {name: "lengthSq", kind: "lengthSq", params: [], returns: "scalar"},
+    {name: "equals", kind: "equals", params: ["vector"], returns: "bool"},
+    ...COMPARISONS,
+];
+
+/**
+ * The boolean vector operations.
+ *
+ * `any` and `all` are what a comparison is *for*: `a.lessThan(b).any()` is the
+ * question, and the `bvec` in the middle is how it gets asked. `and`, `or` and
+ * `not` are bitwise on one-byte booleans, which is the same thing for values
+ * that only ever hold 0 or 1 — and unlike `&&` they do not short-circuit, which
+ * is correct here because every component has already been computed.
+ */
+export const LINALG_BOOL_OPS: readonly LinalgOp[] = [
+    {name: "and", kind: "bitwise", op: "BitAnd", params: ["vector"], returns: "vector"},
+    {name: "or", kind: "bitwise", op: "BitOr", params: ["vector"], returns: "vector"},
+    {name: "xor", kind: "bitwise", op: "BitXor", params: ["vector"], returns: "vector"},
+    {name: "not", kind: "unary", op: "Neg", params: [], returns: "vector"},
+
+    {name: "any", kind: "anyOf", params: [], returns: "bool"},
+    {name: "all", kind: "allOf", params: [], returns: "bool"},
+    {name: "equals", kind: "equals", params: ["vector"], returns: "bool"},
+];
+
+/**
+ * The quaternion operations.
+ *
+ * Most of these are the *vector* operations on the same four lanes and reach
+ * the same arms: `add`, `sub`, `scale`, `negate`, `dot`, `length`, `lengthSq`,
+ * `normalize` and `equals` treat a quaternion as four numbers, which is what it
+ * is. Only `mul` differs, and it differs completely — the Hamilton product, not
+ * an elementwise one — which is the entire reason a quaternion is not a `vec4`
+ * with extra methods.
+ */
+export const LINALG_QUAT_OPS: readonly LinalgOp[] = [
+    {name: "add", kind: "elementwise", op: "Add", params: ["vector"], returns: "vector"},
+    {name: "sub", kind: "elementwise", op: "Sub", params: ["vector"], returns: "vector"},
+    {name: "scale", kind: "scaled", op: "Mul", params: ["scalar"], returns: "vector"},
+    {name: "negate", kind: "unary", op: "Neg", params: [], returns: "vector"},
+
+    {name: "mul", kind: "quatMul", params: ["vector"], returns: "vector"},
+    {name: "conjugate", kind: "conjugate", params: [], returns: "vector"},
+    {name: "inverse", kind: "quatInverse", params: [], returns: "vector"},
+    {name: "normalize", kind: "normalize", params: [], returns: "vector"},
+
+    {name: "slerp", kind: "slerp", params: ["vector", "scalar"], returns: "vector"},
+    {name: "nlerp", kind: "nlerp", params: ["vector", "scalar"], returns: "vector"},
+    {name: "rotateVec", kind: "rotateVec", params: ["axis"], returns: "axis"},
+
+    {name: "toMat3", kind: "toMatrix", params: [], returns: "matrix3"},
+    {name: "toMat4", kind: "toMatrix", params: [], returns: "matrix4"},
+
+    {name: "dot", kind: "dot", params: ["vector"], returns: "scalar"},
+    {name: "length", kind: "length", params: [], returns: "scalar"},
+    {name: "lengthSq", kind: "lengthSq", params: [], returns: "scalar"},
     {name: "equals", kind: "equals", params: ["vector"], returns: "bool"},
 ];
 
@@ -406,7 +687,16 @@ export const LINALG_MAT_OPS: readonly LinalgOp[] = [
 
 /** The operations a type has, by family. */
 export function opsFor(type: LinalgType): readonly LinalgOp[] {
-    return type.family === "mat" ? LINALG_MAT_OPS : LINALG_OPS;
+    if (type.family === "mat") {
+        return LINALG_MAT_OPS;
+    }
+    if (type.family === "quat") {
+        return LINALG_QUAT_OPS;
+    }
+    if (type.element === "bool") {
+        return LINALG_BOOL_OPS;
+    }
+    return isIntegerPrefix(type.prefix) ? LINALG_INT_OPS : LINALG_OPS;
 }
 
 // -- constructors --------------------------------------------------------------
@@ -418,7 +708,7 @@ export function opsFor(type: LinalgType): readonly LinalgOp[] {
  * `dvec3` for a `dmat4`. Named separately from `column` because a `dmat4`'s
  * column is a `dvec4` and a translation is not four numbers.
  */
-export type LinalgCtorParam = "scalar" | "axis" | "column" | "self";
+export type LinalgCtorParam = "scalar" | "axis" | "column" | "self" | "matrix3";
 
 export type LinalgCtorKind =
     | "zero"
@@ -437,7 +727,9 @@ export type LinalgCtorKind =
     | "axisAngle"
     | "lookAt"
     | "perspective"
-    | "ortho";
+    | "ortho"
+    | "euler"
+    | "fromMatrix";
 
 export interface LinalgCtor {
     readonly name: string;
@@ -456,7 +748,10 @@ export interface LinalgCtor {
     readonly names?: readonly string[];
 
     /** Which family declares it. */
-    readonly family: "vec" | "mat";
+    readonly family: "vec" | "mat" | "quat";
+
+    /** Declared only where the element is a float. */
+    readonly floatOnly?: boolean;
 
     /** Restricted to a matrix of exactly this order, or absent for all of them. */
     readonly order?: number;
@@ -615,6 +910,42 @@ export const LINALG_CTORS: readonly LinalgCtor[] = [
             "A right-handed orthographic projection from `left`, `right`, `bottom`, " +
             "`top`, `near`, `far`. Depth maps to `[0, 1]` and `+Y` stays up.",
     },
+
+    // -- quaternions ----------------------------------------------------------
+    {
+        name: "identity",
+        kind: "identity",
+        params: [],
+        family: "quat",
+        doc: "The rotation that does nothing: `(0, 0, 0, 1)`.",
+    },
+    {name: "from", kind: "from", params: ["self"], family: "quat"},
+    {
+        name: "fromAxisAngle",
+        kind: "axisAngle",
+        params: ["axis", "scalar"],
+        names: ["axis", "angle"],
+        family: "quat",
+        doc: "A right-handed rotation about an axis. The axis is normalised first.",
+    },
+    {
+        name: "fromEuler",
+        kind: "euler",
+        params: ["scalar", "scalar", "scalar"],
+        names: ["pitch", "yaw", "roll"],
+        family: "quat",
+        doc:
+            "Intrinsic Tait-Bryan angles in radians, applied **yaw, then pitch, then " +
+            "roll** — rotations about y, then x, then z.",
+    },
+    {
+        name: "fromRotation",
+        kind: "fromMatrix",
+        params: ["matrix3"],
+        names: ["basis"],
+        family: "quat",
+        doc: "The rotation a matrix represents. The matrix is assumed orthonormal.",
+    },
 ];
 
 /** The constructors a type declares. */
@@ -660,7 +991,10 @@ export function linalgCtorOf(
 
 /** Whether an operation applies to a given type. */
 export function appliesTo(op: LinalgOp, type: LinalgType): boolean {
-    return op.components === undefined || op.components === type.components.length;
+    if (op.components !== undefined && op.components !== type.components.length) {
+        return false;
+    }
+    return op.signedOnly !== true || SIGNED_PREFIXES.includes(type.prefix);
 }
 
 /** Whether an operation has an in-place `…Mut` form. */
@@ -681,43 +1015,41 @@ export function mutatingName(op: LinalgOp): string {
 // out of its reach. A shared question deserves one answer, not a protected
 // method and a copy of it.
 
-/** Every method name a family answers to, and what each means. */
-function methodsOf(ops: readonly LinalgOp[]): ReadonlyMap<string, { op: LinalgOp; mutating: boolean }> {
-    return new Map(
-        ops.flatMap((op) => {
-            const forms: [string, { op: LinalgOp; mutating: boolean }][] = [
-                [op.name, {op, mutating: false}],
-            ];
-            if (hasMutatingForm(op)) {
-                forms.push([mutatingName(op), {op, mutating: true}]);
-            }
-            return forms;
-        }),
-    );
-}
-
-const VEC_METHODS = methodsOf(LINALG_OPS);
-const MAT_METHODS = methodsOf(LINALG_MAT_OPS);
-
 /** Whether a static name builds a value rather than operating on one. */
 export function isLinalgConstructor(name: string, type: LinalgType): boolean {
     return linalgCtorOf(name, type) !== undefined;
 }
 
-/** The operation a method name names on a given type, if it names one. */
+/**
+ * The operation a method name names on a given type, if it names one.
+ *
+ * Searched through {@link opsFor} rather than through a prebuilt map per
+ * family. The map version cached two families and silently answered from the
+ * *vector* table for the other three — which worked for `add` and `dot`,
+ * because those names are in every table, and failed for `any` and `slerp`.
+ * A cache keyed by a subset of what it is asked about is worse than no cache,
+ * and twenty-five entries do not need one.
+ *
+ * {@link appliesTo} is applied here so that `negate` on a `uvec3` and `cross`
+ * on a `dvec2` do not resolve at all, rather than resolving and being refused
+ * further in.
+ */
 export function linalgMethodOf(
     name: string,
     type: LinalgType,
 ): { op: LinalgOp; mutating: boolean } | undefined {
-    const found = (type.family === "mat" ? MAT_METHODS : VEC_METHODS).get(name);
-    if (found === undefined) {
-        return undefined;
+    for (const op of opsFor(type)) {
+        if (!appliesTo(op, type)) {
+            continue;
+        }
+        if (op.name === name) {
+            return {op, mutating: false};
+        }
+        if (hasMutatingForm(op) && mutatingName(op) === name) {
+            return {op, mutating: true};
+        }
     }
-    // `cross` exists on three-component vectors and nowhere else.
-    if (found.op.components !== undefined && found.op.components !== type.components.length) {
-        return undefined;
-    }
-    return found;
+    return undefined;
 }
 
 /**

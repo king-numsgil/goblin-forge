@@ -43,12 +43,32 @@ import {
     linalgMethodOf,
     linalgNamedBy,
     linalgStruct,
+    relatedType,
 } from "@goblin-forge/checker";
 import ts from "typescript";
 
 import { IntrinsicLowerer } from "./intrinsics.ts";
 import type { Typed } from "./types.ts";
 import { placeOf } from "./util.ts";
+
+/**
+ * The operation kinds a quaternion does *not* share with a vector.
+ *
+ * Everything outside this set — `add`, `scale`, `dot`, `normalize`, `equals` —
+ * is the vector operation of the same name on the same four lanes, and reaches
+ * the same arm. Only these seven need arithmetic of their own, and `mul` is the
+ * one that would be silently wrong if it did not: an elementwise product of two
+ * rotations is not a rotation.
+ */
+const QUAT_ONLY_KINDS: ReadonlySet<string> = new Set([
+    "quatMul",
+    "conjugate",
+    "quatInverse",
+    "rotateVec",
+    "slerp",
+    "nlerp",
+    "toMatrix",
+]);
 
 /** An operation, and which of its three spellings was written. */
 export interface LinalgCall {
@@ -523,6 +543,35 @@ export abstract class LinalgLowerer extends IntrinsicLowerer {
     ): Typed | undefined;
 
     /**
+     * Every operation on a type with no vector form — see `linalg-scalar.ts`.
+     *
+     * Integer and boolean vectors, and every component-wise comparison whatever
+     * the element is.
+     */
+    protected abstract scalarCompose(
+        at: ts.Node,
+        call: LinalgCall,
+        self: Typed,
+        args: readonly Typed[],
+    ): { value: Typed } | undefined;
+
+    /** `q.mul(r)`, `q.slerp(r, t)`, `q.toMat4()` — see `linalg-quat.ts`. */
+    protected abstract quatCompose(
+        at: ts.Node,
+        call: LinalgCall,
+        self: Typed,
+        args: readonly Typed[],
+    ): { value: Typed } | { vector: LocalId } | undefined;
+
+    /** `dquat.fromAxisAngle(…)` and its siblings — see `linalg-quat.ts`. */
+    protected abstract quatCtor(
+        expression: ts.CallExpression,
+        type: LinalgType,
+        ctor: LinalgCtor,
+        args: readonly ts.Expression[],
+    ): Typed | undefined;
+
+    /**
      * `m[0]` and `v[1]` — a **constant** index into a linear-algebra type.
      *
      * A field projection, because these are structs rather than arrays: `m[0]`
@@ -600,6 +649,45 @@ export abstract class LinalgLowerer extends IntrinsicLowerer {
         // Read repeatedly, so the operand has to be one that can be: a
         // temporary consumed once would be moved out of by its first use.
         return this.repeatable(coerced);
+    }
+
+    /** A `Reference<T>` to a place, which is what a `…Mut` hands back. */
+    protected referenceTo(at: ts.Node, place: Place, type: LinalgType): Typed {
+        const referent = this.linalgStructOf(type);
+        return {
+            operand: this.refTo(at, place, referent),
+            type: {kind: "reference", referent},
+        };
+    }
+
+    /**
+     * Store a computed value back through the receiver, for a `…Mut` form on a
+     * path that produced a whole value rather than lanes.
+     */
+    protected writeBack(
+        at: ts.Node,
+        receiver: Typed,
+        type: LinalgType,
+        value: Typed,
+    ): Typed | undefined {
+        const place = this.linalgPlace(at, receiver);
+        if (place === undefined) {
+            return undefined;
+        }
+        this.push({kind: "Assign", place, rvalue: {kind: "Use", value: this.forStorage(value)}});
+        return this.referenceTo(at, place, type);
+    }
+
+    /**
+     * A value that is about to be read again.
+     *
+     * A `Typed` from `temporaryTyped` may be a move-once operand, and the
+     * algorithms here read the same intermediate several times — `sin` appears
+     * six times in a Rodrigues rotation. Passing one through twice without this
+     * moves out of it the first time.
+     */
+    protected reread(value: Typed): Typed {
+        return {operand: this.repeatable(value), type: value.type};
     }
 
     /** A scalar binary operation on two element-typed values. */
@@ -733,14 +821,32 @@ export abstract class LinalgLowerer extends IntrinsicLowerer {
 
     // -- entry points ---------------------------------------------------------
 
-    /** A component's value as a constant, for `zero`, `one` and the unit axes. */
+    /**
+     * A component's value as a constant, for `zero`, `one` and the unit axes.
+     *
+     * The three element families each spell a constant differently, and the
+     * float case is the one that has to encode rather than count: a `Float`
+     * constant carries IEEE *bits*, so that the encoding is exact and a NaN
+     * payload survives the trip.
+     */
     protected componentConst(at: ts.Node, type: LinalgType, value: number): Operand {
         const ty = this.outer.tyOf(this.componentType(type), at);
-        const bits =
-            type.element === "f32"
-                ? BigInt(new Uint32Array(new Float32Array([value]).buffer)[0]!)
-                : new BigUint64Array(new Float64Array([value]).buffer)[0]!;
-        return {kind: "Const", value: {kind: "Float", bits, ty}};
+        if (type.element === "bool") {
+            return {kind: "Const", value: {kind: "Bool", value: value !== 0, ty}};
+        }
+        if (type.element === "f32" || type.element === "f64") {
+            const bits =
+                type.element === "f32"
+                    ? BigInt(new Uint32Array(new Float32Array([value]).buffer)[0]!)
+                    : new BigUint64Array(new Float64Array([value]).buffer)[0]!;
+            return {kind: "Const", value: {kind: "Float", bits, ty}};
+        }
+        // An integer constant is a bit pattern of the target width, so a
+        // negative one is written as its two's complement rather than as a sign
+        // the wire format has nowhere to put.
+        const width = type.element === "i64" || type.element === "u64" ? 64n : 32n;
+        const bits = BigInt(value) & ((1n << width) - 1n);
+        return {kind: "Const", value: {kind: "Int", bits, ty}};
     }
 
     /**
@@ -861,6 +967,9 @@ export abstract class LinalgLowerer extends IntrinsicLowerer {
             }
             if (type.family === "mat") {
                 return this.matrixCtor(expression, type, built.ctor, args);
+            }
+            if (type.family === "quat") {
+                return this.quatCtor(expression, type, built.ctor, args);
             }
             switch (built.ctor.kind) {
                 case "zero":
@@ -1024,16 +1133,17 @@ export abstract class LinalgLowerer extends IntrinsicLowerer {
             return undefined;
         }
 
-        const column = columnTypeOf(type);
         const evaluated: Typed[] = [];
         for (const [index, argument] of args.entries()) {
             const kind = op.params[index];
+            // `relatedType` is the one place that says what `column` or `axis`
+            // means for a given receiver, so the width pass, the generator and
+            // this cannot drift.
+            const related = kind === undefined ? undefined : relatedType(type, kind);
             const expected =
-                kind === "vector"
-                    ? this.linalgStructOf(type)
-                    : kind === "column"
-                        ? this.linalgStructOf(column ?? type)
-                        : this.componentType(type);
+                related === undefined
+                    ? this.componentType(type)
+                    : this.linalgStructOf(related);
             const value = this.value(argument, expected);
             if (value === undefined) {
                 return undefined;
@@ -1044,6 +1154,54 @@ export abstract class LinalgLowerer extends IntrinsicLowerer {
                 return undefined;
             }
             evaluated.push(coerced);
+        }
+
+        // A *vector* with no lane count — an integer or boolean one — works on
+        // fields rather than lanes, and every comparison does too whatever the
+        // element is, because a comparison produces a `bvec` rather than a mask
+        // (DECISIONS §22).
+        //
+        // The family test is not decoration: a **matrix** also has no lane
+        // count, because a matrix is not one register — its columns are. Left
+        // out, this arm claims every matrix operation and `mulVec` becomes a
+        // gap in the compiler.
+        if (type.family === "vec" && (type.lanes === null || op.kind === "compare")) {
+            const result = this.scalarCompose(expression, call, receiver, evaluated);
+            if (result === undefined) {
+                return undefined;
+            }
+            if (!call.mutating) {
+                return result.value;
+            }
+            return this.writeBack(expression, receiver, type, result.value);
+        }
+
+        // **Only the quaternion-specific kinds divert.** `add`, `sub`, `scale`,
+        // `negate`, `dot`, `length`, `lengthSq`, `normalize` and `equals` on a
+        // quaternion are the *vector* operations on the same four lanes, and
+        // they fall through to the shared path below — which is the "four
+        // fifths shared" claim in DECISIONS §22, enforced rather than described.
+        if (type.family === "quat" && QUAT_ONLY_KINDS.has(op.kind)) {
+            const result = this.quatCompose(expression, call, receiver, evaluated);
+            if (result === undefined) {
+                return undefined;
+            }
+            if ("value" in result) {
+                return result.value;
+            }
+            if (!call.mutating) {
+                return this.storeVector(expression, result.vector, type);
+            }
+            const place = this.linalgPlace(expression, receiver);
+            if (place === undefined) {
+                return undefined;
+            }
+            this.push({
+                kind: "Assign",
+                place,
+                rvalue: {kind: "SimdStore", vector: this.simdRead(result.vector)},
+            });
+            return this.referenceTo(expression, place, type);
         }
 
         // A matrix works column by column, so it never loads "the receiver"

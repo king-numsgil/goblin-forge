@@ -10,10 +10,10 @@
 // module, which is the failure mode this whole arrangement exists to remove.
 
 /** Fingerprint of the wire format these bindings were generated from. */
-export const SCHEMA_FINGERPRINT = 0x874c2b14eebe6d8fn;
+export const SCHEMA_FINGERPRINT = 0x68e525a01305da29n;
 
 /** The same value as hex, for comparing against the addon's report. */
-export const SCHEMA_FINGERPRINT_HEX = "874c2b14eebe6d8f";
+export const SCHEMA_FINGERPRINT_HEX = "68e525a01305da29";
 
 // ---------------------------------------------------------------------------
 // postcard writer
@@ -425,6 +425,7 @@ export type Rvalue =
   | { kind: "ArrayPushSlot"; value: Place }
   | { kind: "SizeOf"; value: TyId }
   | { kind: "AlignOf"; value: TyId }
+  | { kind: "Select"; cond: Operand; ifTrue: Operand; ifFalse: Operand }
   | { kind: "SimdLoad"; source: Place; ty: TyId }
   | { kind: "SimdStore"; vector: Operand }
   | { kind: "SimdFromParts"; lanes: Operand[]; ty: TyId }
@@ -1090,50 +1091,57 @@ export function writeRvalue(w: Writer, v: Rvalue): void {
       writeTyId(w, v.value);
       break;
     }
-    case "SimdLoad": {
+    case "Select": {
       w.varint(16);
+      writeOperand(w, v.cond);
+      writeOperand(w, v.ifTrue);
+      writeOperand(w, v.ifFalse);
+      break;
+    }
+    case "SimdLoad": {
+      w.varint(17);
       writePlace(w, v.source);
       writeTyId(w, v.ty);
       break;
     }
     case "SimdStore": {
-      w.varint(17);
+      w.varint(18);
       writeOperand(w, v.vector);
       break;
     }
     case "SimdFromParts": {
-      w.varint(18);
+      w.varint(19);
       w.varint(v.lanes.length); for (const item of v.lanes) { writeOperand(w, item); }
       writeTyId(w, v.ty);
       break;
     }
     case "SimdExtract": {
-      w.varint(19);
+      w.varint(20);
       writeOperand(w, v.vector);
       w.u8(v.lane);
       break;
     }
     case "SimdSplat": {
-      w.varint(20);
+      w.varint(21);
       writeOperand(w, v.value);
       writeTyId(w, v.ty);
       break;
     }
     case "SimdBinary": {
-      w.varint(21);
+      w.varint(22);
       writeSimdBinOp(w, v.op);
       writeOperand(w, v.lhs);
       writeOperand(w, v.rhs);
       break;
     }
     case "SimdUnary": {
-      w.varint(22);
+      w.varint(23);
       writeSimdUnOp(w, v.op);
       writeOperand(w, v.operand);
       break;
     }
     case "SimdShuffle": {
-      w.varint(23);
+      w.varint(24);
       writeOperand(w, v.lhs);
       writeOperand(w, v.rhs);
       w.bytes(v.mask);
@@ -1141,7 +1149,7 @@ export function writeRvalue(w: Writer, v: Rvalue): void {
       break;
     }
     case "SimdFma": {
-      w.varint(24);
+      w.varint(25);
       writeOperand(w, v.a);
       writeOperand(w, v.b);
       writeOperand(w, v.c);

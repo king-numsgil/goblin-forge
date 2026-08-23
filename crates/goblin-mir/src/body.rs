@@ -372,6 +372,24 @@ pub enum Rvalue {
     SizeOf(TyId),
     /// `alignOf<T>()` — the alignment of a `T`, in bytes.
     AlignOf(TyId),
+    /// `cond ? a : b`, on scalars, with **both arms already evaluated**.
+    ///
+    /// Not a replacement for the conditional operator, which short-circuits and
+    /// is therefore control flow and belongs in the CFG. This is the case where
+    /// there is nothing to short-circuit: `min` on an integer vector picks
+    /// between two values that have both already been loaded, three times, and
+    /// spelling that as six basic blocks would be a branch per component for an
+    /// operation the hardware does without one.
+    ///
+    /// Floats do not use it — `llvm.minnum` is one instruction and has a
+    /// documented NaN rule — so this exists because AVX2 has no integer
+    /// `min`/`max` the frontend can reach and the scalar form needs *some*
+    /// primitive (DECISIONS §22).
+    Select {
+        cond: Operand,
+        if_true: Operand,
+        if_false: Operand,
+    },
 
     // -- SIMD (DECISIONS §22) -------------------------------------------------
     //
