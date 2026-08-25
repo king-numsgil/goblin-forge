@@ -178,8 +178,8 @@ business.
 
 **Two tsconfigs, and which is which.** `src/tsconfig.json` is the program's: it
 names the prelude and turns the JavaScript standard library off. The root
-`tsconfig.json` is the build script's, which is ordinary TypeScript. They are
-separate because an editor gives a file the nearest `tsconfig.json` above it and
+`tsconfig.build.json` is the build script's, which is ordinary TypeScript. They are
+separate because an editor gives a file the nearest `tsconfig.build.json` above it and
 looks for nothing else, so one config would have to be right for both — and a
 config that suits a `noLib` Goblin program leaves `import { join } from
 "node:path"` underlined in a build script. If your build script does use Bun or
@@ -233,7 +233,7 @@ if (!result.ok) {
 console.log(`built ${result.output}`);
 ```
 
-Your `tsconfig.json` extends the base the language ships. That is what puts the
+Your `tsconfig.build.json` extends the base the language ships. That is what puts the
 global surface in scope and takes the JavaScript standard library out of it —
 without it, `Array.prototype.map` and the DOM reappear and your program
 type-checks against a language this compiler does not implement.
@@ -252,7 +252,7 @@ Both files listed explicitly, and `files` rather than `include`: the prelude has
 to be in the program for the globals to resolve.
 
 [`examples/hello`](examples/hello) is a working copy of all of this — its
-`tsconfig.json` points at the prelude by relative path because it lives inside
+`tsconfig.build.json` points at the prelude by relative path because it lives inside
 this repository rather than installing the package.
 
 ---

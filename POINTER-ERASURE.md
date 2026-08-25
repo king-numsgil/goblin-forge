@@ -237,7 +237,7 @@ let the bad cast through. The compiler cannot improve a tsc message.
 
 ### The probe itself
 
-`tsconfig.json` extends `packages/runtime/tsconfig.base.json` with
+`tsconfig.build.json` extends `packages/runtime/tsconfig.base.json` with
 `"files": ["prelude.d.ts", "probe.ts"]`, where `prelude.d.ts` is a copy of
 `packages/runtime/global.d.ts` with the second `cast` overload added.
 
