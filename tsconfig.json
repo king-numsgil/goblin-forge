@@ -26,7 +26,8 @@
     "packages/*/test/**/*.ts",
     "tests/**/*.ts",
     "examples/*/build.ts",
-    "packages/cli/build.ts"
+    "packages/cli/build.ts",
+    "packages/forge/build.ts"
   ],
   "exclude": [
     "**/node_modules",

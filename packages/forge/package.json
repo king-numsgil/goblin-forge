@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "license": "Apache-2.0",
   "type": "module",
+  "scripts": {
+    "package": "bun build.ts"
+  },
   "exports": {
     ".": "./src/index.ts"
   },
@@ -11,5 +14,8 @@
     "@goblin-forge/checker": "workspace:*",
     "@goblin-forge/runtime": "workspace:*",
     "typescript": "~6.0.3"
+  },
+  "devDependencies": {
+    "bun-dts": "^0.1.70"
   }
 }
