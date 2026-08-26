@@ -196,6 +196,156 @@ export class ErasureError extends Error {
 }
 
 /**
+ * What one erasure has already answered, and what it is still answering.
+ *
+ * `struct Node { struct Node *next; }` is an ordinary C shape, and it has no
+ * finite spelling as a *tree* — so the erasure of one is a **graph**. The
+ * machine type a cycle closes on is the very object being built, handed back
+ * before its fields are in it, and the result is a `MachineType` that contains
+ * itself somewhere below a `pointer`.
+ *
+ * That is safe because of the rule the rest of the file already keeps: an
+ * aggregate is **nominal**, and everything that walks a type stops at its name.
+ * `sameType` compares structs by name, `renderType` prints one, `needsDrop`
+ * never looks through a pointer, and the lowerer interns by name too. Nothing
+ * follows a cycle round, so nothing has to know it is in one. Adding a walk that
+ * recurses through `pointee` into a struct's fields is what would break this,
+ * and there is no reason to write one: a pointer is a machine word whatever is
+ * behind it.
+ *
+ * The other half of the job is telling the legal cycle from the two that are
+ * not, and the difference is *what was crossed* on the way round:
+ *
+ * | Crossed | `Node` again | Verdict |
+ * |---|---|---|
+ * | nothing | `self: Node` | `GF0307` — a value as large as itself and then larger |
+ * | only buffers it owns | `kids: Node[]` | `GF0001` — a gap; see {@link Erasure.buffer} |
+ * | an address | `next: Pointer<Node>` | a shape, and the point of all this |
+ *
+ * Both refusals are here rather than further downstream because here is where
+ * the cycle is *visible*. Neither would announce itself later: the first is a
+ * layout pass recursing until the stack ends, and the second is a drop that
+ * inlines a copy of itself, forever.
+ */
+class Erasure {
+    /** The answer for every aggregate this erasure has reached. */
+    readonly #answers = new Map<ts.Type, MachineType>();
+
+    /** For each aggregate still being erased, the depths it was opened at. */
+    readonly #openedAt = new Map<ts.Type, { indirections: number; buffers: number }>();
+
+    /** How many indirections have been crossed to get here. */
+    #indirections = 0;
+
+    /** How many of those were buffers the enclosing value owns. */
+    #buffers = 0;
+
+    /**
+     * Erase something the type around it only *points at*.
+     *
+     * The count is the whole of what makes a `Pointer<Node>` legal as a field of
+     * `Node` and a bare `Node` not. Both close a cycle; only one of them crosses
+     * something whose size does not depend on what is behind it.
+     */
+    through<T>(erasing: () => T): T {
+        this.#indirections += 1;
+        try {
+            return erasing();
+        } finally {
+            this.#indirections -= 1;
+        }
+    }
+
+    /**
+     * Erase the element of a buffer the enclosing value **owns** — a `T[]`.
+     *
+     * An indirection like any other as far as the layout goes: the handle is one
+     * machine word, so `kids: Node[]` is a `Node` with a size. It is counted
+     * separately because copying and releasing one are not: destroying a `Node[]`
+     * destroys every element, and if an element is a `Node` that is a loop the
+     * backend writes *inline*, so the code for the drop would contain the code
+     * for the drop. That is a missing feature — out-of-line copy and drop glue,
+     * which is exactly how `std::vector<T>` inside `T` works in C++ — and it is
+     * reported as one.
+     */
+    buffer<T>(erasing: () => T): T {
+        this.#buffers += 1;
+        try {
+            return this.through(erasing);
+        } finally {
+            this.#buffers -= 1;
+        }
+    }
+
+    /**
+     * Register the object a cycle back to `type` will close on, then fill it in.
+     *
+     * Registered *before* `fill` runs, which is what closes the cycle, and left
+     * registered afterwards, which is what makes two fields of the same type one
+     * erasure rather than two. `fill` must push into the array the answer was
+     * built around rather than replace it — the cycle is already holding it.
+     */
+    aggregate(type: ts.Type, answer: MachineType, fill: () => void): MachineType {
+        this.#answers.set(type, answer);
+        this.#openedAt.set(type, {indirections: this.#indirections, buffers: this.#buffers});
+        try {
+            fill();
+        } finally {
+            this.#openedAt.delete(type);
+        }
+        return answer;
+    }
+
+    /**
+     * The answer for a type this erasure has already reached, or `null`.
+     *
+     * Throws for the two cycles that have no representation — see the table on
+     * {@link Erasure}. Both are asked as "what has been crossed since this type
+     * was opened", which is why the counts are saved rather than flags set: a
+     * *sibling* field erased after a pointer field must not inherit its answer.
+     */
+    answered(type: ts.Type): MachineType | null {
+        const answer = this.#answers.get(type);
+        if (answer === undefined) {
+            return null;
+        }
+        const opened = this.#openedAt.get(type);
+        if (opened === undefined) {
+            return answer;
+        }
+
+        const name = renderType(answer);
+        const crossed = this.#indirections - opened.indirections;
+        if (crossed === 0) {
+            throw new ErasureError(
+                `\`${name}\` contains itself by value. Fields are laid out inline — that ` +
+                "is what makes the bytes match C's — so a value of this type would have " +
+                `to be as large as itself and then larger. Hold a \`Pointer<${name}>\` ` +
+                "instead, which is one machine word whatever is behind it, and is how C " +
+                "writes the same shape.",
+                "GF0307",
+            );
+        }
+        if (crossed === this.#buffers - opened.buffers) {
+            throw new ErasureError(
+                `\`${name}\` holds more of itself in a \`${name}[]\`, and copying or ` +
+                "releasing one of those is a loop over the elements that the compiler " +
+                "writes inline — so the code for the copy would have to contain the code " +
+                "for the copy, and there is no end to it.\n\n" +
+                "This is a gap rather than a rule: it wants the copy and the drop to be " +
+                "*functions* that call themselves, which is how `std::vector<T>` inside " +
+                `\`T\` works in C++. Until then, an array of \`Pointer<${name}>\` holds ` +
+                "the same shape with the freeing written out, and a `class` works today " +
+                "because its destructor is already a function rather than something " +
+                "spliced in at each site.",
+                "GF0001",
+            );
+        }
+        return answer;
+    }
+}
+
+/**
  * Find a property whose key is a particular `unique symbol`.
  *
  * A symbol-keyed property has no nameable name — TypeScript mangles it to
@@ -260,8 +410,17 @@ export function isCStringType(checker: ts.TypeChecker, type: ts.Type): boolean {
  *
  * Throws {@link ErasureError} rather than returning a diagnostic, because the
  * caller always has a node to attach and this function usually does not.
+ *
+ * `state` is this erasure's memory of itself, and every recursive step passes
+ * the one it was given: a recursive type is answered once and the answer closes
+ * the cycle. A caller that has none is starting a fresh one, which is every
+ * caller outside this file — see {@link Erasure}.
  */
-export function erase(checker: ts.TypeChecker, type: ts.Type): MachineType {
+export function erase(
+    checker: ts.TypeChecker,
+    type: ts.Type,
+    state: Erasure = new Erasure(),
+): MachineType {
     // `Reference<T> | null` — the result of `tryCast`, and the **only** union the
     // language has. It erases to the same machine type as `Reference<T>`, because
     // the null is representable inside the pair itself: a zero itab means "no".
@@ -272,7 +431,17 @@ export function erase(checker: ts.TypeChecker, type: ts.Type): MachineType {
     // it falls through to the ordinary path and is refused.
     const nullable = nullableOf(checker, type);
     if (nullable !== null) {
-        return erase(checker, nullable);
+        return erase(checker, nullable, state);
+    }
+
+    // A type this erasure has already answered — which, for one still open, is a
+    // cycle closing: `Node` reached from inside `Node`. Asked before anything
+    // else, so a recursive type stops here rather than a level further in, and
+    // asked of the non-null type above so that `Pointer<Node> | null` and
+    // `Pointer<Node>` are the same question.
+    const answered = state.answered(type);
+    if (answered !== null) {
+        return answered;
     }
 
     const flags = type.getFlags();
@@ -301,12 +470,12 @@ export function erase(checker: ts.TypeChecker, type: ts.Type): MachineType {
     // specific of the two; a reference before a pointer, for the same reason;
     // and both before every brand check below, because the brands they carry
     // belong to what is inside them.
-    const fixed = fixedArrayOf(checker, type);
+    const fixed = fixedArrayOf(checker, type, state);
     if (fixed !== null) {
         return fixed;
     }
 
-    const wrapper = eraseWrapper(checker, type);
+    const wrapper = eraseWrapper(checker, type, state);
     if (wrapper !== null) {
         return wrapper;
     }
@@ -394,7 +563,10 @@ export function erase(checker: ts.TypeChecker, type: ts.Type): MachineType {
         if (element === undefined) {
             throw new ErasureError("this array has no element type.", "GF0001");
         }
-        return {kind: "array", element: erase(checker, element)};
+        // A buffer rather than a plain indirection: one machine word, so the
+        // layout is finite, but the elements are this value's to copy and to
+        // release. `Erasure.buffer` is where that distinction is spent.
+        return {kind: "array", element: state.buffer(() => erase(checker, element, state))};
     }
 
     // `LocalFn<F>` — the same signature as a function pointer, plus a captured
@@ -402,7 +574,7 @@ export function erase(checker: ts.TypeChecker, type: ts.Type): MachineType {
     // *no* properties and would fail here: `LocalFn<F>` is `F & LocalFnCore<F>`,
     // and the brand is a property.
     if (brandedProperty(checker, type, "LocalFnBrand") !== null) {
-        return {kind: "localfn", ...eraseSignature(checker, type, "a `LocalFn`")};
+        return {kind: "localfn", ...eraseSignature(checker, type, "a `LocalFn`", state)};
     }
 
     // `(a: i32) => i32` — a code address. Before `eraseObject`, which would see a
@@ -413,11 +585,11 @@ export function erase(checker: ts.TypeChecker, type: ts.Type): MachineType {
     // therefore a closure rather than a function pointer.
     const calls = checker.getSignaturesOfType(type, ts.SignatureKind.Call);
     if (calls.length > 0 && checker.getPropertiesOfType(type).length === 0) {
-        return {kind: "fnptr", ...eraseSignature(checker, type, "a function pointer")};
+        return {kind: "fnptr", ...eraseSignature(checker, type, "a function pointer", state)};
     }
 
     if (flags & ts.TypeFlags.Object) {
-        return eraseObject(checker, type);
+        return eraseObject(checker, type, state);
     }
 
     throw new ErasureError(
@@ -442,6 +614,7 @@ function eraseSignature(
     checker: ts.TypeChecker,
     type: ts.Type,
     what: string,
+    state: Erasure,
 ): {readonly params: readonly MachineType[]; readonly returns: MachineType} {
     const calls = checker.getSignaturesOfType(type, ts.SignatureKind.Call);
     if (calls.length === 0) {
@@ -486,9 +659,18 @@ function eraseSignature(
             // and failed as a type with no machine representation. Identical
             // for a signature with no type parameters, which is every other
             // caller.
-            return erase(checker, checker.getTypeOfSymbolAtLocation(parameter, declaration));
+            //
+            // Through, like the return below: a signature is not part of the
+            // layout of whatever mentions it — a code address is one word — so a
+            // callback that takes the very type it is a field of is an ordinary
+            // shape rather than an infinite one.
+            return state.through(() =>
+                erase(checker, checker.getTypeOfSymbolAtLocation(parameter, declaration), state),
+            );
         }),
-        returns: erase(checker, checker.getReturnTypeOfSignature(signature)),
+        returns: state.through(() =>
+            erase(checker, checker.getReturnTypeOfSignature(signature), state),
+        ),
     };
 }
 
@@ -506,60 +688,23 @@ function eraseSignature(
  * a confusing way to be told no. The lowerer *builds* references (every `this`
  * is one); what is missing is reading one back out of source.
  */
-function eraseWrapper(checker: ts.TypeChecker, type: ts.Type): MachineType | null {
+function eraseWrapper(
+    checker: ts.TypeChecker,
+    type: ts.Type,
+    state: Erasure,
+): MachineType | null {
     if (isReferenceType(checker, type)) {
         // `Reference<I>` where `I` is a contract is the one reference that *is*
         // implemented, because it is the only way to hold a contract at all. It
         // erases to the `(itab, data)` pair rather than to a reference-to-something.
         const referent = referentOf(checker, type);
         if (referent !== null) {
-            // Before `contractOf`, which would look at `Array<T>`'s declaration and
-            // see an interface holding both methods and a data member — the shape
-            // that is rejected as ambiguous. `Array` is neither a shape nor a
-            // contract; it is a built-in with its own representation, and the same
-            // early check `erase` makes for a bare `T[]` has to happen here too.
-            if (checker.isArrayType(referent)) {
-                return {kind: "reference", referent: erase(checker, referent)};
-            }
-
-            // `Reference<dvec3>`, for exactly the reason the array check above
-            // exists. A `dvec3` declares three data members and forty methods,
-            // which is the mixture `contractOf` refuses — and it refuses by
-            // *throwing*, so a `Reference<dvec3>` would come back as "cannot be
-            // erased" rather than as a reference. That is what a chained
-            // `a.addMut(b).scaleMut(2)` produces, and the failure was a call
-            // target the compiler said it did not support.
-            //
-            // Like `Array<T>`, a linear-algebra type is neither a shape nor a
-            // contract: it is a built-in whose layout comes from a table
-            // (DECISIONS §22), so it answers before the question is asked.
-            if (linalgTypeOf(referent) !== null) {
-                return {kind: "reference", referent: erase(checker, referent)};
-            }
-
-            const contract = contractOf(checker, referent);
-            if (contract !== null) {
-                return contract;
-            }
-            // `Reference<C>` for a class: one machine word holding the object's
-            // address. This is how polymorphism travels — a `Reference<Base>` keeps
-            // the dynamic type, where copying to a `Base` value would slice it.
-            // A `Reference<T>` is bound once and dereferenced without asking, which
-            // needs a layout to read through. An opaque handle has none, and the
-            // type that carries an address you may only pass along is `Pointer<T>`.
-            const opaqueReferent = ambientClassNameOf(referent);
-            if (opaqueReferent !== null) {
-                throw new ErasureError(
-                    `\`${opaqueReferent}\` is declared elsewhere, so this build does not ` +
-                    `know its layout and a \`Reference<${opaqueReferent}>\` has nothing ` +
-                    `to read through. Use \`Pointer<${opaqueReferent}>\`, which is an ` +
-                    "address and nothing more.",
-                    "GF0302",
-                );
-            }
-            const className = classNameOf(referent);
-            if (className !== null) {
-                return {kind: "reference", referent: {kind: "class", name: className}};
+            // A reference holds an address and never the thing itself — one
+            // machine word, or two for a contract — so everything read out of it
+            // is read from *behind* an indirection.
+            const answer = state.through(() => eraseReferent(checker, referent, state));
+            if (answer !== null) {
+                return answer;
             }
         }
         throw new ErasureError(
@@ -602,7 +747,75 @@ function eraseWrapper(checker: ts.TypeChecker, type: ts.Type): MachineType | nul
     if (pointee.getFlags() & ts.TypeFlags.Unknown) {
         return {kind: "pointer", pointee: {kind: "void"}};
     }
-    return {kind: "pointer", pointee: erase(checker, pointee)};
+    // The indirection that makes `struct Node { struct Node *next; }` a shape
+    // with a size rather than an infinite one: a pointer is a machine word
+    // whatever is behind it, so a cycle may close through here.
+    return {kind: "pointer", pointee: state.through(() => erase(checker, pointee, state))};
+}
+
+/**
+ * What a `Reference<T>` erases to, for the four `T` that have an answer, or
+ * `null` for the ones that do not.
+ *
+ * Its own function so that {@link eraseWrapper} can put the whole of it behind
+ * one indirection: everything here is read through an address, and a type that
+ * reaches itself this way is `struct Node { struct Node *next; }` rather than a
+ * value containing itself.
+ */
+function eraseReferent(
+    checker: ts.TypeChecker,
+    referent: ts.Type,
+    state: Erasure,
+): MachineType | null {
+    // Before `contractOf`, which would look at `Array<T>`'s declaration and
+    // see an interface holding both methods and a data member — the shape
+    // that is rejected as ambiguous. `Array` is neither a shape nor a
+    // contract; it is a built-in with its own representation, and the same
+    // early check `erase` makes for a bare `T[]` has to happen here too.
+    if (checker.isArrayType(referent)) {
+        return {kind: "reference", referent: erase(checker, referent, state)};
+    }
+
+    // `Reference<dvec3>`, for exactly the reason the array check above
+    // exists. A `dvec3` declares three data members and forty methods,
+    // which is the mixture `contractOf` refuses — and it refuses by
+    // *throwing*, so a `Reference<dvec3>` would come back as "cannot be
+    // erased" rather than as a reference. That is what a chained
+    // `a.addMut(b).scaleMut(2)` produces, and the failure was a call
+    // target the compiler said it did not support.
+    //
+    // Like `Array<T>`, a linear-algebra type is neither a shape nor a
+    // contract: it is a built-in whose layout comes from a table
+    // (DECISIONS §22), so it answers before the question is asked.
+    if (linalgTypeOf(referent) !== null) {
+        return {kind: "reference", referent: erase(checker, referent, state)};
+    }
+
+    const contract = contractOf(checker, referent, state);
+    if (contract !== null) {
+        return contract;
+    }
+    // `Reference<C>` for a class: one machine word holding the object's
+    // address. This is how polymorphism travels — a `Reference<Base>` keeps
+    // the dynamic type, where copying to a `Base` value would slice it.
+    // A `Reference<T>` is bound once and dereferenced without asking, which
+    // needs a layout to read through. An opaque handle has none, and the
+    // type that carries an address you may only pass along is `Pointer<T>`.
+    const opaqueReferent = ambientClassNameOf(referent);
+    if (opaqueReferent !== null) {
+        throw new ErasureError(
+            `\`${opaqueReferent}\` is declared elsewhere, so this build does not ` +
+            `know its layout and a \`Reference<${opaqueReferent}>\` has nothing ` +
+            `to read through. Use \`Pointer<${opaqueReferent}>\`, which is an ` +
+            "address and nothing more.",
+            "GF0302",
+        );
+    }
+    const className = classNameOf(referent);
+    if (className !== null) {
+        return {kind: "reference", referent: {kind: "class", name: className}};
+    }
+    return null;
 }
 
 /**
@@ -822,7 +1035,11 @@ export function referentOf(checker: ts.TypeChecker, type: ts.Type): ts.Type | nu
  * and a data member would have to be a dispatched thing *and* a layout, and no
  * answer to that is better than the other two.
  */
-export function contractOf(checker: ts.TypeChecker, type: ts.Type): MachineType | null {
+export function contractOf(
+    checker: ts.TypeChecker,
+    type: ts.Type,
+    state: Erasure = new Erasure(),
+): MachineType | null {
     const properties = checker.getPropertiesOfType(type);
     const methods = properties.filter((property) =>
         property.declarations?.some(ts.isMethodSignature),
@@ -848,10 +1065,14 @@ export function contractOf(checker: ts.TypeChecker, type: ts.Type): MachineType 
     // the declaration's source order: reordering the declaration is then not a
     // silent ABI change (DECISIONS §11.2).
     const sorted = [...methods].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
-    return {
-        kind: "interface",
-        name,
-        methods: sorted.map((method) => {
+    // Built empty and filled, so that a contract whose own methods mention it —
+    // `next(): Reference<Cursor>`, the shape of every iterator — closes onto
+    // this object rather than erasing forever. A method's types are behind an
+    // indirection, which is what makes that a shape rather than an impossible
+    // type: the pair is two words whatever the methods say.
+    const dispatched: InterfaceMethod[] = [];
+    return state.aggregate(type, {kind: "interface", name, methods: dispatched}, () => {
+        for (const method of sorted) {
             const declaration = method.declarations?.find(ts.isMethodSignature);
             const signature =
                 declaration === undefined
@@ -863,15 +1084,17 @@ export function contractOf(checker: ts.TypeChecker, type: ts.Type): MachineType 
                     "GF0001",
                 );
             }
-            return {
+            dispatched.push({
                 name: method.name,
                 params: declaration.parameters.map((parameter) =>
-                    erase(checker, checker.getTypeAtLocation(parameter)),
+                    state.through(() => erase(checker, checker.getTypeAtLocation(parameter), state)),
                 ),
-                returns: erase(checker, checker.getReturnTypeOfSignature(signature)),
-            };
-        }),
-    };
+                returns: state.through(() =>
+                    erase(checker, checker.getReturnTypeOfSignature(signature), state),
+                ),
+            });
+        }
+    });
 }
 
 /**
@@ -882,7 +1105,11 @@ export function contractOf(checker: ts.TypeChecker, type: ts.Type): MachineType 
  * index signature rather than from the brand, so an aliased or inferred `T`
  * still resolves.
  */
-function fixedArrayOf(checker: ts.TypeChecker, type: ts.Type): MachineType | null {
+function fixedArrayOf(
+    checker: ts.TypeChecker,
+    type: ts.Type,
+    state: Erasure,
+): MachineType | null {
     const brand = brandedProperty(checker, type, "FixedLengthBrand");
     if (!brand) {
         return null;
@@ -907,7 +1134,9 @@ function fixedArrayOf(checker: ts.TypeChecker, type: ts.Type): MachineType | nul
     if (element === undefined) {
         throw new ErasureError("this `FixedArray` has no element type.", "GF0001");
     }
-    return {kind: "fixedArray", element: erase(checker, element), length: length.value};
+    // Not `through`: the elements are *inline*, so a fixed array of the type it
+    // is a field of is a value containing itself, and `GF0307` is the answer.
+    return {kind: "fixedArray", element: erase(checker, element, state), length: length.value};
 }
 
 /**
@@ -918,7 +1147,7 @@ function fixedArrayOf(checker: ts.TypeChecker, type: ts.Type): MachineType | nul
  * whose fields are declared in a different order are different layouts, exactly
  * as they are in C.
  */
-function eraseObject(checker: ts.TypeChecker, type: ts.Type): MachineType {
+function eraseObject(checker: ts.TypeChecker, type: ts.Type, state: Erasure): MachineType {
     const isUnion = brandedProperty(checker, type, "UnionBrand") !== null;
     // A brand is a symbol-keyed marker, never a field: it says what the type *is*
     // and occupies nothing. `extends Union` is the first case where one reaches
@@ -936,44 +1165,74 @@ function eraseObject(checker: ts.TypeChecker, type: ts.Type): MachineType {
     }
 
     const name = structNameOf(checker, type);
+    // Built empty and filled below, because the answer has to exist before its
+    // own fields are erased: `next: Pointer<Node>` comes back through here for
+    // `Node`, and what closes that cycle is this object (see {@link Erasure}).
     const fields: StructField[] = [];
-    for (const property of properties) {
-        const declaration = property.declarations?.[0];
-        // A `MethodSignature` makes this a *contract*, and a contract has no value
-        // form — it is C++'s abstract base, which cannot be held by value either.
-        // Reaching here means one was written where a layout was wanted, so the
-        // message says how to hold one instead. See `contractOf` for why the line
-        // is drawn at the AST node kind.
-        if (declaration !== undefined && ts.isMethodSignature(declaration)) {
-            // `contractOf` raises the better message when the interface is *mixed*,
-            // and it has to be given the chance: telling someone to write
-            // `Reference<Bad>` and then rejecting that too is two round trips for
-            // one mistake.
-            contractOf(checker, type);
-            throw new ErasureError(
-                `\`${name}\` declares the method \`${property.name}()\`, which makes it a ` +
-                "*contract* rather than a plain shape — it has no layout, so it cannot " +
-                `be a value, a field or a by-value parameter. Write \`Reference<${name}>\`, ` +
-                "which is the two-word pair a contract is held through.\n\n" +
-                "If dispatch was not what you wanted, a function-typed *property* — " +
-                `\`${property.name}: () => …\` rather than \`${property.name}()\` — is an ` +
-                "ordinary field holding a function pointer, and leaves this a struct.",
-                "GF0002",
-            );
+    const answer: MachineType = isUnion
+        ? {kind: "struct", name, fields, union: true}
+        : {kind: "struct", name, fields};
+    return state.aggregate(type, answer, () => {
+        for (const property of properties) {
+            eraseField(checker, type, name, property, fields, state);
         }
-        if ((property.flags & ts.SymbolFlags.Optional) !== 0) {
-            throw new ErasureError(
-                `\`${name}.${property.name}\` is optional. There is no \`undefined\` ` +
-                "here for it to be, and no space in the layout for it not to be.",
-                "GF0002",
-            );
-        }
-        fields.push({
-            name: property.name,
-            type: erase(checker, checker.getTypeOfSymbol(property)),
-        });
+    });
+}
+
+/**
+ * One property of an object type, as a field — or the reason it is not one.
+ *
+ * Split out of {@link eraseObject} only so that the loop that fills a struct's
+ * fields is a loop and not a page.
+ */
+function eraseField(
+    checker: ts.TypeChecker,
+    type: ts.Type,
+    name: string,
+    property: ts.Symbol,
+    fields: StructField[],
+    state: Erasure,
+): void {
+    const declaration = property.declarations?.[0];
+    // A `MethodSignature` makes this a *contract*, and a contract has no value
+    // form — it is C++'s abstract base, which cannot be held by value either.
+    // Reaching here means one was written where a layout was wanted, so the
+    // message says how to hold one instead. See `contractOf` for why the line
+    // is drawn at the AST node kind.
+    if (declaration !== undefined && ts.isMethodSignature(declaration)) {
+        // `contractOf` raises the better message when the interface is *mixed*,
+        // and it has to be given the chance: telling someone to write
+        // `Reference<Bad>` and then rejecting that too is two round trips for
+        // one mistake.
+        //
+        // Asked in an erasure of its own, because this type is open here as a
+        // *struct* and `contractOf` would answer the same question with an
+        // interface. Nothing survives the throw below, so what it records does
+        // not matter — but a half-built answer left where a cycle could close
+        // on it would, and this is one line rather than that.
+        contractOf(checker, type);
+        throw new ErasureError(
+            `\`${name}\` declares the method \`${property.name}()\`, which makes it a ` +
+            "*contract* rather than a plain shape — it has no layout, so it cannot " +
+            `be a value, a field or a by-value parameter. Write \`Reference<${name}>\`, ` +
+            "which is the two-word pair a contract is held through.\n\n" +
+            "If dispatch was not what you wanted, a function-typed *property* — " +
+            `\`${property.name}: () => …\` rather than \`${property.name}()\` — is an ` +
+            "ordinary field holding a function pointer, and leaves this a struct.",
+            "GF0002",
+        );
     }
-    return isUnion ? {kind: "struct", name, fields, union: true} : {kind: "struct", name, fields};
+    if ((property.flags & ts.SymbolFlags.Optional) !== 0) {
+        throw new ErasureError(
+            `\`${name}.${property.name}\` is optional. There is no \`undefined\` ` +
+            "here for it to be, and no space in the layout for it not to be.",
+            "GF0002",
+        );
+    }
+    fields.push({
+        name: property.name,
+        type: erase(checker, checker.getTypeOfSymbol(property), state),
+    });
 }
 
 /** What an enum's width is called when nothing says otherwise. */

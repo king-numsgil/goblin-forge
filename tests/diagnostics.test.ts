@@ -368,6 +368,28 @@ describe("codes raised by a program", () => {
         );
     });
 
+    test("GF0307 — a value that contains itself", async () => {
+        // Written as an `extern`'s parameter because there is no way to *build*
+        // one: tsc has nothing to put in the innermost `self`, so a program that
+        // constructed the value would be rejected by tsc first and this rule
+        // would never be the thing that answered.
+        const diagnostic = await expectRejected(
+            "diag-0307",
+            `interface Cell {
+         value: i32;
+         self: Cell;
+       }
+
+       declare function c_take(cell: Cell): i32;
+
+       export function main(): i32 {
+         return 0;
+       }\n`,
+            "GF0307",
+        );
+        expect(diagnostic.message).toContain("Pointer<Cell>");
+    });
+
     test("GF9004 — an output kind the backend does not know", async () => {
         const {result} = await compileSource(
             "diag-9004",
@@ -423,6 +445,7 @@ describe("the registry and the suite agree", () => {
             "GF0304",
             "GF0305",
             "GF0306",
+            "GF0307",
             "GF9004",
             "GF9005",
         ]);

@@ -418,6 +418,34 @@ export const CODES = {
             "call that looks like a conversion.",
     },
 
+    GF0307: {
+        title: "a value cannot contain itself",
+        explanation:
+            "Fields are laid out **inline**, which is what makes a Goblin struct the " +
+            "same bytes a C compiler would produce for the same declaration. So a " +
+            "field of the type it is declared in would have to hold a whole one of " +
+            "those, which holds a whole one of those: a size that is its own size and " +
+            "then larger, and no arrangement of bytes has it. C refuses the same " +
+            "declaration for the same reason — a struct is an incomplete type inside " +
+            "its own definition.\n\n" +
+            "A `Pointer<T>` is the shape that works, and it is what C writes:\n\n" +
+            "    interface Node { value: i32; next: Pointer<Node> | null; }\n\n" +
+            "A pointer is one machine word whatever is behind it, so the type has a " +
+            "size again — and the cycle is then in the *program*, where a linked " +
+            "list's cycle belongs, rather than in the layout. A `T[]` works for the " +
+            "same reason: it is a handle to a buffer elsewhere.\n\n" +
+            "`FixedArray<Node, 4>` is refused as well, and is worth naming " +
+            "separately: it holds its elements inline, so it is four whole ones " +
+            "rather than an address.\n\n" +
+            "A class is the same rule at a different site. Its fields are laid out " +
+            "inline too, so a class that reaches itself by value — directly, through " +
+            "another class, or through a struct or a fixed array — has no size " +
+            "either. What it *may* hold is `Pointer<Node>`, and also `Node[]`, which " +
+            "a struct cannot: releasing a class runs its destructor, which is a " +
+            "function that can call itself, where a struct's drop is written out at " +
+            "every site that needs one.",
+    },
+
     // -- The compiler is broken ----------------------------------------------
     GF9001: {
         title: "the backend could not decode the MIR",

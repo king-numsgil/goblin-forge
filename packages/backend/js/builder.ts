@@ -160,20 +160,83 @@ export class ModuleBuilder {
         union?: boolean;
         span?: Span;
     }): StructId {
+        const id = this.declareStruct(options);
+        this.defineStruct(id, {fields: options.fields});
+        return id;
+    }
+
+    /**
+     * Reserve a struct id before its fields are known.
+     *
+     * Two-phase, like {@link ModuleBuilder.declareClass}, and for the shape that
+     * needs it: `struct Node { struct Node *next; }`. Interning that field's type
+     * comes back through the struct it is a field of, so the id has to exist
+     * before the fields do — the other order is the obvious one and does not
+     * terminate.
+     *
+     * Unlike a class, **a struct's category is a function of its fields**, so a
+     * `Struct` type interned in this window is `Trivial` whatever the struct
+     * turns out to own. {@link defineStruct} settles that, and it is why the
+     * pair is a pair rather than a convenience.
+     */
+    declareStruct(options: {
+        name: string;
+        cCompatible?: boolean;
+        union?: boolean;
+        span?: Span;
+    }): StructId {
         const id = StructId(this.#structs.length);
-        const fields: FieldDef[] = options.fields.map((field) => ({
-            name: this.sym(field.name),
-            ty: field.ty,
-            span: field.span ?? SYNTHETIC,
-        }));
         this.#structs.push({
             name: this.sym(options.name),
-            fields,
+            fields: [],
             cCompatible: options.cCompatible ?? false,
             union: options.union ?? false,
             span: options.span ?? SYNTHETIC,
         });
         return id;
+    }
+
+    /** Fill in a struct declared earlier, and settle what it owns. */
+    defineStruct(
+        id: StructId,
+        options: { fields: { name: string; ty: TyId; span?: Span }[] },
+    ): void {
+        const def = this.#structs[id];
+        if (def === undefined) {
+            throw new Error(`struct ${id} was never declared`);
+        }
+        def.fields = options.fields.map((field): FieldDef => ({
+            name: this.sym(field.name),
+            ty: field.ty,
+            span: field.span ?? SYNTHETIC,
+        }));
+
+        // Every type interned while this struct had no fields was given a
+        // category computed from a struct that owned nothing, so any that read
+        // this one's is now stale. Recomputing the whole table is the honest fix
+        // and costs nothing at this size.
+        //
+        // It settles, and in a single pass in all but a contrived case: a
+        // category is a function of a type's *inline* components, and a type is
+        // interned after those — so the table is already in dependency order
+        // apart from the struct that had to come first. That one's cycle is
+        // through a `Pointer` or a `Reference`, whose category is the same
+        // answer whatever is behind it. The loop is here for the contrived case
+        // (`Pointer<FixedArray<Node, 4>>` as a field of `Node`) rather than for
+        // the ordinary one, and it cannot spin: the only category that moves is
+        // `Trivial` becoming `Owning`, so every pass that changes anything
+        // leaves one fewer type that can change.
+        let settled = false;
+        while (!settled) {
+            settled = true;
+            for (const ty of this.#types) {
+                const category = this.#categoryOf(ty.kind);
+                if (category !== ty.category) {
+                    ty.category = category;
+                    settled = false;
+                }
+            }
+        }
     }
 
     /**

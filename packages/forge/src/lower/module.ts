@@ -1216,6 +1216,7 @@ export class Lowerer {
             refuse: (node, message) => this.error(node, "GF0002", message),
             erase: (at, type) => this.erase(at, type),
         });
+        this.#refuseInlineCycles();
 
         for (const [name, info] of this.#classes) {
             const id = this.#mir.declareClass({
@@ -1413,6 +1414,71 @@ export class Lowerer {
         }
 
         return bodies;
+    }
+
+    /**
+     * A class that contains itself by value, directly or through other storage
+     * that is laid out inline.
+     *
+     * The erasure answers this for every *other* type (`GF0307`), and cannot
+     * answer it for a class: a class is nominal, so `erase` gives back its name
+     * and never looks at its fields — which is exactly what stops a
+     * `Pointer<Node>` inside `Node` from recursing there. The fields are known
+     * here instead, flattened, so here is where the same question gets asked.
+     *
+     * It is the same question, and the same answer: a class laid out inside
+     * itself has no size, and nothing downstream would say so. The backend's
+     * layout pass would recurse until the stack ended, with no file and no line.
+     */
+    #refuseInlineCycles(): void {
+        // Inline storage only. A pointer, a reference or a `T[]` is a machine
+        // word whatever is behind it, so a cycle through one is an ordinary
+        // linked structure and stops the walk — which is also what makes this
+        // terminate over a struct type that contains itself through a pointer.
+        const reaches = (type: MachineType, target: string, seen: Set<string>): boolean => {
+            switch (type.kind) {
+                case "class": {
+                    if (type.name === target) {
+                        return true;
+                    }
+                    if (seen.has(type.name)) {
+                        return false;
+                    }
+                    seen.add(type.name);
+                    const other = this.#classes.get(type.name);
+                    return (
+                        other !== undefined &&
+                        other.fields.some((field) => reaches(field.type, target, seen))
+                    );
+                }
+                case "struct":
+                    return type.fields.some((field) => reaches(field.type, target, seen));
+                case "fixedArray":
+                    return reaches(type.element, target, seen);
+                default:
+                    return false;
+            }
+        };
+
+        for (const info of this.#classes.values()) {
+            const field = info.fields.find((candidate) =>
+                reaches(candidate.type, info.name, new Set()),
+            );
+            if (field === undefined) {
+                continue;
+            }
+            this.error(
+                field.declaration,
+                "GF0307",
+                `\`${info.name}.${field.name}\` is a \`${renderType(field.type)}\`, so the ` +
+                `layout of \`${info.name}\` would have to contain itself — as large as ` +
+                "itself and then larger. A field is laid out inline, which is what makes " +
+                "the bytes match C's, and an object's own storage is not somewhere it can " +
+                `be. Hold a \`Pointer<${info.name}>\`, which is one machine word whatever ` +
+                `is behind it, or \`${info.name}[]\`, which is a handle to a buffer ` +
+                "elsewhere.",
+            );
+        }
     }
 
     /** The contract named by an `implements` clause entry, if it is one. */
@@ -2126,18 +2192,23 @@ export class Lowerer {
             }
         }
 
-        // Reserved before the fields are erased, so a struct that (later) contains
-        // a pointer to itself does not recurse forever.
-        const id = this.#mir.struct({
-            name: type.name,
+        // Declared and interned **before** the field types are, which is what
+        // makes `interface Node { next: Pointer<Node> | null }` terminate:
+        // interning that field comes back through here for `Node`, and finds it.
+        //
+        // The name is registered at the same moment for the same reason — a
+        // struct is interned by name (see above), and the recursive occurrence
+        // has to find the id the enclosing one reserved rather than reserve a
+        // second struct with the same name and a different layout.
+        const id = this.#mir.declareStruct({name: type.name, union: type.union === true});
+        const ty = this.#mir.ty({kind: "Struct", value: id});
+        this.#structs.set(type.name, ty);
+        this.#mir.defineStruct(id, {
             fields: type.fields.map((field) => ({
                 name: field.name,
                 ty: this.tyOf(field.type, at),
             })),
-            union: type.union === true,
         });
-        const ty = this.#mir.ty({kind: "Struct", value: id});
-        this.#structs.set(type.name, ty);
         return ty;
     }
 

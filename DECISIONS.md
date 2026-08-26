@@ -2192,6 +2192,98 @@ copy of a wire format is worse than no second copy.
 
 ---
 
+## §23 — Recursive types *(settled and built, 2026-08-26)*
+
+`struct Node { struct Node *next; }` is the first shape in every C data
+structures book, and it used to end the compiler: the eraser walked the pointee
+graph with no memory of where it had been and died of stack exhaustion, in a
+`RangeError` naming tsc's internals rather than the declaration. The lowerer
+would have done the same one layer down, having interned the struct's fields
+before the struct.
+
+### A machine type is a graph, not a tree
+
+The type has no finite spelling as a tree, so `erase()` does not build one. An
+aggregate is registered *before* its own fields are erased, and a cycle back to
+it closes on that object — `MachineType` may therefore contain itself, always
+below a `pointer`, a `reference` or an `array`.
+
+The alternative was a truncated placeholder — a `struct` carrying its name and
+no fields, resolved by name later. It was rejected because the truncation is
+*visible*: `node.next.value` reads a field off the pointee's type, so every
+consumer would have to know to re-resolve one, and the one that forgot would
+reject a legal program rather than crash. Nothing has to know about the graph,
+because everything that walks a type already stops at a struct's name — it is
+nominal, which was decided long before this for other reasons (`sameType`,
+`renderType`, `needsDrop`, and interning in the lowerer are the four).
+
+The rule that keeps it true: **nothing may walk a type through a `pointee` into
+its fields.** There is no reason to want to — a pointer is one machine word
+whatever is behind it — and it is the only way to make the graph a hazard.
+
+### The MIR interns a struct in two phases
+
+`declareStruct` then `defineStruct`, like a class, because a recursive struct's
+field types are interned *through* the struct they belong to. A class needed the
+same thing for a different reason and got it first; the comment in `#structTy`
+claiming the id was already reserved was aspirational, and this is what makes it
+true.
+
+The wrinkle a class does not have: a struct's **category** is a function of its
+fields, so a `Struct` type interned in that window is `Trivial` whatever the
+struct turns out to own. `defineStruct` recomputes the whole type table's
+categories rather than only the struct's own, because a type interned in the
+window can have read the stale answer — `Pointer<FixedArray<Node, 4>>` as a
+field of `Node` is the shape that does it.
+
+### Two cycles are refused, and they are refused differently
+
+| Written | Answer |
+|---|---|
+| `self: Node` | `GF0307` — a value as large as itself and then larger |
+| `kids: Node[]` | `GF0001` — a gap, not a rule |
+| `next: Pointer<Node>` | a shape |
+
+The distinction is *what was crossed* on the way round, which is why the eraser
+counts indirections rather than setting a flag: a sibling field erased after a
+pointer field must not inherit its answer.
+
+`Node[]` inside `Node` deserves the second look. The layout is fine — a handle
+is one machine word, which is why C++ allows `std::vector<T>` inside `T` and
+refuses `T[4]` — and the erasure treats it as an ordinary indirection. What is
+missing is out-of-line copy and drop glue: the backend writes both *inline*, so
+the drop for a `Node[]` contains the drop for a `Node`, which contains the drop
+for a `Node[]`. That is unbounded code generation rather than a stack overflow
+in the frontend, and it is a missing feature, so it is `GF0001` and the message
+says what to write instead. A `class` already works, because its destructor is a
+function rather than something spliced in at each site.
+
+### A class is asked the same question somewhere else
+
+`erase()` cannot answer it for a class, and that is not an oversight: a class is
+nominal, so erasure gives back its *name* and never looks at its fields — which
+is precisely what stopped `Pointer<Node>` inside `Node` from recursing there in
+the first place. So `class Node { self: Node }` never reached the eraser's check
+and went on crashing the backend's layout pass, which is the same defect wearing
+a different hat.
+
+The flattened fields are known in the lowerer, so that is where the walk lives
+(`#refuseInlineCycles`). It follows *inline* storage only — class fields, struct
+fields, fixed-array elements — and stops at every handle, which is what makes it
+terminate over a struct that reaches itself through a pointer. `GF0307` again,
+because it is the same rule.
+
+### C's header has C's rule
+
+A `typedef` name is not in scope until its own declarator is finished, so
+`typedef struct Node { Node *next; } Node;` does not compile. The generator
+emits `typedef struct Node Node;` ahead of the definitions for exactly the
+structs a cycle reaches, and writes those as a plain `struct Node { … };`. Every
+other struct keeps the single-declaration form it had, which is what keeps the
+diff to the headers this change is actually about.
+
+---
+
 ## Class decisions *(2026-08-12, milestone 8)*
 
 ### Every class has a vtable pointer, including one with no virtual methods

@@ -217,6 +217,12 @@ export function emitHeader(module: Module, options: HeaderOptions): string {
 function emitStructs(module: Module): string[] {
     const order: number[] = [];
     const seen = new Set<number>();
+    // The structs still being walked, and the ones a walk reached from inside
+    // themselves — `struct Node { struct Node *next; }`, and the two-struct form
+    // of the same shape. They need their name before their definition rather
+    // than after it; see the emission below.
+    const open = new Set<number>();
+    const recursive = new Set<number>();
     // Signatures reached through a callback. Each gets a `typedef`, because C's
     // declarator syntax for a function *returning* a function pointer —
     // `int32_t (*f(void))(int32_t)` — is unreadable and a name is not optional
@@ -236,15 +242,22 @@ function emitStructs(module: Module): string[] {
         }
         if (kind.kind === "Struct") {
             if (seen.has(kind.value)) {
+                // Reached from inside its own walk, so the cycle is through a
+                // pointer — nothing else here recurses, and a struct containing
+                // itself by value is `GF0307` long before this.
+                if (open.has(kind.value)) {
+                    recursive.add(kind.value);
+                }
                 return;
             }
-            // Marked before recursing so a struct reached twice is emitted once. A
-            // cycle cannot happen: it would need a struct containing itself by value,
-            // which has no layout.
+            // Marked before recursing so a struct reached twice is emitted once,
+            // and so a cycle terminates.
             seen.add(kind.value);
+            open.add(kind.value);
             for (const field of module.structs[kind.value]?.fields ?? []) {
                 visit(field.ty);
             }
+            open.delete(kind.value);
             order.push(kind.value);
             return;
         }
@@ -283,6 +296,23 @@ function emitStructs(module: Module): string[] {
     }
 
     const out: string[] = [];
+    // A struct that appears inside its own definition needs its name declared
+    // first, because a `typedef` name is not in scope until its own declarator
+    // is finished — `typedef struct Node { Node *next; } Node;` does not
+    // compile. So the name comes first and the definition is written as a plain
+    // `struct Node { … };`, which is the idiom C headers have always used for
+    // this shape. Every other struct keeps the one-declaration form.
+    for (const id of order) {
+        if (!recursive.has(id)) {
+            continue;
+        }
+        const name = identifier(sym(module, module.structs[id]?.name ?? 0));
+        out.push(`typedef struct ${name} ${name};`);
+    }
+    if (out.length > 0) {
+        out.push("");
+    }
+
     // Before the structs would be wrong — a callback may take one — and after
     // them is right for the same reason.
     for (const id of order) {
@@ -291,11 +321,11 @@ function emitStructs(module: Module): string[] {
             continue;
         }
         const name = identifier(sym(module, def.name));
-        out.push(`typedef struct ${name} {`);
+        out.push(recursive.has(id) ? `struct ${name} {` : `typedef struct ${name} {`);
         for (const field of def.fields) {
             out.push(`    ${member(module, field.ty, identifier(sym(module, field.name)))};`);
         }
-        out.push(`} ${name};`);
+        out.push(recursive.has(id) ? "};" : `} ${name};`);
         out.push("");
     }
     for (const sig of [...fnPtrs].sort((a, b) => a - b)) {

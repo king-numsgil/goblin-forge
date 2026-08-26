@@ -306,6 +306,49 @@ int main(void) {
         expect(stdout).toBe("5,2\n14\n8 16\n");
     }, CMAKE_TIMEOUT);
 
+    test("a struct that points at itself is declared before it is defined", async () => {
+        // C's own rule, and the reason this is not the ordinary emission: a
+        // `typedef` name is not in scope until its declarator is finished, so
+        // `typedef struct Node { Node *next; } Node;` does not compile. The name
+        // comes first and the body follows — and the C compiler in this test is
+        // the thing that says whether that is right.
+        const lib = await library(
+            "lib-recursive-struct",
+            `interface Node { value: i32; next: Pointer<Node> | null; }
+
+       export function sum(head: Pointer<Node> | null): i32 {
+         let total: i32 = 0;
+         let at: Pointer<Node> | null = head;
+         while (at !== null) {
+           total = total + at.value;
+           at = at.next;
+         }
+         return total;
+       }\n`,
+        );
+
+        expect(lib.headerText).toContain("typedef struct Node Node;");
+        expect(lib.headerText.indexOf("typedef struct Node Node;")).toBeLessThan(
+            lib.headerText.indexOf("struct Node {"),
+        );
+
+        const stdout = buildConsumer({
+            ...lib,
+            main: `#include <stdio.h>
+#include "main.h"
+
+int main(void) {
+  Node tail = { 2, NULL };
+  Node head = { 1, &tail };
+  printf("%d\\n", sum(&head));
+  printf("%d\\n", sum(NULL));
+  return 0;
+}
+`,
+        });
+        expect(stdout).toBe("3\n0\n");
+    }, CMAKE_TIMEOUT);
+
     test("a `string` crosses as a `const char *`, and C releases it", async () => {
         // A Goblin `string` is a pointer to nul-terminated bytes, so C reads one
         // with no conversion — `printf("%s")` and `strlen` both work. What C must

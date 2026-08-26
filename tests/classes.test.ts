@@ -373,6 +373,83 @@ describe("classes: what is rejected", () => {
         );
     });
 
+    test("a class laid out inside itself", async () => {
+        // The erasure answers this for every other type, and cannot answer it
+        // for a class: a class is nominal, so `erase` gives back its name and
+        // never looks at its fields — which is what stops `Pointer<Node>` inside
+        // `Node` from recursing there. So the lowerer asks it of the flattened
+        // fields instead. Without it the backend's layout pass recurses until
+        // the stack ends, with no file and no line.
+        const diagnostic = await expectRejected(
+            "class-inline-cycle",
+            `class Node { value: i32; self: Node; }
+       export function main(): i32 { return 0; }\n`,
+            "GF0307",
+        );
+        expect(diagnostic.message).toContain("Pointer<Node>");
+    });
+
+    test("two classes laid out inside each other", async () => {
+        await expectRejected(
+            "class-inline-cycle-mutual",
+            `class A { b: B; }
+       class B { a: A; }
+       export function main(): i32 { return 0; }\n`,
+            "GF0307",
+        );
+    });
+
+    test("a class reaching itself through a struct field", async () => {
+        // Inline is inline whatever the aggregate is called, so the walk has to
+        // go through a struct as well as through another class.
+        await expectRejected(
+            "class-inline-cycle-struct",
+            `interface Holder { n: Node; }
+       class Node { h: Holder; }
+       export function main(): i32 { return 0; }\n`,
+            "GF0307",
+        );
+    });
+
+    test("a class holding a fixed array of itself", async () => {
+        await expectRejected(
+            "class-inline-cycle-fixed",
+            `class Node { kids: FixedArray<Node, 2>; }
+       export function main(): i32 { return 0; }\n`,
+            "GF0307",
+        );
+    });
+
+    test("a class that points at itself is fine, and so is a vector of itself", async () => {
+        // The other side of the same rule, and the reason it is drawn at *inline*
+        // storage: both of these are one machine word in the layout. The vector
+        // works where a struct's would not because a class's drop is already a
+        // function — `Node$drop` calls itself rather than being spliced in.
+        const result = await run(
+            "class-cyclic-handles",
+            `class Node {
+         value: i32;
+         next: Pointer<Node> | null;
+         kids: Node[];
+         constructor(value: i32) { this.value = value; this.next = null; this.kids = []; }
+       }
+
+       export function main(): i32 {
+         const root = new Node(1);
+         root.kids.push(new Node(2));
+         root.kids.push(new Node(3));
+         let total: i32 = root.value;
+         for (let i: usize = 0; i < root.kids.length; i = i + 1) {
+           total = total + root.kids[i].value;
+         }
+         console.log(\`\${total}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("6\n");
+        expect(result.leaked).toBe(0);
+    });
+
     test("a getter reads through a call — see `tests/accessors.test.ts`", async () => {
         const result = await run(
             "class-getter",

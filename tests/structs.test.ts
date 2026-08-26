@@ -361,3 +361,181 @@ describe("struct edges", () => {
         expect(result.leaked).toBe(0);
     });
 });
+
+/**
+ * `struct Node { struct Node *next; }` — the shape every C linked list has.
+ *
+ * A cycle through a pointer is a *type* with no finite spelling as a tree, and
+ * both halves of the compiler used to walk one until the stack ran out: the
+ * eraser building a `MachineType`, and the lowerer interning a `TyId`. Neither
+ * produced a diagnostic, because neither got as far as having one.
+ */
+describe("a type that points at itself", () => {
+    test("a declaration that mentions one compiles", async () => {
+        // The narrowest form of the original report: nothing builds a node, and
+        // an `extern`'s signature is the whole of what drives the eraser in.
+        const result = await run(
+            "struct-cyclic-declared",
+            `interface Node {
+         value: i32;
+         next: Pointer<Node> | null;
+       }
+
+       declare function c_head(): Pointer<Node> | null;
+
+       export function main(): i32 {
+         return 0;
+       }\n`,
+        );
+        expect(result.exitCode).toBe(0);
+    });
+
+    test("a list is built, walked and released", async () => {
+        const result = await run(
+            "struct-cyclic-list",
+            `interface Node {
+         value: i32;
+         next: Pointer<Node> | null;
+       }
+
+       export function main(): i32 {
+         const head = alloc<Node>();
+         const tail = alloc<Node>();
+         head.value = 1;
+         head.next = tail;
+         tail.value = 2;
+         tail.next = null;
+
+         let total: i32 = 0;
+         let at: Pointer<Node> | null = head;
+         while (at !== null) {
+           total = total + at.value;
+           at = at.next;
+         }
+         // Two levels in one expression, which is what a truncated pointee
+         // would have refused: the field's own type has to be the whole shape.
+         console.log(\`\${total} \${head.next.value}\`);
+
+         head.free();
+         tail.free();
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("3 2\n");
+        expect(result.leaked).toBe(0);
+    });
+
+    test("two types that point at each other", async () => {
+        const result = await run(
+            "struct-cyclic-mutual",
+            `interface A { tag: i32; b: Pointer<B> | null; }
+       interface B { tag: i32; a: Pointer<A> | null; }
+
+       export function main(): i32 {
+         const a = alloc<A>();
+         const b = alloc<B>();
+         a.tag = 1;
+         a.b = b;
+         b.tag = 2;
+         b.a = a;
+         const back = a.b.a;
+         const round: i32 = back === null ? 0 : back.tag;
+         a.free();
+         b.free();
+         return round * 10 + 1;
+       }\n`,
+        );
+        expect(result.exitCode).toBe(11);
+    });
+
+    test("an owning field beside the pointer is still released", async () => {
+        // The category of a struct is a function of its fields, and the id for a
+        // recursive one is reserved *before* those fields exist — so a `Trivial`
+        // computed in that window would leave the string unreleased, which the
+        // live-allocation check catches whether or not anything else does.
+        const result = await run(
+            "struct-cyclic-owning",
+            `interface Node { name: string; next: Pointer<Node> | null; }
+
+       export function main(): i32 {
+         const a: Node = { name: "x" + "y", next: null };
+         const b: Node = a;
+         console.log(\`\${a.name}\${b.name}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("xyxy\n");
+        expect(result.leaked).toBe(0);
+    });
+
+    test("a value that contains itself is refused", async () => {
+        const diagnostic = await expectRejected(
+            "struct-cyclic-by-value",
+            `interface Node { value: i32; self: Node; }
+
+       declare function c_take(node: Node): i32;
+
+       export function main(): i32 {
+         return 0;
+       }\n`,
+            "GF0307",
+        );
+        expect(diagnostic.message).toContain("Pointer<Node>");
+    });
+
+    test("a fixed array of itself is refused, being inline too", async () => {
+        await expectRejected(
+            "struct-cyclic-fixed",
+            `interface Node { value: i32; kids: FixedArray<Node, 2>; }
+
+       declare function c_take(node: Node): i32;
+
+       export function main(): i32 {
+         return 0;
+       }\n`,
+            "GF0307",
+        );
+    });
+
+    test("an array of itself is a gap, and says so", async () => {
+        // `T[]` owns a buffer elsewhere, so the *layout* is fine — one machine
+        // word, the same reason C++ allows `std::vector<T>` in `T` and refuses
+        // `T[4]`. What is missing is out-of-line copy and drop glue: the backend
+        // writes both inline today, so the code for the drop would contain the
+        // code for the drop. `GF0001`, because it is meant to work eventually.
+        const diagnostic = await expectRejected(
+            "struct-cyclic-array",
+            `interface Node { value: i32; kids: Node[]; }
+
+       export function main(): i32 {
+         const leaf: Node = { value: 2, kids: [] };
+         const root: Node = { value: 1, kids: [leaf] };
+         return root.value * 10 + root.kids[0].value;
+       }\n`,
+            "GF0001",
+        );
+        expect(diagnostic.message).toContain("no end to it");
+    });
+
+    test("an array of pointers to itself is not that gap", async () => {
+        // One indirection more, and it is the one that matters: releasing the
+        // buffer releases pointers, which own nothing, so nothing recurses.
+        const result = await run(
+            "struct-cyclic-array-of-pointers",
+            `interface Node { value: i32; kids: (Pointer<Node> | null)[]; }
+
+       export function main(): i32 {
+         const leaf = alloc<Node>();
+         leaf.value = 2;
+         leaf.kids = [];
+         const root: Node = { value: 1, kids: [leaf] };
+         const first = root.kids[0];
+         const seen: i32 = first === null ? 0 : first.value;
+         leaf.free();
+         return root.value * 10 + seen;
+       }\n`,
+        );
+        expect(result.exitCode).toBe(12);
+        expect(result.leaked).toBe(0);
+    });
+});
