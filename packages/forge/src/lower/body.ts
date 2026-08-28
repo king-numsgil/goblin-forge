@@ -2811,7 +2811,7 @@ export class BodyLowerer extends BoundaryLowerer {
         // `ns.f` — a namespace-qualified function's address. Beside the static
         // case and for the same reason: `ns` is no more a value than `C` is, so
         // this has to come before anything asks it for one.
-        if (this.outer.namespaceCallee(expression) !== undefined) {
+        if (this.outer.namespaceValue(expression) !== undefined) {
             return this.functionValue(expression, natural);
         }
         // `C.x` where `x` is `static get x()`. Also before, and for the same
@@ -3376,7 +3376,14 @@ export class BodyLowerer extends BoundaryLowerer {
             // call the bare name would have been and not an indirect one through
             // its address. Before the method paths because a namespace is not a
             // receiver: there is nothing here to pass as one.
-            const qualified = this.outer.namespaceCallee(expression.expression);
+            const qualified = this.outer.namespaceCallee(
+                expression,
+                expression.expression,
+                this.bindings,
+            );
+            if (qualified === "reported") {
+                return undefined;
+            }
             if (qualified !== undefined) {
                 return this.#resolvedCall(expression, qualified);
             }
@@ -3432,8 +3439,9 @@ export class BodyLowerer extends BoundaryLowerer {
         // Resolved through tsc's symbol, not by name: an imported function is the
         // same symbol as its declaration however it is spelled at the call site,
         // and two same-named privates in different files are different symbols.
-        const target = this.outer.resolveCallee(expression.expression);
-        if (target === undefined) {
+        const target = this.outer.resolveCallee(expression, this.bindings);
+        // Already complained about, with the reason. See `resolveCallee`.
+        if (target === undefined || target === "reported") {
             return undefined;
         }
         return this.#resolvedCall(expression, target);

@@ -184,28 +184,53 @@ export interface InterfaceMethod {
 }
 
 /**
+ * What one type parameter is bound to, at one instantiation.
+ *
+ * **Both halves, and the machine type is the load-bearing one.** It is erased
+ * at the call site, under whatever substitution was in force *there*, so by the
+ * time it is in here it is concrete and nothing has to resolve it again.
+ *
+ * That is not an optimisation, it is the only thing that works. Binding to the
+ * `ts.Type` alone fails on a type argument that *mentions* the enclosing
+ * generic's own parameter: inside `grow<T>`, the call `grow<Wrap<T>>` binds the
+ * new `T` to `Wrap<T>` — whose own `T` is still a type parameter, and one that
+ * the new substitution maps back to a type containing it. Erasing that walks
+ * `Wrap` into `Wrap` with nothing crossed and comes out as "a value cannot
+ * contain itself", which is a true sentence about a type nobody wrote. Nothing
+ * short of instantiating the `ts.Type` fixes it, and tsc does not export a way
+ * to do that — but erasing one level at a time, at each call site, arrives at
+ * the same place without needing to.
+ *
+ * The `ts.Type` is kept because erasure is not the only question asked about a
+ * type: `classNameOf`, `linalgTypeOf` and `isArrayType` all want tsc's answer
+ * rather than this one's.
+ */
+export interface TypeBinding {
+    /** As written at the call site. May still mention an outer parameter. */
+    readonly type: ts.Type;
+
+    /** Erased at the call site, under the substitution in force there. */
+    readonly machine: MachineType;
+}
+
+/**
  * What each of a generic's type parameters actually is, at one instantiation.
  *
  * Keyed by the type parameter's **symbol**, so an imported generic is the same
  * generic however the import spelled it — the argument `resolveCallee` already
- * makes for functions, one level up. Mapping to a `ts.Type` rather than
- * straight to a {@link MachineType} is what keeps the rest of the compiler
- * working: erasure is not the only question asked about a type, and
- * `classNameOf`, `linalgTypeOf` and `isArrayType` all want tsc's answer rather
- * than this one's.
+ * makes for functions, one level up.
  *
  * The substitution is applied at the **leaf**, in {@link erase}, and that is
  * the whole of why monomorphisation is a small change here. `erase` already
  * takes a type apart structurally — `T[]` through `getIndexTypeOfType`,
  * `Pointer<T>` through `pointeeOf`, `Pair<T>` through `getPropertiesOfType` —
  * so every composite reaches a bare `T` on its own, and one case at the top of
- * the cascade answers for all of them. Nothing has to instantiate a `ts.Type`,
- * which is just as well: tsc does not export a way to.
+ * the cascade answers for all of them.
  */
-export type Substitution = ReadonlyMap<ts.Symbol, ts.Type>;
+export type Substitution = ReadonlyMap<ts.Symbol, TypeBinding>;
 
 /** Not inside a generic. The common case, and every caller outside lowering. */
-export const NO_BINDINGS: Substitution = new Map<ts.Symbol, ts.Type>();
+export const NO_BINDINGS: Substitution = new Map<ts.Symbol, TypeBinding>();
 
 /** Raised when a type is legal TypeScript but outside the language. */
 export class ErasureError extends Error {
@@ -446,6 +471,69 @@ export function isCStringType(checker: ts.TypeChecker, type: ts.Type): boolean {
 }
 
 /**
+ * The type parameter a type **is**, seeing through what tsc leaves behind.
+ *
+ * A bare `T` is the easy case. The one that matters is `T | (T & {})`, which is
+ * what comes back from asking a `Pointer<T>` what it points at when `T` is a
+ * type parameter — the prelude spells `Pointer` as a conditional type (for the
+ * enum-distribution reason `global.d.ts` documents at length), tsc cannot
+ * resolve a conditional over an unresolved `T`, so it keeps *both* branches and
+ * both of them say `T`. Read naively that is a union of two real types, which
+ * this language does not have, and `alloc<T>()` inside a generic came back as
+ * "`T | (T & {})` has no machine representation" — a message naming a type
+ * nobody wrote.
+ *
+ * `{}` is skipped rather than matched, because it is what `NonNullable<T>`
+ * leaves; every other member has to be the same parameter, so a genuine union
+ * of two types still answers `undefined` and is refused where it always was.
+ *
+ * This does **not** make `Pointer<T>` usable inside a generic body, and is not
+ * meant to: `p.deref()` and `p.store(v)` are rejected by tsc first, for the
+ * same conditional-type reason. It makes the erasure honest for the operations
+ * that do get past tsc, of which `alloc<T>()` is the useful one.
+ */
+function typeParameterSymbolOf(type: ts.Type): ts.Symbol | undefined {
+    if ((type.getFlags() & ts.TypeFlags.TypeParameter) !== 0) {
+        return type.symbol;
+    }
+    // A *substitution type*: tsc's note-to-itself that inside the true branch
+    // of `[T] extends [X] ? … : …`, this `T` is additionally known to satisfy
+    // `X`. It prints as `T`, it is `T`, and it does not carry the type
+    // parameter flag — which is why `Pointer<T>`'s pointee came back as a union
+    // of two things that both said `T` and neither of which matched.
+    if ((type.getFlags() & ts.TypeFlags.Substitution) !== 0) {
+        return typeParameterSymbolOf((type as ts.SubstitutionType).baseType);
+    }
+    if (!type.isUnionOrIntersection()) {
+        return undefined;
+    }
+    let found: ts.Symbol | undefined;
+    for (const part of type.types) {
+        if (isEmptyObjectType(part)) {
+            continue;
+        }
+        const symbol = typeParameterSymbolOf(part);
+        if (symbol === undefined || (found !== undefined && found !== symbol)) {
+            return undefined;
+        }
+        found = symbol;
+    }
+    return found;
+}
+
+/** `{}` — what `NonNullable<T>` reduces to for an unresolved `T`. */
+function isEmptyObjectType(type: ts.Type): boolean {
+    return (
+        (type.getFlags() & ts.TypeFlags.Object) !== 0 &&
+        type.getProperties().length === 0 &&
+        type.getCallSignatures().length === 0 &&
+        type.getConstructSignatures().length === 0 &&
+        type.getStringIndexType() === undefined &&
+        type.getNumberIndexType() === undefined
+    );
+}
+
+/**
  * Erase a `ts.Type`.
  *
  * Throws {@link ErasureError} rather than returning a diagnostic, because the
@@ -496,11 +584,9 @@ export function erase(
     // true of every `T` and says nothing about what went wrong.
     const flags = type.getFlags();
 
-    // Asked off the flag rather than through `isTypeParameter()`, which is a
-    // type predicate: narrowing on it leaves everything below thinking `type`
-    // is `never`.
-    if ((flags & ts.TypeFlags.TypeParameter) !== 0) {
-        const bound = state.bindings.get(type.symbol);
+    const parameter = typeParameterSymbolOf(type);
+    if (parameter !== undefined) {
+        const bound = state.bindings.get(parameter);
         if (bound === undefined) {
             throw new ErasureError(
                 `\`${checker.typeToString(type)}\` is a type parameter, and nothing here ` +
@@ -510,7 +596,10 @@ export function erase(
                 "GF0001",
             );
         }
-        return erase(checker, bound, state);
+        // The machine type, not the `ts.Type` — already erased, at the call
+        // site, under the substitution in force there. {@link TypeBinding} is
+        // why re-erasing it here is not the same thing and does not work.
+        return bound.machine;
     }
 
     if (flags & (ts.TypeFlags.Void | ts.TypeFlags.Undefined)) {

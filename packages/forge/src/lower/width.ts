@@ -297,7 +297,7 @@ export abstract class WidthPass extends Emitter {
         // the same code address the bare name gives and therefore the same
         // width. Beside the static-method case above rather than below the class
         // path, because `ns` here is no more an object than `C` is.
-        if (this.outer.namespaceCallee(expression) !== undefined) {
+        if (this.outer.namespaceValue(expression) !== undefined) {
             return this.#erasedWidth(expression);
         }
 
@@ -694,7 +694,14 @@ export abstract class WidthPass extends Emitter {
             // `ns.f(…)` — the declared return type, exactly as for the bare name,
             // and found the same way. Before the method paths for the reason
             // {@link BodyLowerer} gives: a namespace is not a receiver.
-            const qualified = this.outer.namespaceCallee(expression.expression);
+            const qualified = this.outer.namespaceCallee(
+                expression,
+                expression.expression,
+                this.bindings,
+            );
+            if (qualified === "reported") {
+                return ERROR;
+            }
             if (qualified !== undefined) {
                 return typed(qualified.signature.returns);
             }
@@ -809,7 +816,13 @@ export abstract class WidthPass extends Emitter {
             return this.width(argument);
         }
 
-        const target = this.outer.resolveCallee(expression.expression);
+        const target = this.outer.resolveCallee(expression, this.bindings);
+        // A generic that could not be instantiated. The reason has been said
+        // already and said better; adding "a call to `f` is not supported yet"
+        // under it would be the compiler talking over itself.
+        if (target === "reported") {
+            return ERROR;
+        }
         if (target === undefined) {
             // A value of function-pointer type, called. Its return type comes from
             // the type rather than from a declaration, because there may not be one.

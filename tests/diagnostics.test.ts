@@ -43,16 +43,17 @@ const UNREACHABLE: Partial<Record<string, string>> = {
 
 describe("codes raised by a program", () => {
     test("GF0001 — a construct the compiler cannot lower yet", async () => {
-        // A generic function: valid TypeScript, meant to be valid Goblin, and
-        // waiting on REWRITE-PLAN §11.7's answer about monomorphisation. It is
-        // deliberately something with no near-term plan to land, because this
-        // test's specimen becoming *implemented* is how it last broke.
+        // A top-level `let`: valid TypeScript, meant to be valid Goblin, and
+        // nothing lowers one. It is deliberately something with no near-term
+        // plan to land, because this test's specimen becoming *implemented* is
+        // how it keeps breaking — the previous one was a generic function, and
+        // GENERICS-PLAN stage 1 landed it.
         await expectRejected(
             "diag-0001",
-            `function identity<T>(x: T): T { return x; }
+            `let counter: i32 = 0;
 
        export function main(): i32 {
-         return identity(1);
+         return counter;
        }\n`,
             "GF0001",
         );
@@ -390,6 +391,55 @@ describe("codes raised by a program", () => {
         expect(diagnostic.message).toContain("Pointer<Cell>");
     });
 
+    // -- Generics and instantiation ------------------------------------------
+    //
+    // `tests/generics.test.ts` is where these are tested properly, against
+    // running programs. They are here as well because this file's contract is
+    // that every code in the registry is raised from a real program *by it*.
+
+    test("GF0402 — instantiation that never ends", async () => {
+        const diagnostic = await expectRejected(
+            "diag-0402",
+            `interface Wrap<T> { inner: T; }
+
+       function grow<T>(x: T): void {
+         const w: Wrap<T> = { inner: x };
+         grow<Wrap<T>>(w);
+       }
+
+       export function main(): i32 {
+         grow<i32>(1);
+         return 0;
+       }\n`,
+            "GF0402",
+        );
+        expect(diagnostic.message).toContain("deep so far");
+    });
+
+    test("GF0403 — a generic with no body", async () => {
+        await expectRejected(
+            "diag-0403",
+            `declare function c_generic<T>(x: T): void;
+
+       export function main(): i32 {
+         return 0;
+       }\n`,
+            "GF0403",
+        );
+    });
+
+    test("GF0404 — a generic call with no type arguments", async () => {
+        await expectRejected(
+            "diag-0404",
+            `function identity<T>(x: T): T { return x; }
+
+       export function main(): i32 {
+         return identity(1);
+       }\n`,
+            "GF0404",
+        );
+    });
+
     test("GF9004 — an output kind the backend does not know", async () => {
         const {result} = await compileSource(
             "diag-9004",
@@ -446,6 +496,9 @@ describe("the registry and the suite agree", () => {
             "GF0305",
             "GF0306",
             "GF0307",
+            "GF0402",
+            "GF0403",
+            "GF0404",
             "GF9004",
             "GF9005",
         ]);

@@ -133,5 +133,6 @@ export {
     type ScalarName,
     type StructField,
     type Substitution,
+    type TypeBinding,
     SCALARS,
 } from "./types.ts";

@@ -446,6 +446,52 @@ export const CODES = {
             "every site that needs one.",
     },
 
+    // -- Generics and instantiation ------------------------------------------
+    GF0402: {
+        title: "instantiating this generic never ends",
+        explanation:
+            "A generic is compiled **once for each set of type arguments it is used " +
+            "with**, and the copies share nothing but a source declaration. So a " +
+            "generic that calls itself with *larger* type arguments asks for a new " +
+            "copy every time, and there is no last one:\n\n" +
+            "    function f<T>(x: T): void { f<Pair<T>>({a: x, b: x}); }\n\n" +
+            "tsc accepts that, because at the declaration there is only ever one `T` " +
+            "to check. It is the compiling that has no end.\n\n" +
+            "Recursion in a generic is fine as long as the type arguments stop " +
+            "growing: a call that passes on the same `T` it was given reuses the " +
+            "copy it is already inside. What cannot work is a chain that builds a " +
+            "new type at each step.\n\n" +
+            "C++ and Rust report the same thing the same way, and for the same " +
+            "reason. The limit is arbitrary; the alternative is the compiler running " +
+            "out of stack and telling you nothing.",
+    },
+    GF0403: {
+        title: "a generic function with no body",
+        explanation:
+            "A function declared without a body names a symbol that some other " +
+            "library defines, and the declaration is the only thing the two sides " +
+            "share. A generic has no single symbol: it is compiled once per set of " +
+            "type arguments, which needs a body to compile, and the library on the " +
+            "other side was built by a compiler that never saw this call.\n\n" +
+            "This is a rule rather than a gap, and it is C's rule as well — there is " +
+            "no way to declare `std::vector<T>` to a C compiler either.\n\n" +
+            "Declare the concrete signatures you actually call:\n\n" +
+            "    declare function sort_i32(xs: Pointer<i32>, n: usize): void;\n\n" +
+            "A Goblin library is a different case: its generics travel as source and " +
+            "are instantiated in whoever uses them, the way a C++ template travels " +
+            "in a header.",
+    },
+    GF0404: {
+        title: "a generic call needs its type arguments written out",
+        explanation:
+            "`first(xs)` leaves the compiler to work out what `T` is. tsc does infer " +
+            "it, and reading that answer back is implemented — it just is not " +
+            "implemented *yet*, so for now the call has to say:\n\n" +
+            "    first<i32>(xs)\n\n" +
+            "A gap rather than a rule, and a temporary one: this code goes away when " +
+            "inference lands rather than being reused for something else.",
+    },
+
     // -- The compiler is broken ----------------------------------------------
     GF9001: {
         title: "the backend could not decode the MIR",

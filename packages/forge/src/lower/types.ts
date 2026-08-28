@@ -13,7 +13,7 @@ import {
     type SigId,
     type TyId,
 } from "@goblin-forge/backend";
-import type { Diagnostic, MachineType } from "@goblin-forge/checker";
+import type { Diagnostic, MachineType, Substitution } from "@goblin-forge/checker";
 import ts from "typescript";
 import type { ClassInfo, MethodBody } from "../classes.ts";
 import type { Binding } from "./scopes.ts";
@@ -121,6 +121,61 @@ export type FnRecord =
           /** Where it was declared, for the span on the extern when one is made. */
           readonly declaration: ts.FunctionDeclaration;
       };
+
+/**
+ * A generic function, before any call has said what its type parameters are.
+ *
+ * Not an {@link FnRecord}, and the difference is the point: a template has no
+ * `FuncId`, no `SigId` and no signature, because none of those exist until the
+ * type arguments do. Nothing is emitted for one.
+ */
+export interface FnTemplate {
+    readonly node: ts.FunctionDeclaration;
+    /** The name as written. Every instantiation keeps it, for diagnostics. */
+    readonly name: string;
+    /** The declaration's own key, which every instantiation's key extends. */
+    readonly key: string;
+    readonly parameters: readonly ts.Symbol[];
+}
+
+/** One instantiation, declared and waiting for its body. */
+export interface PendingInstantiation {
+    readonly node: ts.FunctionDeclaration;
+    readonly builder: FunctionBuilder;
+    readonly record: Extract<FnRecord, { kind: "defined" }>;
+    /** Concrete, always — see `TypeBinding` in the checker. */
+    readonly bindings: Substitution;
+
+    /** Its identity: the declaration's key and the erased type arguments. */
+    readonly key: string;
+
+    /**
+     * `first<i32>` — what a diagnostic's note calls it.
+     *
+     * Apart from {@link PendingInstantiation.key} because that one holds the
+     * declaring file's absolute path, which is the right thing to compare and
+     * the wrong thing to show anybody.
+     */
+    readonly label: string;
+
+    /**
+     * How many instantiations deep this one is.
+     *
+     * Carried on the item rather than measured from the call stack, because the
+     * worklist is a **queue**: each instantiation is lowered at the top level
+     * and pushes its own children onto the back, so nothing is ever nested and
+     * a depth counted from the stack is always one. That is how the first
+     * version of the limit failed to fire at all, and an unbounded generic ran
+     * until the test timed out instead of being reported.
+     */
+    readonly depth: number;
+
+    /** The instantiations that led here, innermost last, for the diagnostic. */
+    readonly trail: readonly string[];
+
+    /** The call that asked for it, for the note. */
+    readonly at: ts.Node;
+}
 
 /** One member of a class, waiting for its body to be lowered. */
 export type ClassBody =

@@ -32,9 +32,11 @@ import {
     layoutKey,
     type MachineType,
     NO_BINDINGS,
+    type Note,
     rangeOf,
     renderType,
     type Substitution,
+    type TypeBinding,
 } from "@goblin-forge/checker";
 import ts from "typescript";
 import {
@@ -49,14 +51,32 @@ import {
     type ClassBody,
     type FnRecord,
     type FnSignature,
+    type FnTemplate,
     type LiftedClosure,
     type LowerResult,
+    type PendingInstantiation,
     VOID,
 } from "./types.ts";
+import {
+    bindingsOf,
+    instantiationKey,
+    instantiationSymbol,
+    typeParameterSymbolsOf,
+} from "./generics.ts";
 import { type Binding, Scopes } from "./scopes.ts";
 import { describe, isStaticMember, moduleTag, needsDrop } from "./util.ts";
 import { BodyLowerer } from "./body.ts";
 import { capturedNames, thisParameterOf, usesThis } from "./closures.ts";
+
+/**
+ * How many instantiations deep a chain may go before it is reported.
+ *
+ * Arbitrary, as every such limit is. What is not arbitrary is that there be
+ * one: `f<T>() { f<Pair<T>>() }` type-checks and has infinitely many
+ * instantiations, and without a limit the compiler exhausts its stack and says
+ * nothing about which program did it.
+ */
+const MAX_INSTANTIATION_DEPTH = 64;
 
 export class Lowerer {
     readonly #program: ts.Program;
@@ -95,6 +115,53 @@ export class Lowerer {
      * takes it may be lowered long after the declaration was.
      */
     readonly #addressTaken = new Set<ts.Declaration>();
+    /**
+     * Generic functions, by the key their declaration would have had.
+     *
+     * A template is **not** a function: nothing is declared in the MIR for one
+     * and nothing is emitted, because a generic has no code until some call
+     * says what its type parameters are. What is here is what an instantiation
+     * needs in order to be made.
+     */
+    readonly #templates = new Map<string, FnTemplate>();
+
+    /** One emitted copy per set of type arguments, by {@link instantiationKey}. */
+    readonly #instantiations = new Map<string, FnRecord>();
+
+    /**
+     * Instantiations that have been declared and whose bodies are still to be
+     * lowered.
+     *
+     * A worklist rather than a loop, because lowering one body is what
+     * discovers the next: `first<Pair<i32>>` is only known to be wanted once
+     * the body that calls it is being lowered. {@link Lowerer.#drainPending}
+     * runs it to a fixed point.
+     */
+    readonly #pending: PendingInstantiation[] = [];
+
+    /**
+     * The instantiation being lowered, and how it was reached.
+     *
+     * `f<T>` calling `f<Pair<T>>` type-checks and has infinitely many
+     * instantiations, so something has to stop. Rust caps the depth and reports
+     * it; so does this, rather than running the machine out of memory and
+     * reporting nothing at all.
+     */
+    #current: { readonly depth: number; readonly trail: readonly string[] } | undefined;
+
+    /**
+     * Where the instantiation currently being lowered was asked for.
+     *
+     * Attached as a {@link Note} to every diagnostic raised while it is being
+     * lowered. tsc checks a generic at its *declaration*, so a body that type-
+     * checks is fine for every `T` as far as tsc is concerned — but erasure is
+     * this compiler's rule and tsc knows nothing about it, so `identity<T>` is
+     * fine and `identity<Speaker>` is a contract with no value form. Without
+     * the note that diagnostic points inside a body the reader did not write a
+     * call to.
+     */
+    #instantiatedAt: Note | undefined;
+
     readonly #externs = new Map<string, ExternId>();
     readonly #structs = new Map<string, TyId>();
     readonly #interfaces = new Map<string, InterfaceId>();
@@ -140,14 +207,238 @@ export class Lowerer {
     }
 
     /**
-     * Resolve a called name to the function it names, through **tsc**.
+     * Resolve a call to the function it names, through **tsc**.
      *
      * By symbol rather than by string, which is what makes an import work: the
      * name at the call site and the name at the declaration are the same symbol
      * even when they are spelled differently, and two same-named privates in
      * different files are different symbols even though they are spelled alike.
+     *
+     * A **generic** is resolved here too, and that is deliberate: the width
+     * pass and the body lowerer both arrive through this one door, so
+     * instantiating behind it means neither of them has to know that generics
+     * exist. What comes back is an ordinary {@link FnRecord} for one
+     * instantiation, with a concrete signature — which is the whole claim
+     * monomorphisation makes.
+     *
+     * `"reported"` is the third answer, and it is not the same as `undefined`.
+     * A generic that could not be instantiated has already been complained
+     * about *here*, with the specific reason; a caller that treats that as "not
+     * a function I know" goes on to add "this name is not supported yet" and
+     * "this call is not supported yet" underneath it, which is two more
+     * diagnostics about a program whose one problem has been named. The same
+     * sentinel shape `linalgCall` and `#methodCall` already use.
      */
-    resolveCallee(expression: ts.Expression): FnRecord | undefined {
+    resolveCallee(
+        call: ts.CallExpression,
+        bindings: Substitution,
+    ): FnRecord | "reported" | undefined {
+        const declaration = this.#calleeDeclaration(call.expression);
+        if (declaration?.name === undefined) {
+            return undefined;
+        }
+        const key = this.#keyOf(declaration, declaration.name.text);
+        const template = this.#templates.get(key);
+        if (template !== undefined) {
+            return this.#instantiate(template, call, bindings) ?? "reported";
+        }
+        return this.#functions.get(key);
+    }
+
+    /**
+     * The instantiation of `template` this call wants, making it if it is new.
+     *
+     * Memoised on the **erased** type arguments, so forty calls to
+     * `first<i32>` are one function, and so are `first<i32>` and
+     * `first<MyAlias>` where the alias is `i32`. That is the right granularity
+     * because the copies differ only in machine types.
+     *
+     * The body is not lowered here. It goes on {@link Lowerer.#pending} and is
+     * drained after the ordinary bodies are, because this runs *from inside*
+     * one of them — lowering re-entrantly would put a second `BodyLowerer` on
+     * the stack for no reason, and the recursive case (`f<i32>` calling
+     * `f<i32>`) would not terminate.
+     */
+    #instantiate(
+        template: FnTemplate,
+        call: ts.CallExpression,
+        bindings: Substitution,
+    ): FnRecord | undefined {
+        const written = call.typeArguments;
+        // Stage 1 of GENERICS-PLAN: written out, never inferred. tsc has
+        // already inferred them and `getResolvedSignature` could be unified
+        // against to recover the answer — that is stage 4, and doing it second
+        // means it is built against an implementation that works rather than
+        // beside one that does not.
+        if (written === undefined || written.length !== template.parameters.length) {
+            const one = template.parameters.length === 1;
+            this.error(
+                call,
+                "GF0404",
+                `\`${template.name}\` is generic, and this call does not say what ` +
+                `${template.parameters.map((p) => `\`${p.name}\``).join(" and ")} ` +
+                `${one ? "is" : "are"}. Write ` +
+                `\`${template.name}<${template.parameters.map(() => "…").join(", ")}>(…)\` ` +
+                `with a concrete type in place of each \`…\`.\n\n` +
+                "A gap rather than a rule: tsc infers the type " +
+                `${one ? "argument" : "arguments"} here perfectly well, and reading that ` +
+                "answer back is simply not implemented yet.",
+            );
+            return undefined;
+        }
+
+        // Erased **here**, under the substitution in force at the call site,
+        // which is what makes the result concrete however deep the nesting
+        // goes. Inside `outer<T>`, the `T` in `inner<T>(x)` is whatever this
+        // instantiation of `outer` bound; and inside `grow<T>`, the `Wrap<T>`
+        // in `grow<Wrap<T>>(w)` is a whole struct rather than a type that still
+        // mentions a parameter. See `TypeBinding` for what goes wrong if this
+        // is deferred instead.
+        const args: TypeBinding[] = [];
+        for (const argument of written) {
+            const type = this.#checker.getTypeFromTypeNode(argument);
+            const machine = this.erase(argument, type, bindings);
+            if (machine === undefined) {
+                return undefined;
+            }
+            // Deliberately **not** checked for a value form here. Whether `T`
+            // needs one is a property of the body, not of the type argument:
+            // `identity<T>(x: T)` does, `sizeOf<T>()` does not, and an opaque
+            // handle is a perfectly good argument to the second. Refusing here
+            // would refuse the second for the first's reason. The body's own
+            // checks report it where it actually matters, and the instantiation
+            // note says which call put them there.
+            args.push({type, machine});
+        }
+
+        const key = instantiationKey(template.key, args.map((arg) => arg.machine));
+        const existing = this.#instantiations.get(key);
+        if (existing !== undefined) {
+            return existing;
+        }
+
+        const machines = args.map((arg) => arg.machine);
+        const label = `${template.name}<${machines.map(renderType).join(", ")}>`;
+
+        // `f<T>() { f<Pair<T>>() }` type-checks and never runs out of new type
+        // arguments. The limit is arbitrary the way every such limit is; what
+        // matters is that it names the chain rather than ending the process.
+        const depth = (this.#current?.depth ?? 0) + 1;
+        const trail = [...(this.#current?.trail ?? []), label];
+        if (depth > MAX_INSTANTIATION_DEPTH) {
+            this.error(
+                call,
+                "GF0402",
+                `instantiating \`${label}\` here needs another instantiation, and that ` +
+                `one needs another, ${MAX_INSTANTIATION_DEPTH} deep so far. The last few:` +
+                // Numbered, because the labels repeat: `renderType` names a
+                // struct by its name, so every `Wrap` in a chain of nested ones
+                // prints as `Wrap`. The numbers are what show it is growing.
+                `\n\n${trail
+                    .slice(-5)
+                    .map((step, index) => `    #${trail.length - 4 + index}  ${step}`)
+                    .join("\n")}\n\n` +
+                "Each set of type arguments is compiled separately, so a generic that " +
+                "calls itself with a *larger* type has no end. Recursion is fine as long " +
+                "as the type arguments stop growing — pass on the same ones this copy " +
+                "was given, or stop at a function that is not generic.",
+            );
+            return undefined;
+        }
+
+        const symbol = instantiationSymbol(
+            template.name,
+            this.#relative(template.node.getSourceFile().fileName),
+            key,
+            machines,
+        );
+
+        // Declared under the substitution, so the parameters and the return are
+        // the *concrete* types this copy has. Everything downstream — the
+        // signature, the drop pass, the C classifier — then sees an ordinary
+        // monomorphic function and none of them has to know why.
+        const instanceBindings = bindingsOf(template.parameters, args);
+
+        const signature = this.#signature(template.node, instanceBindings);
+        if (signature === undefined) {
+            return undefined;
+        }
+
+        const sig = this.#mir.sig({
+            params: signature.params.map((param) => ({
+                ty: this.tyOf(param.type, template.node),
+                name: null,
+            })),
+            ret: this.tyOf(signature.returns, template.node),
+            // Never `C`, and never exported: an instantiation has no symbol a
+            // caller outside this build could have agreed on. GENERICS-PLAN §6
+            // is what changes that, and it changes the linkage rather than this.
+            abi: "Internal",
+        });
+        const builder = this.#mir.declareFunction({
+            name: symbol,
+            sig,
+            linkage: "Internal",
+            span: this.span(template.node),
+        });
+        const record: FnRecord = {
+            kind: "defined",
+            id: builder.id,
+            sig,
+            signature,
+            name: template.name,
+            exported: false,
+        };
+        this.#instantiations.set(key, record);
+        this.#pending.push({
+            node: template.node,
+            builder,
+            record,
+            bindings: instanceBindings,
+            key,
+            label,
+            depth,
+            trail,
+            at: call,
+        });
+        return record;
+    }
+
+    /**
+     * Lower every instantiation that has been asked for, and everything they
+     * ask for in turn.
+     *
+     * A `while` rather than a `for`, because {@link Lowerer.#instantiate} may
+     * push onto the list being drained: an instantiated body is where the next
+     * instantiation is discovered. It terminates because the memo means each
+     * distinct set of type arguments is pushed once, and the depth limit means
+     * there are finitely many.
+     *
+     * Breadth-first, and nothing depends on the order — but the depth limit
+     * does depend on knowing that it *is* breadth-first, which is why depth
+     * rides on the item rather than being read off the call stack.
+     */
+    #drainPending(): void {
+        while (this.#pending.length > 0) {
+            const pending = this.#pending.shift()!;
+            const previousNote = this.#instantiatedAt;
+            const previousCurrent = this.#current;
+            this.#instantiatedAt = {
+                message: `\`${pending.label}\` was instantiated here`,
+                location: this.#locationOf(pending.at),
+            };
+            this.#current = {depth: pending.depth, trail: pending.trail};
+            try {
+                this.#lowerInstantiation(pending);
+            } finally {
+                this.#current = previousCurrent;
+                this.#instantiatedAt = previousNote;
+            }
+        }
+    }
+
+    /** The `function` declaration a callee expression names, if it names one. */
+    #calleeDeclaration(expression: ts.Expression): ts.FunctionDeclaration | undefined {
         let symbol = this.#checker.getSymbolAtLocation(expression);
         if (symbol === undefined) {
             return undefined;
@@ -156,11 +447,7 @@ export class Lowerer {
         if ((symbol.flags & ts.SymbolFlags.Alias) !== 0) {
             symbol = this.#checker.getAliasedSymbol(symbol);
         }
-        const declaration = symbol.declarations?.find(ts.isFunctionDeclaration);
-        if (declaration?.name === undefined) {
-            return undefined;
-        }
-        return this.#functions.get(this.#keyOf(declaration, declaration.name.text));
+        return symbol.declarations?.find(ts.isFunctionDeclaration);
     }
 
     /**
@@ -227,9 +514,30 @@ export class Lowerer {
             // Not a class name, so it may be a module namespace. Falling through
             // rather than answering "no" here is what lets `alloc.mi_malloc` be
             // handed to `SDL_SetMemoryFunctions` the way the bare name can.
-            return this.namespaceCallee(expression);
+            if (!this.#isModuleNamespace(expression.expression)) {
+                return undefined;
+            }
+            return this.#plainCallee(expression);
         }
-        return this.resolveCallee(expression);
+        return this.#plainCallee(expression);
+    }
+
+    /**
+     * The record for a **non-generic** function this expression names.
+     *
+     * Separate from {@link Lowerer.resolveCallee} because this one is asked in
+     * *value* position — `f` handed somewhere as a code address — where there
+     * is no call and therefore no type arguments to instantiate with. A generic
+     * has no address until it is instantiated, so it answers `undefined` here
+     * and the caller reports a name it could not resolve. Taking the address of
+     * an *instantiation* is stage 4 of GENERICS-PLAN.
+     */
+    #plainCallee(expression: ts.Expression): FnRecord | undefined {
+        const declaration = this.#calleeDeclaration(expression);
+        if (declaration?.name === undefined) {
+            return undefined;
+        }
+        return this.#functions.get(this.#keyOf(declaration, declaration.name.text));
     }
 
     /**
@@ -249,11 +557,43 @@ export class Lowerer {
      * the paths that know how to find a receiver — which a namespace does not
      * have and never needs.
      */
-    namespaceCallee(access: ts.PropertyAccessExpression): FnRecord | undefined {
+    namespaceCallee(
+        call: ts.CallExpression,
+        access: ts.PropertyAccessExpression,
+        bindings: Substitution,
+    ): FnRecord | "reported" | undefined {
         if (!this.#isModuleNamespace(access.expression)) {
             return undefined;
         }
-        return this.resolveCallee(access);
+        // Through `resolveCallee` rather than a lookup, so that a generic
+        // reached this way instantiates like one reached by a bare name. tsc
+        // resolves `ns.f` to the export's own symbol, so the two spellings
+        // arrive at one declaration and there is nothing per import to
+        // reconcile.
+        return this.resolveCallee(call, bindings);
+    }
+
+    /**
+     * `ns.f` written as a **value** rather than called.
+     *
+     * The call form is {@link Lowerer.namespaceCallee}; this one exists because
+     * an address has no type arguments and so cannot instantiate anything. A
+     * generic answers `undefined` here.
+     */
+    namespaceValue(access: ts.PropertyAccessExpression): FnRecord | undefined {
+        if (!this.#isModuleNamespace(access.expression)) {
+            return undefined;
+        }
+        return this.#plainCallee(access);
+    }
+
+    /** Whether this expression names a generic function. */
+    namesAGeneric(expression: ts.Expression): boolean {
+        const declaration = this.#calleeDeclaration(expression);
+        if (declaration?.name === undefined) {
+            return false;
+        }
+        return this.#templates.has(this.#keyOf(declaration, declaration.name.text));
     }
 
     /**
@@ -317,6 +657,13 @@ export class Lowerer {
         for (const {node, builder} of declared) {
             this.#lowerBody(node, builder);
         }
+
+        // Last, and to a fixed point: an instantiation is discovered by
+        // lowering the body that calls it, so the list this drains is still
+        // being added to while it drains. Nothing above needs to have happened
+        // first except the bodies — a generic called only from another generic
+        // is reached through the worklist like any other.
+        this.#drainPending();
 
         // A `bin` needs `main`: the platform C runtime calls it by that symbol, and
         // without it the failure is an unresolved-external from the linker with no
@@ -1078,21 +1425,31 @@ export class Lowerer {
     }
 
     error(node: ts.Node, code: string, message: string): void {
-        const source = node.getSourceFile();
-        const start = node.getStart(source);
-        const {line, character} = source.getLineAndCharacterOfPosition(start);
         this.#diagnostics.push({
             severity: "error",
             code,
             source: "goblin",
             message,
-            location: {
-                file: source.fileName,
-                line: line + 1,
-                column: character + 1,
-                length: Math.max(1, node.getEnd() - start),
-            },
+            location: this.#locationOf(node),
+            // The instantiation backtrace, when there is one. Every diagnostic
+            // raised while an instantiated body is being lowered points inside
+            // a generic the reader may never have looked at, and the note is
+            // what says which call put it there — the same job C++'s
+            // "required from here" does.
+            ...(this.#instantiatedAt === undefined ? {} : {notes: [this.#instantiatedAt]}),
         });
+    }
+
+    #locationOf(node: ts.Node) {
+        const source = node.getSourceFile();
+        const start = node.getStart(source);
+        const {line, character} = source.getLineAndCharacterOfPosition(start);
+        return {
+            file: source.fileName,
+            line: line + 1,
+            column: character + 1,
+            length: Math.max(1, node.getEnd() - start),
+        };
     }
 
     /**
@@ -1662,14 +2019,36 @@ export class Lowerer {
         // A function with no body is an `extern "C"` import: some other library
         // defines it, and the declaration is the only thing the two sides share.
         if (statement.body === undefined) {
+            // A generic one is a rule rather than a gap. Monomorphisation
+            // compiles a body once per set of type arguments, and there is no
+            // body here to compile — the symbol on the other side was built by
+            // a compiler that has never heard of this call.
+            if (statement.typeParameters && statement.typeParameters.length > 0) {
+                this.error(
+                    statement.typeParameters[0]!,
+                    "GF0403",
+                    `\`${statement.name.text}\` is declared without a body, so it names a ` +
+                    "symbol some other library defines — and it is generic, so there is " +
+                    "no one symbol for it to name. A generic is compiled once for each " +
+                    "set of type arguments, which needs a body to compile. Declare the " +
+                    "concrete signatures you actually call.",
+                );
+                return undefined;
+            }
             this.#declareImport(statement);
             return undefined;
         }
+        // A generic is registered rather than declared. There is no code to
+        // emit for one and no signature to give it: REWRITE-PLAN §11.7 is
+        // answered by monomorphisation (GENERICS-PLAN), so what exists is one
+        // copy per set of type arguments some call asks for, made in
+        // `#instantiate` and lowered from `#drainPending`.
+        //
+        // A generic nothing calls therefore contributes nothing at all, which
+        // is right and is also what C++ and Rust do: an uninstantiated template
+        // has no object code.
         if (statement.typeParameters && statement.typeParameters.length > 0) {
-            // REWRITE-PLAN §11.7 — monomorphisation or nothing — is still open. Until
-            // it is answered this is a gap rather than a rule, which is what GF0001
-            // means.
-            this.unsupported(statement.typeParameters[0]!, "a generic function");
+            this.#declareTemplate(statement);
             return undefined;
         }
 
@@ -1762,6 +2141,29 @@ export class Lowerer {
             exported: isPublic,
         });
         return {node: statement, builder};
+    }
+
+    /**
+     * Record a generic function, so that a call can instantiate it.
+     *
+     * The declaration is not checked here beyond this, and that is not
+     * laziness: tsc checks a generic body **once, at the declaration**, against
+     * the constraints — so what a `T` may do is already settled before this
+     * compiler sees the program, and there is nothing here that could be
+     * checked without knowing what `T` is. Everything that needs a machine type
+     * is checked per instantiation instead, where there is one.
+     */
+    #declareTemplate(node: ts.FunctionDeclaration): void {
+        if (node.name === undefined) {
+            return;
+        }
+        const parameters = typeParameterSymbolsOf(this.#checker, node);
+        if (parameters === undefined) {
+            this.unsupported(node, "a generic whose type parameters tsc could not resolve");
+            return;
+        }
+        const key = this.#keyOf(node, node.name.text);
+        this.#templates.set(key, {node, name: node.name.text, key, parameters});
     }
 
     /**
@@ -2209,6 +2611,39 @@ export class Lowerer {
             NO_BINDINGS,
         );
         lowerer.run(node.body, isEntry, entryArgs ? record.signature.params[0] : undefined);
+    }
+
+    /**
+     * One instantiation's body: the same AST, lowered again under a
+     * substitution.
+     *
+     * Deliberately *not* `#lowerBody` with an argument. That one finds its
+     * record by looking the declaration up, which is exactly what an
+     * instantiation cannot do — there are several of them behind one
+     * declaration, and the whole point is that they differ. It also cannot be
+     * the entry point, cannot take `main`'s `argv` pair, and is never
+     * exported, so the three branches that make `#lowerBody` long are all
+     * answered before they are asked.
+     */
+    #lowerInstantiation(pending: PendingInstantiation): void {
+        if (pending.node.body === undefined) {
+            return;
+        }
+        const scopes = new Scopes();
+        pending.record.signature.params.forEach((param, index) => {
+            scopes.declare(param.name, {
+                local: LocalId(index + 1),
+                type: param.type,
+                ty: this.tyOf(param.type, pending.node),
+            });
+        });
+        new BodyLowerer(
+            this,
+            pending.builder,
+            scopes,
+            pending.record.signature.returns,
+            pending.bindings,
+        ).run(pending.node.body);
     }
 
     /**
