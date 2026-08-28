@@ -788,6 +788,285 @@ describe("generics", () => {
         });
     });
 
+    describe("the identity of an instantiation", () => {
+        test("a dynamic cast finds a generic class's contract", async () => {
+            const result = await run(
+                "generic-trycast",
+                `interface Named { tag(): i32; }
+       class Box<T> implements Named {
+         constructor(private value: T) {}
+         get(): T { return this.value; }
+         tag(): i32 { return 1; }
+       }
+
+       export function main(): i32 {
+         const n: i32 = 4;
+         const p = alloc(Box, n);
+         const found = tryCast<Named>(p);
+         const answer = found === null ? -1 : found.tag();
+         p.free();
+         return answer;
+       }\n`,
+            );
+            expect(result.exitCode).toBe(1);
+            expect(result.leaked).toBe(0);
+        });
+
+        test("and does not find another instantiation, or another class", async () => {
+            // `Box<i32>` and `Box<f64>` are unrelated types with unrelated
+            // descriptors, and this is what says so — the positive test above
+            // would pass just as well if every cast succeeded.
+            const result = await run(
+                "generic-trycast-negative",
+                `interface Named { tag(): i32; }
+       class Box<T> implements Named {
+         constructor(private value: T) {}
+         tag(): i32 { return 1; }
+       }
+       class Other implements Named { tag(): i32 { return 2; } }
+
+       export function main(): i32 {
+         const n: i32 = 4;
+         const p = alloc(Box, n);
+         const asOther = tryCast<Other>(p.erase().reify<Box<i32>>());
+         const wrong: i32 = asOther === null ? 0 : 9;
+         const asWide = tryCast<Box<f64>>(p.erase().reify<Box<i32>>());
+         const alsoWrong: i32 = asWide === null ? 0 : 9;
+         p.free();
+         return wrong + alsoWrong;
+       }\n`,
+            );
+            expect(result.exitCode).toBe(0);
+            expect(result.leaked).toBe(0);
+        });
+
+        test("one generic aggregate declared in two files is one struct", async () => {
+            // The other direction of `layoutKey`: same name, same layout, so
+            // one struct — and a value crosses between the files.
+            const result = await run(
+                "generic-aggregate-two-files",
+                `import { sum } from "./other.ts";
+
+       interface Pair<T> { a: T; b: T; }
+
+       export function main(): i32 {
+         const p: Pair<i32> = { a: 1, b: 2 };
+         return p.a + p.b + sum();
+       }\n`,
+                {
+                    files: {
+                        "other.ts": `interface Pair<T> { a: T; b: T; }
+
+       export function sum(): i32 {
+         const p: Pair<i32> = { a: 3, b: 4 };
+         return p.a + p.b;
+       }\n`,
+                    },
+                },
+            );
+            expect(result.exitCode).toBe(10);
+        });
+
+        test("two generic classes of one name are still refused", async () => {
+            // A class is emitted under its name, and `Box<i32>` from two files
+            // would be one symbol. The rule that has always covered this covers
+            // generics too — DECISIONS §11.8's known restriction.
+            const diagnostic = await expectRejected(
+                "generic-class-two-files",
+                `import { make } from "./other.ts";
+
+       class Box<T> { constructor(public value: T) {} }
+
+       export function main(): i32 {
+         const b = new Box<i32>(3);
+         return b.value + make();
+       }\n`,
+                "GF0002",
+                {
+                    files: {
+                        "other.ts": `class Box<T> { constructor(public value: T) {} }
+
+       export function make(): i32 { const b = new Box<i32>(4); return b.value; }\n`,
+                    },
+                },
+            );
+            expect(diagnostic.message).toContain("already a class called");
+        });
+    });
+
+    describe("over the other type families", () => {
+        test("a linear-algebra type", async () => {
+            const result = await run(
+                "generic-linalg",
+                `import { dvec3 } from "std/linalg";
+
+       function first<T>(xs: T[]): T { return xs[0]; }
+
+       class Box<T> {
+         constructor(private value: T) {}
+         get(): T { return this.value; }
+       }
+
+       export function main(): i32 {
+         const vs: dvec3[] = [new dvec3(1, 2, 3)];
+         const boxed = new Box<dvec3>(first<dvec3>(vs));
+         const v = boxed.get();
+         return cast<i32>(v.x + v.y + v.z);
+       }\n`,
+            );
+            expect(result.exitCode).toBe(6);
+        });
+
+        test("an enum", async () => {
+            const result = await run(
+                "generic-enum",
+                `enum Colour { Red = 1, Green = 2 }
+
+       function echo<T>(x: T): T { return x; }
+
+       export function main(): i32 { return cast<i32>(echo<Colour>(Colour.Green)); }\n`,
+            );
+            expect(result.exitCode).toBe(2);
+        });
+
+        test("a union", async () => {
+            const result = await run(
+                "generic-union",
+                `interface Word extends Union { whole: u32; half: u16; }
+
+       function echo<T>(x: T): T { return x; }
+
+       export function main(): i32 {
+         const w = zeroed<Word>();
+         return cast<i32>(echo<Word>(w).half);
+       }\n`,
+            );
+            expect(result.exitCode).toBe(0);
+        });
+
+        test("a fixed array, and a `Pointer<T>` parameter", async () => {
+            const result = await run(
+                "generic-fixed-and-pointer",
+                `function firstOf<T>(a: FixedArray<T, 4>): T { return a[0]; }
+       function sizeVia<T>(p: Pointer<T>): usize { return sizeOf<T>(); }
+
+       export function main(): i32 {
+         const a = fixedArray<i32, 4>(4, 7);
+         const p = alloc<i32>();
+         const n = sizeVia<i32>(p);
+         p.free();
+         return firstOf<i32>(a) + cast<i32>(n);
+       }\n`,
+            );
+            expect(result.exitCode).toBe(11);
+            expect(result.leaked).toBe(0);
+        });
+
+        test("returning a `T[]`", async () => {
+            const result = await run(
+                "generic-returns-array",
+                `function pairOf<T>(a: T, b: T): T[] { return [a, b]; }
+
+       export function main(): i32 {
+         const n: i32 = 5;
+         const xs = pairOf<i32>(n, n);
+         const words = pairOf<string>("a", "b");
+         console.log(words[1]);
+         return xs[0] + xs[1];
+       }\n`,
+            );
+            expect(result.stdout).toBe("b\n");
+            expect(result.exitCode).toBe(10);
+            expect(result.leaked).toBe(0);
+        });
+
+        test("`zeroed`, `sizeOf` and `alignOf` inside a generic", async () => {
+            const result = await run(
+                "generic-intrinsics",
+                `function blank<T>(): usize {
+         const v = zeroed<T>();
+         return sizeOf<T>() + alignOf<T>();
+       }
+
+       export function main(): i32 { return cast<i32>(blank<i32>()); }\n`,
+            );
+            expect(result.exitCode).toBe(8);
+        });
+
+        test("a `LocalFn` parameter", async () => {
+            const result = await run(
+                "generic-localfn",
+                `function apply<T>(f: LocalFn<(x: T) => T>, v: T): T { return f(v); }
+
+       export function main(): i32 {
+         const n: i32 = 3;
+         return apply<i32>((x) => x * 2, n);
+       }\n`,
+            );
+            expect(result.exitCode).toBe(6);
+        });
+
+        test("the ownership rules still apply inside one", async () => {
+            // `move` out of a by-value parameter is refused in a generic for
+            // exactly the reason it is anywhere: the caller releases it when the
+            // call ends. Being generic neither excuses nor causes it.
+            const diagnostic = await expectRejected(
+                "generic-move-refused",
+                `function take<T>(x: T): T { const held = move(x); return held; }
+
+       export function main(): i32 {
+         console.log(take<string>("moved"));
+         return 0;
+       }\n`,
+                "GF0236",
+            );
+            expect(diagnostic.message).toContain("by-value parameter");
+        });
+    });
+
+    describe("generic classes, harder shapes", () => {
+        test("with a plain base class", async () => {
+            const result = await run(
+                "generic-class-base",
+                `class Base { tag(): i32 { return 1; } }
+       class Box<T> extends Base {
+         constructor(private value: T) { super(); }
+         get(): T { return this.value; }
+       }
+
+       export function main(): i32 {
+         const b = new Box<i32>(6);
+         return b.get() + b.tag();
+       }\n`,
+            );
+            expect(result.exitCode).toBe(7);
+        });
+
+        test("a destructor runs for the instantiation that has one", async () => {
+            const result = await run(
+                "generic-class-drop",
+                `class Holder<T> {
+         constructor(private value: T) {}
+         get(): T { return this.value; }
+       }
+
+       export function main(): i32 {
+         const owning = new Holder<string>("one");
+         const plain = new Holder<i32>(2);
+         const heap = alloc(Holder, "released");
+         console.log(owning.get());
+         console.log(heap.get());
+         heap.free();
+         return plain.get();
+       }\n`,
+            );
+            expect(result.stdout).toBe("one\nreleased\n");
+            expect(result.exitCode).toBe(2);
+            // Three instantiations, two of them owning a buffer.
+            expect(result.leaked).toBe(0);
+        });
+    });
+
     describe("an instantiation as a value", () => {
         test("`identity<i32>` is a code address", async () => {
             const result = await run(

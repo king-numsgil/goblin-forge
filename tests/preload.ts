@@ -25,8 +25,33 @@
  * doing its job.
  */
 
+import { setDefaultTimeout } from "bun:test";
+
 import { buildRuntime } from "@goblin-forge/runtime/build";
 
 import { HARNESS_OPT_LEVEL } from "./harness.ts";
+
+/**
+ * And raise the per-test budget, for the same reason one level up.
+ *
+ * Every test here compiles a real program with clang and links a real binary.
+ * Five seconds is enough when a file is run on its own and not always enough in
+ * a full run, where forty-odd files contend for one disk and one compiler: a
+ * test that takes 2.3 s alone has been seen to take 6.4 s and be failed for it,
+ * with a message — "this test timed out after 5000ms" — that says nothing about
+ * the program under test.
+ *
+ * A timeout that fires on contention is worse than a slow suite, because the
+ * failure it invents is indistinguishable from a real one. The harness's most
+ * valuable check is the *missing* live-allocation report, and what that check
+ * says is "the program did not finish" — so a spurious version of exactly that
+ * sentence teaches a reader to shrug at the one thing they should not.
+ *
+ * Here rather than in `bunfig.toml`, whose `[test]` table takes `preload` and
+ * ignores `timeout` (Bun 1.4.0 — verified, not assumed), and here rather than
+ * on the `bun test` command line so that running it bare gets the same budget
+ * as running it through `package.json`.
+ */
+setDefaultTimeout(30_000);
 
 buildRuntime(undefined, HARNESS_OPT_LEVEL);
