@@ -12,6 +12,7 @@ import {
     contractOf,
     ErasureError,
     isIntegerType,
+    layoutKey,
     type MachineType,
     referentOf,
     renderType,
@@ -312,7 +313,7 @@ export abstract class BoundaryLowerer extends QuatLowerer {
 
         let rvalue: Rvalue;
         if (contract.kind === "interface") {
-            const resolved = this.outer.interfaceId(contract.name);
+            const resolved = this.outer.interfaceId(layoutKey(contract));
             if (resolved === undefined) {
                 return undefined;
             }

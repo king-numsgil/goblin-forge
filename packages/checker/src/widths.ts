@@ -23,7 +23,7 @@
  * `const x: i32 = 42` read naturally, and is exactly the hole this pass closes.
  */
 
-import type { MachineType, ScalarName } from "./types.ts";
+import { layoutKey, type MachineType, type ScalarName } from "./types.ts";
 
 /** What a fixed width is, as data. */
 export interface WidthInfo {
@@ -156,11 +156,13 @@ export function sameType(a: MachineType, b: MachineType): boolean {
             return a.length === other.length && sameType(a.element, other.element);
         }
         case "struct": {
-            // Nominal, by the name erasure gave it. Two shapes with the same fields
-            // in a different order are different layouts, so structural comparison
-            // would be wrong even where it looks right.
+            // By the whole identity — name *and* layout — rather than by the
+            // name alone. Two files may each declare an `interface Pair` with
+            // different field types, and comparing names said they were one
+            // type. See {@link layoutKey}, which is also what the lowerer
+            // interns by, so that the two answers cannot drift apart.
             const other = b as typeof a;
-            return a.name === other.name;
+            return layoutKey(a) === layoutKey(other);
         }
         // Nominal too, and more sharply so: two classes with identical fields have
         // different vtables and different identities, and one is not the other.
@@ -171,10 +173,19 @@ export function sameType(a: MachineType, b: MachineType): boolean {
         // therefore never **sliced**. The program keeps the derived vtable and
         // dispatches to overrides a by-value `Animal` cannot have. No crash, just
         // the wrong answer.
-        case "class":
-        case "interface": {
+        //
+        // By `name`, and it is sound to be: `collectClasses` refuses two classes
+        // of the same name outright, so a class's name *is* unique across a
+        // build. A contract carries a `key` instead because nothing refuses two
+        // same-named interfaces — they are ordinary TypeScript and they are
+        // different types.
+        case "class": {
             const other = b as typeof a;
             return a.name === other.name;
+        }
+        case "interface": {
+            const other = b as typeof a;
+            return layoutKey(a) === layoutKey(other);
         }
         // Structural, and it has to be: a function pointer's identity is its
         // signature, because that is the only thing a caller and a definition on

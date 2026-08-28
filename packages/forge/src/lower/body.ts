@@ -34,6 +34,7 @@ import {
     isIntegerType,
     isMachineComparable,
     isPointerType,
+    layoutKey,
     literalDigits,
     type MachineType,
     type Operator,
@@ -2049,7 +2050,7 @@ export class BodyLowerer extends BoundaryLowerer {
             return undefined;
         }
 
-        const interfaceId = this.outer.interfaceId(contract.name);
+        const interfaceId = this.outer.interfaceId(layoutKey(contract));
         const classId = this.outer.classId(value.type.name);
         if (interfaceId === undefined || classId === undefined) {
             return undefined;

@@ -1375,8 +1375,12 @@ function isBrand(property: ts.Symbol): boolean {
  * A name for a struct type.
  *
  * An `interface Point` or a `type Point = { … }` gives its own name. An inline
- * object type has none, so one is built from its shape — which is also what
- * makes two identical anonymous shapes the same struct rather than two.
+ * object type has none, so one is built from its property names.
+ *
+ * **A name is not an identity.** Two files may each declare an `interface
+ * Pair`, both are legal TypeScript, and tsc says they are different types.
+ * What tells them apart is {@link layoutKey}, and everything that interns or
+ * compares a struct has to use that instead.
  */
 function structNameOf(checker: ts.TypeChecker, type: ts.Type): string {
     const symbol = type.aliasSymbol ?? type.getSymbol();
@@ -1388,6 +1392,105 @@ function structNameOf(checker: ts.TypeChecker, type: ts.Type): string {
         .getPropertiesOfType(type)
         .map((property) => property.name)
         .join(",")}}`;
+}
+
+/**
+ * What makes an aggregate *itself*: **its name and its layout, together.**
+ *
+ * A name alone is not an identity, and treating it as one was a silent
+ * miscompile. Two files may each declare an `interface Pair`, both are legal
+ * TypeScript, and tsc says they are different types — so interning both under
+ * `Pair` made the second find the first's `TyId` and take its layout. Nothing
+ * was ill-formed anywhere, so nothing was reported: a `Pair` of `u32` compared
+ * as `i32`, and `-1 < 0` came back false. The same fault reached clang as
+ * `fptosi.sat.i32.i8` for a `Pair<u8>` and a `Pair<f64>`, which the compiler
+ * then reported as `GF9003` — itself being broken, about a program tsc had
+ * accepted.
+ *
+ * A layout alone is not an identity either, and that is the half it is easy to
+ * drop. It would make `interface Point {x: i32; y: i32}` and `interface Vec2
+ * {x: i32; y: i32}` one struct — defensible, since tsc is structural and would
+ * let you pass either for the other, but it would also mean the generated C
+ * header declares one of the two names and not the other. So the name stays in.
+ *
+ * The two together give the rule that costs nothing and surprises nobody:
+ *
+ * | Two declarations | Same struct? |
+ * |---|---|
+ * | `Point {x: i32; y: i32}` in each of two files | yes — one name, one layout |
+ * | `Pair {a: i32}` and `Pair {a: u32}` | no — the layouts differ |
+ * | `Point {x: i32}` and `Vec2 {x: i32}` | no — the names differ |
+ *
+ * **Cycles close on a back reference.** `interface Node { next: Pointer<Node> }`
+ * has no finite spelling as a tree, so a struct already being keyed is written
+ * as `↑n` — its distance up the stack — which is de Bruijn's trick and makes
+ * the string finite *and* canonical. Two structurally identical recursive
+ * `Node`s in two files therefore key alike, which is the right answer.
+ *
+ * Not a field on {@link MachineType}, deliberately: a recursive struct's fields
+ * are not filled in yet at the moment its object is created — that is what
+ * closes the cycle in {@link Erasure} — so there is no point at which such a
+ * key could be computed and stored. A function over the finished type has no
+ * such moment to miss.
+ */
+export function layoutKey(type: MachineType): string {
+    return keyOf(type, []);
+}
+
+function keyOf(type: MachineType, open: MachineType[]): string {
+    switch (type.kind) {
+        case "void":
+        case "bool":
+        case "string":
+        case "cstring":
+            return type.kind;
+        case "scalar":
+            return type.name;
+        case "array":
+            return `[${keyOf(type.element, open)}]`;
+        case "fixedArray":
+            return `[${keyOf(type.element, open)};${type.length}]`;
+        case "pointer":
+            return `*${keyOf(type.pointee, open)}`;
+        case "reference":
+            return `&${keyOf(type.referent, open)}`;
+        case "fnptr":
+        case "localfn":
+            return `${type.kind}(${type.params
+                .map((param) => keyOf(param, open))
+                .join(",")})->${keyOf(type.returns, open)}`;
+        // Nominal, and only nominal: a class has an identity beyond its shape,
+        // and `collectClasses` refuses two of the same name, so the name is
+        // already unique across a build. An opaque handle has no layout here at
+        // all, which is the whole of what makes it opaque.
+        case "class":
+        case "opaque":
+            return `${type.kind} ${type.name}`;
+        case "struct":
+        case "interface": {
+            const at = open.indexOf(type);
+            if (at >= 0) {
+                return `↑${open.length - at}`;
+            }
+            open.push(type);
+            try {
+                const members =
+                    type.kind === "struct"
+                        ? type.fields.map((f) => `${f.name}:${keyOf(f.type, open)}`)
+                        : type.methods.map(
+                            (m) =>
+                                `${m.name}(${m.params
+                                    .map((param) => keyOf(param, open))
+                                    .join(",")})->${keyOf(m.returns, open)}`,
+                        );
+                const what =
+                    type.kind === "interface" ? "contract" : type.union === true ? "union" : "struct";
+                return `${what} ${type.name}{${members.join(",")}}`;
+            } finally {
+                open.pop();
+            }
+        }
+    }
 }
 
 /** A human-readable spelling, for diagnostics. */

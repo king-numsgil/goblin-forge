@@ -28,6 +28,7 @@ import {
     ENUM_UNDERLYING,
     erase,
     ErasureError,
+    layoutKey,
     type MachineType,
     rangeOf,
     renderType,
@@ -828,23 +829,25 @@ export class Lowerer {
         return id;
     }
 
-    interfaceId(name: string): InterfaceId | undefined {
-        return this.#interfaces.get(name);
+    /** By the contract's {@link layoutKey}, never its name — see {@link Lowerer.#interfaceTy}. */
+    interfaceId(key: string): InterfaceId | undefined {
+        return this.#interfaces.get(key);
     }
 
     classId(name: string): ClassId | undefined {
         return this.#classIds.get(name);
     }
 
-    interfaceInfo(name: string): Extract<MachineType, { kind: "interface" }> | undefined {
-        return this.#interfaceInfo.get(name);
+    interfaceInfo(key: string): Extract<MachineType, { kind: "interface" }> | undefined {
+        return this.#interfaceInfo.get(key);
     }
 
     implement(className: string, contract: Extract<MachineType, { kind: "interface" }>, at: ts.Node): boolean {
         // Idempotent, and it has to be: the propagation below re-enters this for
         // every derived class, and a three-deep hierarchy would otherwise walk
         // itself forever.
-        const key = `${className}\0${contract.name}`;
+        const contractKey = layoutKey(contract);
+        const key = `${className}\0${contractKey}`;
         if (this.#implemented.has(key)) {
             return true;
         }
@@ -852,7 +855,7 @@ export class Lowerer {
 
         const classId = this.#classIds.get(className);
         const info = this.#classes.get(className);
-        const interfaceId = this.#interfaces.get(contract.name);
+        const interfaceId = this.#interfaces.get(contractKey);
         if (classId === undefined || info === undefined || interfaceId === undefined) {
             this.unsupported(at, `converting \`${className}\` to \`${contract.name}\``);
             return false;
@@ -2149,14 +2152,33 @@ export class Lowerer {
     }
 
     /**
-     * Intern a struct type by name.
+     * Intern a struct type by its **identity**.
      *
-     * By name rather than by shape: erasure already decided what the name is, and
-     * two types with the same fields in a different order are different layouts.
-     * Interning by shape would silently merge them.
+     * By identity rather than by shape: erasure already decided what the type
+     * is, and two types with the same fields in a different order are different
+     * layouts. Interning by shape would silently merge them.
+     *
+     * And by {@link layoutKey} rather than by `name`, which is the fix for the
+     * merge that was actually happening. A name is not unique — two files may
+     * each declare an `interface Pair`, both are legal, and tsc says they are
+     * different types — so keying on one made the second `Pair` find the first's
+     * `TyId` and take its layout. Nothing was ill-formed, so nothing was
+     * reported: a `Pair` of `u32` compared as `i32`, and `-1 < 0` came back
+     * false.
+     *
+     * `sameType` compares the same key, so what the frontend calls one type and
+     * what the module gives one `TyId` cannot drift apart. That matters in both
+     * directions: keying more finely than `sameType` compares would refuse
+     * `Point` → `Point` between two files that declare it identically, which is
+     * an ordinary program and was the first attempt at this fix.
+     *
+     * The MIR still carries the readable `name`, because that is what the
+     * generated C header declares and an exported struct's name is the contract
+     * with whoever includes it.
      */
     #structTy(type: Extract<MachineType, { kind: "struct" }>, at: ts.Node): TyId {
-        const existing = this.#structs.get(type.name);
+        const key = layoutKey(type);
+        const existing = this.#structs.get(key);
         if (existing !== undefined) {
             return existing;
         }
@@ -2196,13 +2218,13 @@ export class Lowerer {
         // makes `interface Node { next: Pointer<Node> | null }` terminate:
         // interning that field comes back through here for `Node`, and finds it.
         //
-        // The name is registered at the same moment for the same reason — a
-        // struct is interned by name (see above), and the recursive occurrence
-        // has to find the id the enclosing one reserved rather than reserve a
-        // second struct with the same name and a different layout.
+        // The identity is registered at the same moment for the same reason — a
+        // struct is interned by it (see above), and the recursive occurrence has
+        // to find the id the enclosing one reserved rather than reserve a second
+        // struct with the same identity and a different layout.
         const id = this.#mir.declareStruct({name: type.name, union: type.union === true});
         const ty = this.#mir.ty({kind: "Struct", value: id});
-        this.#structs.set(type.name, ty);
+        this.#structs.set(key, ty);
         this.#mir.defineStruct(id, {
             fields: type.fields.map((field) => ({
                 name: field.name,
@@ -2225,16 +2247,21 @@ export class Lowerer {
         type: Extract<MachineType, { kind: "interface" }>,
         at: ts.Node,
     ): TyId {
-        const existing = this.#interfaceTys.get(type.name);
+        // Keyed by identity rather than by name, for the reason spelled out on
+        // {@link Lowerer.#structTy}: two files may each declare an `interface
+        // Speaker` with different methods, and those are two contracts with two
+        // itables and two slot orders. The MIR keeps the readable name.
+        const key = layoutKey(type);
+        const existing = this.#interfaceTys.get(key);
         if (existing !== undefined) {
             return existing;
         }
 
         const id = this.#mir.declareInterface({name: type.name, span: this.span(at)});
-        this.#interfaces.set(type.name, id);
-        this.#interfaceInfo.set(type.name, type);
+        this.#interfaces.set(key, id);
+        this.#interfaceInfo.set(key, type);
         const ty = this.#mir.ty({kind: "Interface", value: id});
-        this.#interfaceTys.set(type.name, ty);
+        this.#interfaceTys.set(key, ty);
 
         const receiver = this.#mir.ty({
             kind: "Pointer",

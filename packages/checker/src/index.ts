@@ -120,6 +120,7 @@ export {
     isCStringType,
     isPointerType,
     isReferenceType,
+    layoutKey,
     linalgStruct,
     linalgTypeOf,
     isSignedInteger,

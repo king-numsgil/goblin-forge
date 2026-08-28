@@ -89,9 +89,18 @@ pub fn emit(
                         implemented.interface.0,
                     ))
                 })?;
+            // The `InterfaceId` is in the symbol, and it is what makes the
+            // symbol unique. A class's name is unique across a build because
+            // the frontend refuses two of them, so `__gf_vt$` and `__gf_desc$`
+            // can be spelled from a name alone — an *interface* name is not,
+            // because two files may each declare an `interface Speaker` and
+            // both are ordinary TypeScript. One class convertible to both then
+            // wants two itabs, and spelling them from the name alone gives them
+            // one symbol and an LLVM redefinition. The name stays in the symbol
+            // because it is the half a human reads.
             itabs.insert(
                 implemented.interface.0,
-                format!("__gf_itab${interface}${name}"),
+                format!("__gf_itab${interface}.{}${name}", implemented.interface.0),
             );
         }
         symbols.push(ClassSymbols {

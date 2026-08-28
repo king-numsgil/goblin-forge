@@ -538,4 +538,147 @@ describe("a type that points at itself", () => {
         expect(result.exitCode).toBe(12);
         expect(result.leaked).toBe(0);
     });
+
+    /**
+     * A struct is its **name and its layout**, and neither half alone.
+     *
+     * Interning by the name alone was a silent miscompile: the second `Pair`
+     * found the first's `TyId` and took its layout, with nothing ill-formed
+     * anywhere and so nothing reported. Interning by the layout alone would
+     * merge a `Point` with a `Vec2` that happens to have the same fields, and
+     * the generated header would then declare one of the two names.
+     *
+     * The last test here is the one that keeps the fix from over-shooting: two
+     * files declaring the *same* struct still declare one struct, and a value
+     * passes between them. See `layoutKey` in `packages/checker/src/types.ts`.
+     */
+    describe("a struct is its name and its layout", () => {
+        test("across two files, with different widths", async () => {
+            const result = await run(
+                "struct-same-name-two-files",
+                `import { unsigned } from "./other.ts";
+
+       interface Pair { a: i32; b: i32; }
+
+       export function main(): i32 {
+         const signed: Pair = { a: -1, b: 0 };
+         console.log(signed.a < signed.b ? "signed: less" : "signed: not less");
+         console.log(unsigned());
+         return 0;
+       }\n`,
+                {
+                    files: {
+                        "other.ts": `interface Pair { a: u32; b: u32; }
+
+       export function unsigned(): string {
+         const p: Pair = { a: 4294967295, b: 0 };
+         return p.a < p.b ? "unsigned: less" : "unsigned: not less";
+       }\n`,
+                    },
+                },
+            );
+            // `-1 < 0` is true; `4294967295 < 0` is false. The two fields hold
+            // the same 32 bits, so only the type decides — which makes this the
+            // sharpest available check that the layouts did not merge.
+            expect(result.stdout).toBe("signed: less\nunsigned: not less\n");
+        });
+
+        test("across two files, with the same field names in the other order", async () => {
+            // Field *order* is layout, which the interning comment has always
+            // said — so two same-named shapes that put an `f64` and an `i32` in
+            // opposite slots are two structs. Merging them puts a float in an
+            // integer's slot, which is loud rather than wrong; the point is that
+            // the frontend never lets it get that far.
+            const result = await run(
+                "struct-same-name-reordered",
+                `import { fromOther } from "./other.ts";
+
+       interface Boxed { a: i32; b: f64; }
+
+       export function main(): i32 {
+         const here: Boxed = { a: 1, b: 2.5 };
+         console.log(\`here \${here.a} \${here.b}\`);
+         console.log(fromOther());
+         return 0;
+       }\n`,
+                {
+                    files: {
+                        "other.ts": `interface Boxed { a: f64; b: i32; }
+
+       export function fromOther(): string {
+         const there: Boxed = { a: 3.5, b: 4 };
+         return \`there \${there.a} \${there.b}\`;
+       }\n`,
+                    },
+                },
+            );
+            expect(result.stdout).toBe("here 1 2.5\nthere 3.5 4\n");
+        });
+
+        test("one class, two same-named contracts, two itables", async () => {
+            // The interface half of the rule, and the shape that makes it
+            // observable: the *same* class converted to two different contracts
+            // that happen to share a name. The itab is built per (class,
+            // contract), so keying that on the name gives the second conversion
+            // the first one's slots — and `shout` sorts before `speak`, so the
+            // two disagree about which slot `speak` is in.
+            const result = await run(
+                "interface-same-name-two-contracts",
+                `import { Cat, loudly } from "./other.ts";
+
+       interface Speaker { speak(): i32; }
+
+       export function main(): i32 {
+         const cat = new Cat();
+         const quietly: Reference<Speaker> = cat;
+         return loudly() * 10 + quietly.speak();
+       }\n`,
+                {
+                    files: {
+                        "other.ts": `export interface Speaker { shout(): i32; speak(): i32; }
+
+       export class Cat implements Speaker {
+         shout(): i32 { return 9; }
+         speak(): i32 { return 2; }
+       }
+
+       export function loudly(): i32 {
+         const cat = new Cat();
+         const both: Reference<Speaker> = cat;
+         return both.shout();
+       }\n`,
+                    },
+                },
+            );
+            expect(result.exitCode).toBe(92);
+        });
+
+        test("two files declaring the *same* struct declare one struct", async () => {
+            // The other direction, and the one the first attempt at this fix
+            // got wrong: keying a struct by where it was declared made these
+            // two different types, and passing one to the other came back as
+            // "this is a `Point`, which does not convert to `Point`".
+            const result = await run(
+                "struct-same-name-identical",
+                `import { lengthSquared } from "./other.ts";
+
+       interface Point { x: i32; y: i32; }
+
+       export function main(): i32 {
+         const p: Point = { x: 3, y: 4 };
+         return lengthSquared(p);
+       }\n`,
+                {
+                    files: {
+                        "other.ts": `interface Point { x: i32; y: i32; }
+
+       export function lengthSquared(p: Point): i32 {
+         return p.x * p.x + p.y * p.y;
+       }\n`,
+                    },
+                },
+            );
+            expect(result.exitCode).toBe(25);
+        });
+    });
 });

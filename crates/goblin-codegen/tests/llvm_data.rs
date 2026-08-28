@@ -162,7 +162,7 @@ fn a_descriptor_names_its_base_its_interfaces_and_their_itabs() {
         format!(
             "@__gf_desc$Dog = internal constant <{{ ptr, ptr, i64, i64, ptr }}> \
              <{{ ptr @__gf_name$Dog, ptr @__gf_desc$Base, i64 1, i64 {}, \
-             ptr getelementptr (i8, ptr @__gf_itab$Animal$Dog, i64 8) }}>, align 8",
+             ptr getelementptr (i8, ptr @__gf_itab$Animal.0$Dog, i64 8) }}>, align 8",
             interface_key("Animal")
         )
     );
@@ -187,8 +187,8 @@ fn a_descriptor_names_its_base_its_interfaces_and_their_itabs() {
     // class's final overrider for the interface's methods, gathered at compile
     // time: `speak` and not `drop`.
     assert_eq!(
-        line_for(&emitted.text, "__gf_itab$Animal$Dog"),
-        "@__gf_itab$Animal$Dog = internal constant <{ ptr, ptr }> \
+        line_for(&emitted.text, "__gf_itab$Animal.0$Dog"),
+        "@__gf_itab$Animal.0$Dog = internal constant <{ ptr, ptr }> \
          <{ ptr @__gf_desc$Dog, ptr @Dog_speak }>, align 8"
     );
 }
