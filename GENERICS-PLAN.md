@@ -152,25 +152,24 @@ reads its target width off the call's resolved type, so under substitution it
 gets a concrete width for free. Numeric generics are reachable; they just are
 not silent.
 
-**`Reference<T>` over a type parameter does not work at all.** The prelude
-declares it as a conditional type, for a good reason recorded in
-`global.d.ts`:
+**`Reference<T>` over a type parameter did not work at all** — *fixed, and it
+is DECISIONS §24.* The prelude declared it as a conditional type; tsc will not
+resolve a conditional over an unresolved `T`, so it kept both branches and
+resolved member access against their union, which has no members. It is a plain
+intersection now and `ask<T extends Speaker>(x: Reference<T>)` compiles.
 
-```ts
-type Reference<T> = [T] extends [GfPrimitive] ? ReferenceCore<T> : T & ReferenceCore<T>;
-```
+That was a prelude problem rather than a lowering one, but it was not the whole
+of it: `classNameAt` and `contractAt` both asked tsc directly and got tsc's
+un-substituted answer, so a method call on a `Reference<T>` lowered to nothing
+or dispatched against an itable that was never built. Both returned **zero**
+rather than failing. §24 has the detail; the lesson for anything else in this
+plan is that erasure is not the only thing that has to know about the
+substitution, and the ones that do not fail quietly.
 
-Over an unresolved `T`, tsc defers the conditional and resolves member access
-against the union of both branches — `ReferenceCore<T> | (Speaker &
-ReferenceCore<T>)` — which has no `speak`. Adding `& object` to the constraint
-does not help. `p.deref()` returns `Reference<T>` and hits the same wall from
-the other side (`TS2322`).
-
-This is a **prelude problem, not a lowering problem**, and it is the single
-thing standing between this plan and constraint-bounded generics that call
-methods. It gets its own stage and its own spike (§6, stage 5), because the
-answer may well be a change to how `Reference` and `Pointer` are declared, and
-that is a decision with blast radius well beyond generics.
+**`Pointer<T>` over a type parameter still does not work**, and that conditional
+is load-bearing — it is what stops `Pointer<i32>` being assignable to `i32` and
+pointer arithmetic type-checking. So it needs a different answer, not the same
+one. `p.deref()` inside a generic remains a `TS2322`.
 
 ---
 
@@ -474,10 +473,13 @@ written instantiation is not that.
 
 *Checkpoint:* a callback table built from instantiations of one generic.
 
-### Stage 5 — generic classes, and constraints that carry methods
+### Stage 5 — generic classes
 
-The largest stage, and the one to re-plan when it is reached rather than now.
-It needs at least:
+**Constraints that carry methods came out of this stage** and landed early, as
+DECISIONS §24: `ask<T extends Speaker>(x: Reference<T>): i32 { return
+x.speak(); }` compiles, and the call is *direct* rather than dispatched, which
+is the claim monomorphisation makes. What is left here is generic classes
+alone, and it needs at least:
 
 - `collectClasses` to grow an instantiation phase. It currently runs to
   completion *before* functions are declared, keyed by bare name, and a generic
@@ -488,14 +490,6 @@ It needs at least:
   are no longer bare.
 - `instanceof` and the type descriptors to treat `Box<i32>` and `Box<f64>` as
   unrelated types, which they are.
-- **A spike on the prelude first** (§2): `Reference<T>` and `Pointer<T>` are
-  conditional types that do not survive a type parameter, so a method call on a
-  constrained `T` cannot be *written* today, never mind lowered. Candidates:
-  an overloaded declaration, a non-conditional form guarded differently, or
-  accepting that a constrained generic takes its receiver some other way. The
-  distribution hazard the current spelling exists to avoid is documented at
-  length in `global.d.ts` and must not be reintroduced — that comment ends
-  "Verified against real tsc, not assumed", and so should its replacement.
 
 ### Stage 6 — crossing a Goblin boundary
 

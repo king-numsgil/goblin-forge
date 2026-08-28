@@ -864,10 +864,10 @@ function eraseWrapper(
             }
         }
         throw new ErasureError(
-            "a `Reference<T>` cannot be written as a type yet, except for an " +
-            "interface with methods. The compiler makes references — `this` inside " +
-            "a method is one — but a parameter or a binding cannot be declared as " +
-            "one. Pass the value itself for now; it is copied.",
+            "this `Reference<T>` has no `T` to read through. A reference is an " +
+            "address, so what it points at needs a layout and a size — `void` has " +
+            "neither, and a type parameter has neither until some call says what " +
+            "it is.",
             "GF0001",
         );
     }
@@ -910,19 +910,43 @@ function eraseWrapper(
 }
 
 /**
- * What a `Reference<T>` erases to, for the four `T` that have an answer, or
- * `null` for the ones that do not.
+ * What a `Reference<T>` erases to, or `null` when `T` has no answer.
  *
  * Its own function so that {@link eraseWrapper} can put the whole of it behind
  * one indirection: everything here is read through an address, and a type that
  * reaches itself this way is `struct Node { struct Node *next; }` rather than a
  * value containing itself.
+ *
+ * **One machine word, except for a contract.** A reference is an address and
+ * nothing else — the same register a `Pointer<T>` occupies, and the same one C++
+ * gives a `T&`, which both the Itanium and the MSVC ABI specify as identical to
+ * `T*`. What it carries that a pointer does not is entirely a frontend matter:
+ * it cannot be null, it cannot be reseated, and a value converts to one
+ * implicitly, which is what lets a stack local be passed by address in a
+ * language with no `&`. A contract is the exception and is two words, because
+ * `(itab, data)` is the only way to hold one at all.
  */
 function eraseReferent(
     checker: ts.TypeChecker,
     referent: ts.Type,
     state: Erasure,
 ): MachineType | null {
+    // A `Reference<T>` inside a generic. What `T` is decides every question
+    // below — contract or class or shape — so it is answered first, from the
+    // machine type this instantiation already erased at its call site.
+    //
+    // Resolving it here rather than letting `contractOf` see the *constraint*
+    // is what makes the dispatch static. `ask<T extends Speaker>` instantiated
+    // at `Dog` calls `Dog.speak` directly; reading the constraint instead would
+    // build a contract named `T` and dispatch through an itable, which is a
+    // working program and the wrong one — the whole claim of monomorphisation
+    // is that the copy knows what it was instantiated with.
+    const parameter = typeParameterSymbolOf(referent);
+    if (parameter !== undefined) {
+        const bound = state.bindings.get(parameter);
+        return bound === undefined ? null : referenceTo(bound.machine);
+    }
+
     // Before `contractOf`, which would look at `Array<T>`'s declaration and
     // see an interface holding both methods and a data member — the shape
     // that is rejected as ambiguous. `Array` is neither a shape nor a
@@ -945,6 +969,25 @@ function eraseReferent(
     // (DECISIONS §22), so it answers before the question is asked.
     if (linalgTypeOf(referent) !== null) {
         return {kind: "reference", referent: erase(checker, referent, state)};
+    }
+
+    // Before `contractOf` for the third time and the third reason: `String`
+    // declares `substring` and friends as method signatures *and* `length` as a
+    // data member, so a `Reference<string>` came back as "declares both methods
+    // and the data member `length`" — a true sentence about `lib.es5.d.ts` and
+    // no help at all to whoever wrote the reference.
+    //
+    // A gap rather than a rule, and the difference is that copying a `string`
+    // is not free: it clones the buffer, so borrowing one is worth doing. What
+    // is missing is reading the length or the bytes back through the reference.
+    if (referent.getFlags() & ts.TypeFlags.StringLike) {
+        throw new ErasureError(
+            "a `Reference<string>` is not lowered yet. Copying a `string` clones its " +
+            "buffer, so borrowing one is worth doing and this is a gap rather than a " +
+            "rule — but nothing reads a `string` back through a reference yet. Pass " +
+            "the `string`; the clone is one allocation.",
+            "GF0001",
+        );
     }
 
     const contract = contractOf(checker, referent, state);
@@ -971,7 +1014,61 @@ function eraseReferent(
     if (className !== null) {
         return {kind: "reference", referent: {kind: "class", name: className}};
     }
-    return null;
+
+    // Everything else, which in practice means a struct or a fixed array.
+    // `Reference<Point>` is C++'s `const Point&`, and this language's only way
+    // to say "do not copy this" about a stack value — there is no way to take
+    // the address of one, `alloc` is where a `Pointer<T>` comes from, and
+    // heap-allocating to avoid a copy is not a trade anybody should be asked
+    // to make.
+    //
+    // Last, and after every named case above, because those decide what a type
+    // *is* — a contract, an array, a class — where this only asks what it
+    // looks like.
+    const value = erase(checker, referent, state);
+
+    // **A reference is only worth having to something a copy costs
+    // something.** These all fit in a register and are copied by moving it, so
+    // a reference to one is an extra indirection bought with an extra load.
+    // `Pointer<T>` is the spelling for an out-parameter of a scalar, and it is
+    // the one C uses for the same job.
+    if (COPY_IS_FREE.has(value.kind)) {
+        throw new ErasureError(
+            `\`${renderType(value)}\` is one machine word and copying it is one ` +
+            "instruction, so a reference to it is slower than the value it borrows. " +
+            "Pass it by value. If the point was to let the callee *write* it, that " +
+            `is \`Pointer<${renderType(value)}>\`, which is what C uses for the same ` +
+            "job.",
+            "GF0002",
+        );
+    }
+
+    return value.kind === "void" ? null : referenceTo(value);
+}
+
+/**
+ * The referents a reference is never worth taking: one register, copied by
+ * moving it. See {@link eraseReferent}.
+ */
+const COPY_IS_FREE: ReadonlySet<MachineType["kind"]> = new Set<MachineType["kind"]>([
+    "scalar",
+    "bool",
+    "pointer",
+    "fnptr",
+    "localfn",
+    "cstring",
+]);
+
+/**
+ * Wrap an erased referent, seeing that a contract is *already* the pair.
+ *
+ * A contract has no value form, so `Reference<I>` erases to the `(itab, data)`
+ * pair itself rather than to a reference-to-something. Without this, resolving
+ * a generic's `T` to a contract would produce a reference to a pair, which is
+ * one indirection more than exists.
+ */
+function referenceTo(referent: MachineType): MachineType {
+    return referent.kind === "interface" ? referent : {kind: "reference", referent};
 }
 
 /**

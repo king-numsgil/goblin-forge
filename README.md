@@ -739,11 +739,17 @@ Type arguments are inferred where the call determines them, and written where
 it does not — `sizeOf<T>()` mentions `T` in no argument, so `sizeOfIt<i32>()`
 is how you say which.
 
-Generic **classes** are not there yet, and neither is calling a method on a
-constrained `T`: `Reference<T>` over a type parameter is refused by *tsc*
-before this compiler sees it, which is a problem in the prelude's declarations
-rather than in the lowering. [`GENERICS-PLAN.md`](GENERICS-PLAN.md) is the
-design and the order of work.
+A constrained `T` can carry methods, and the call is direct rather than
+dispatched — which is what monomorphisation is for:
+
+```ts
+function ask<T extends Speaker>(x: Reference<T>): i32 {
+    return x.speak();     // a direct call to Dog.speak, not a vtable lookup
+}
+```
+
+Generic **classes** are not there yet.
+[`GENERICS-PLAN.md`](GENERICS-PLAN.md) is the design and the order of work.
 
 ### Not there yet
 

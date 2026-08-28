@@ -526,8 +526,32 @@ interface ReferenceCore<T> {
  */
 type GfPrimitive = number | string | boolean;
 
-/** `[T] extends […]`, not `T extends …` — same distribution hazard as {@link Pointer}. */
-type Reference<T> = [T] extends [GfPrimitive] ? ReferenceCore<T> : T & ReferenceCore<T>;
+/**
+ * **Not conditional, where {@link Pointer} is**, and the asymmetry is
+ * deliberate rather than an oversight.
+ *
+ * `Pointer<T>` has to discriminate: `Pointer<i32>` must not be
+ * `i32 & CorePointer<i32>`, because an intersection containing `i32` *is* an
+ * `i32` to tsc, and arithmetic on a pointer would then type-check. A reference
+ * has no arithmetic, so it has nothing to protect against — the only thing the
+ * conditional bought here was a shape for `Reference<i32>`, which erasure
+ * refuses either way.
+ *
+ * And it cost something real. tsc cannot resolve a conditional type over an
+ * unresolved type parameter, so inside a generic it keeps *both* branches and
+ * resolves member access against their union — which has no members. That made
+ * `Reference<T>` unwritable in a generic at the *tsc* level, one level above
+ * anything this compiler could have fixed, and it is what blocked calling a
+ * method on a constrained `T`:
+ *
+ *     function ask<T extends Speaker>(x: Reference<T>): i32 { return x.speak(); }
+ *
+ * A plain intersection has no branches to keep, so `T`'s constraint supplies
+ * the members and that function compiles. Verified against real tsc, not
+ * assumed — and the distribution hazard {@link Pointer} documents does not
+ * arise here, because there is no conditional left to distribute.
+ */
+type Reference<T> = T & ReferenceCore<T>;
 
 // ---------------------------------------------------------------------------
 // Closures. DECISIONS §18: three function types, all written down.

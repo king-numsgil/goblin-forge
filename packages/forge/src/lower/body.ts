@@ -72,7 +72,15 @@ import {
 } from "./tables.ts";
 import { type FnRecord, ISIZE, STRING, type Typed, typed, USIZE, VOID } from "./types.ts";
 import { type Binding, bindingPlace, isCapture, type LoopFrame, type Scope, Scopes } from "./scopes.ts";
-import { describe, elementTypeOf, hasNullValue, needsDrop, nullAdvice, placeOf } from "./util.ts";
+import {
+    behindOneIndirection,
+    describe,
+    elementTypeOf,
+    hasNullValue,
+    needsDrop,
+    nullAdvice,
+    placeOf,
+} from "./util.ts";
 import type { Lowerer } from "./module.ts";
 import { BoundaryLowerer } from "./c-boundary.ts";
 import { isCallArgument } from "./closures.ts";
@@ -1835,12 +1843,19 @@ export class BodyLowerer extends BoundaryLowerer {
             };
         }
 
-        if (subject.type.kind !== "struct") {
+        // Assigning *through* an address: `p.x = 1` where `p` is a
+        // `Reference<Point>` or a `Pointer<Point>` writes the caller's struct,
+        // which is the whole reason to have passed one. A reference has no
+        // `const` half — `this` is one and every method that sets a field
+        // writes through it.
+        const behind = behindOneIndirection(subject.type);
+        const struct = behind ?? subject.type;
+        if (struct.kind !== "struct") {
             this.outer.unsupported(target, "assigning to this property");
             return undefined;
         }
-        const index = this.fieldIndex(subject.type, target.name.text);
-        const field = subject.type.fields[index];
+        const index = this.fieldIndex(struct, target.name.text);
+        const field = struct.fields[index];
         if (field === undefined) {
             this.outer.unsupported(target, `the field \`${target.name.text}\``);
             return undefined;
@@ -1849,10 +1864,14 @@ export class BodyLowerer extends BoundaryLowerer {
         if (place === undefined) {
             return undefined;
         }
+        const base =
+            behind === undefined
+                ? place.projection
+                : [...place.projection, {kind: "Deref" as const}];
         return {
             place: {
                 local: place.local,
-                projection: [...place.projection, {kind: "Field", value: FieldId(index)}],
+                projection: [...base, {kind: "Field", value: FieldId(index)}],
             },
             type: field.type,
         };
@@ -1909,15 +1928,22 @@ export class BodyLowerer extends BoundaryLowerer {
         if (expected.kind === "interface" && value.type.kind === "class") {
             return this.#toInterface(at, value, expected);
         }
-        // `xs` → `Reference<T[]>`: borrow the array rather than copy it. A borrow
-        // and not a conversion, so the buffer stays the caller's and no element is
-        // cloned — which is the whole reason to write the reference. Passing the
-        // array itself is `std::vector<T>` by value: correct, and a whole buffer.
-        if (
-            expected.kind === "reference" &&
-            expected.referent.kind === "array" &&
-            value.type.kind === "array"
-        ) {
+        // `x` → `Reference<X>`: borrow it rather than copy it. A borrow and not a
+        // conversion, so what it points at stays the caller's and nothing is
+        // cloned — which is the whole reason to write the reference.
+        //
+        // The referent has to be *the same type*, not a convertible one. A
+        // reference is an address, and the bytes at that address are whatever
+        // the caller put there; converting first would produce a temporary and
+        // hand back its address, so the callee would be writing into something
+        // nobody can see. `Reference<Base>` from a `Derived` is the one
+        // exception that *is* wanted, and it has its own case below because it
+        // is a fact about class layout rather than about references.
+        //
+        // What this costs when it does not fire is a copy, which is exactly
+        // what the signature said: passing an array by value is
+        // `std::vector<T>` by value — correct, and a whole buffer.
+        if (expected.kind === "reference" && sameType(value.type, expected.referent)) {
             const place = this.placeOfSubject(at, value);
             if (place === undefined) {
                 return undefined;
@@ -2912,7 +2938,7 @@ export class BodyLowerer extends BoundaryLowerer {
 
         // `x.name` where `name` is a getter: an ordinary virtual call, dispatched
         // like any method, so `override get` reaches the derived body.
-        const className = this.outer.classNameAt(expression.expression);
+        const className = this.outer.classNameAt(expression.expression, this.bindings);
         const getter =
             className === undefined
                 ? undefined
@@ -2948,10 +2974,11 @@ export class BodyLowerer extends BoundaryLowerer {
             };
         }
 
-        const pointedTo =
-            subject.type.kind === "pointer" && subject.type.pointee.kind === "struct"
-                ? subject.type.pointee
-                : subject.type;
+        // A `Pointer<S>` and a `Reference<S>` both reach the struct in one
+        // dereference, and neither writes it — the auto-dereference C++ spells
+        // `->` for the first and nothing at all for the second.
+        const behind = behindOneIndirection(subject.type);
+        const pointedTo = behind ?? subject.type;
         if (pointedTo.kind === "struct") {
             const index = this.fieldIndex(pointedTo, expression.name.text);
             const field = pointedTo.fields[index];
@@ -2963,11 +2990,11 @@ export class BodyLowerer extends BoundaryLowerer {
             if (place === undefined) {
                 return undefined;
             }
-            // Through the pointer first, when there is one.
+            // Through the indirection first, when there is one.
             const base =
-                subject.type.kind === "pointer"
-                    ? [...place.projection, {kind: "Deref" as const}]
-                    : place.projection;
+                behind === undefined
+                    ? place.projection
+                    : [...place.projection, {kind: "Deref" as const}];
             return {
                 operand: {
                     kind: "Copy",
@@ -3882,7 +3909,7 @@ export class BodyLowerer extends BoundaryLowerer {
         // *reports*: `console.log` is a property access too, and running it over
         // `console` would raise a diagnostic about a name that does not resolve
         // before this could decide the call was not a method call at all.
-        const className = this.outer.classNameAt(access.expression);
+        const className = this.outer.classNameAt(access.expression, this.bindings);
         if (className === undefined) {
             return "not-a-method";
         }

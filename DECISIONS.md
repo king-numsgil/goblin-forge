@@ -2283,6 +2283,120 @@ diff to the headers this change is actually about.
 
 ---
 
+## §24 — `Reference<T>` is an address *(settled and built, 2026-08-28)*
+
+The question that started this was whether `Reference<T>` is C++ baggage:
+`const StructA&` carried over out of habit, where `Pointer<T>` would do. The
+answer is no, but the reason is not the one the C++ habit suggests.
+
+### What the C ABI says about references: nothing
+
+C has no references. Neither, at the ABI level, does C++ — both the Itanium and
+the MSVC ABI specify `T&` as identical to `T*`: one register, one address, no
+header. A reference is a frontend fiction in C++ too.
+
+This compiler already agreed. `layout.rs` puts `TyKind::Reference` in the same
+arm as `Pointer`, `FnPtr`, `Str` and `Array` — `Repr::Register(Scalar::Ptr)` —
+and the emitted IR is unambiguous:
+
+```llvm
+define internal double @byValueBig(ptr %arg0)      ; Big (24 bytes) by value
+define internal i32    @byValueSmall(ptr %arg0)    ; Small (8 bytes) by value
+define internal double @byPointerBig(ptr %arg0)    ; Pointer<Big>
+define internal i32    @Holder$get(ptr %arg0)      ; this, a Reference
+```
+
+All four are `ptr`. At the internal ABI every aggregate travels by address
+already, so by-value versus by-reference is not an ABI distinction here any more
+than it is on Win64, where LLVM-PORT.md's own table shows a 24-byte struct by
+value becoming `ptr dead_on_return`.
+
+**So the entire content of `Reference<T>` is: who makes the copy.** By value the
+caller copies, and the callee owns that copy and drops it. By reference there is
+no copy and nothing to drop. For a `Point` that is a `memcpy` against nothing;
+for a struct with a `string` field it is a heap clone and free against nothing.
+
+### Why it stays anyway
+
+**There is no address-of operator.** `alloc<T>()` is the only source of a
+`Pointer<T>`, so without `Reference<T>` a stack value cannot be passed by
+address at all — the alternative is heap-allocating to avoid a copy, which is
+not a trade anybody should be asked to make. That is decisive on its own.
+
+It also carries the rule the whole design rests on. `f(p: Point)` says "I take a
+copy" and `f(p: Reference<Point>)` says "I borrow", at the signature, where the
+reader is. That is ownership written down.
+
+### What was wrong with it, and is now fixed
+
+`Reference<S>` for a plain struct was `GF0001`, which is exactly the
+`const StructA&` case. It works now, and so does writing through one — a
+reference has no `const` half, and `this` has always been one.
+
+`Reference<T>` over a **type parameter** did not work at the *tsc* level, one
+level above anything this compiler could reach. The prelude spelled it as a
+conditional type, tsc will not resolve a conditional over an unresolved `T`, and
+member access against the two retained branches finds nothing. It is a plain
+intersection now:
+
+```ts
+type Reference<T> = T & ReferenceCore<T>;
+```
+
+`Pointer<T>` **keeps** its conditional, and the asymmetry is the point:
+`Pointer<i32>` must not be `i32 & CorePointer<i32>`, because an intersection
+containing `i32` is an `i32` to tsc and pointer arithmetic would type-check. A
+reference has no arithmetic, so it has nothing to protect against.
+
+That one line unblocked calling a method on a constrained `T`, which was
+GENERICS-PLAN stage 5's blocker — but it was not the whole of it. Two more
+places asked tsc directly and got tsc's un-substituted answer:
+
+- `classNameAt` found no class for a `Reference<T>`, so the method-call path
+  decided it was not a method, and `x.speak()` lowered to nothing and returned
+  zero. It consults the erasure first now, which is the only answer with the
+  substitution in it.
+- `contractAt` read `T`'s **constraint**, so `T extends Speaker` looked exactly
+  like a `Speaker` and dispatched dynamically against an itable that was never
+  built. Also zero. Under monomorphisation a constrained `T` is never
+  dynamically dispatched: the instantiation bound it to a concrete type and the
+  call is direct.
+
+Both produced a wrong answer rather than an error, which is the worse failure,
+and neither was visible from the prelude change alone.
+
+### Two rules that came out of finishing it
+
+**A reference is only worth having to something a copy costs something.** A
+scalar, a `boolean`, a `Pointer<T>`, a function pointer and a `CString` are one
+register copied by moving it, so a reference to one is an extra load bought with
+nothing — `GF0002`, naming `Pointer<T>` as the out-parameter spelling, which is
+what C uses for the same job. A `Reference<string>` is the opposite case and is
+`GF0001`: copying a `string` clones its buffer, so borrowing one is worth doing
+and simply is not lowered.
+
+**A reference crosses the C boundary as `T *`, so `T` is what gets checked.**
+An owning struct sailed across behind one — `Reference<Held>` accepted where a
+plain `Held` was refused — and the reference is not what made the difference.
+`Pointer<T>` deliberately does *not* get this treatment: it is the escape hatch,
+an address and nothing more, whose job is to carry what this compiler will not
+vouch for.
+
+### Left open: one spelling, two representations
+
+`Reference<Circle>` is one word. `Reference<Shape>` for a contract is two — the
+`(itab, data)` pair. Same spelling, different size. Rust splits these as `&T`
+and `&dyn Trait`, and makes you write the `dyn`.
+
+Whether to split them here is **not decided**. The case for splitting is that
+the size of a parameter should be visible in its type and that dispatch should
+be visible at the signature. The case against is that it is a rename across the
+test suite, the prelude and §11.2 for a wart nobody has been bitten by. Recorded
+rather than resolved, so that it is a choice next time somebody looks rather
+than something nobody noticed.
+
+---
+
 ## §11.7 — Generics: monomorphisation *(settled 2026-08-28; functions built)*
 
 **Answer: monomorphisation, in the frontend, before any MIR is built.** One
@@ -2325,13 +2439,14 @@ symbol both compilations agree on, and a vague linkage the MIR does not have.
 
 ### Still open under it
 
-Generic **classes**, and calling a method on a constrained `T`. The second is
-blocked before the lowering: `Reference<T>` and `Pointer<T>` are conditional
-types, tsc will not resolve one over an unresolved `T`, and member access
-against the two retained branches is a `TS2339`. That is a question about how
-the prelude declares its wrappers, and the distribution hazard the current
-spelling exists to avoid is documented at length in `global.d.ts` — so it wants
-a spike rather than an edit.
+Generic **classes**. Calling a method on a constrained `T` was open here too and
+is not any more — §24 above is what it took, and it was three fixes rather than
+the one the plan expected.
+
+`Pointer<T>` over a type parameter is still a conditional type and still does
+not survive one, so `p.deref()` inside a generic remains a `TS2322`. Unlike
+`Reference`, that conditional is load-bearing (§24), so it wants a different
+answer rather than the same one.
 
 ---
 

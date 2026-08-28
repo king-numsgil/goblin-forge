@@ -178,8 +178,8 @@ describe("the intrinsics that are implemented", () => {
 });
 
 describe("the intrinsics the prelude declares and the lowerer does not have", () => {
-    test("`Reference<T>` may only be written for a contract, so far", async () => {
-        const diagnostic = await expectRejected(
+    test("`Reference<T>` is implemented — see `tests/references.test.ts`", async () => {
+        const result = await run(
             "intr-reference-type",
             `interface S { a: i32; }
        function f(r: Reference<S>): i32 { return r.a; }
@@ -188,9 +188,8 @@ describe("the intrinsics the prelude declares and the lowerer does not have", ()
          const s: S = { a: 3 };
          return f(s);
        }\n`,
-            "GF0001",
         );
-        expect(diagnostic.message).toContain("Reference");
+        expect(result.exitCode).toBe(3);
     });
 
     test("`T[]` is implemented — see `tests/arrays.test.ts`", async () => {

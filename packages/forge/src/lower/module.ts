@@ -65,7 +65,13 @@ import {
     typeParameterSymbolsOf,
 } from "./generics.ts";
 import { type Binding, Scopes } from "./scopes.ts";
-import { describe, isStaticMember, moduleTag, needsDrop } from "./util.ts";
+import {
+    behindOneIndirection,
+    describe,
+    isStaticMember,
+    moduleTag,
+    needsDrop,
+} from "./util.ts";
 import { BodyLowerer } from "./body.ts";
 import { capturedNames, thisParameterOf, usesThis } from "./closures.ts";
 
@@ -824,7 +830,22 @@ export class Lowerer {
         return undefined;
     }
 
-    classNameAt(expression: ts.Expression): string | undefined {
+    classNameAt(expression: ts.Expression, bindings: Substitution): string | undefined {
+        // The **erasure** first, because it is the only answer that has the
+        // substitution in it. Inside a generic, tsc still says `T` however the
+        // instantiation was made — so asking it directly finds no class, the
+        // method-call path decides this is not a method, and `x.speak()` on a
+        // `Reference<T>` quietly lowered to nothing and returned zero.
+        //
+        // Erasure knows, because a binding carries the machine type the call
+        // site erased. Everything below is the fallback for expressions that do
+        // not erase at all, which is most of what this is asked about.
+        const erased = this.tryErase(expression, bindings);
+        const behind = erased === undefined ? undefined : behindOneIndirection(erased) ?? erased;
+        if (behind?.kind === "class" && this.#classes.has(behind.name)) {
+            return behind.name;
+        }
+
         const type = this.#checker.getTypeAtLocation(expression);
         const direct = classNameOf(type);
         if (direct !== null && this.#classes.has(direct)) {
@@ -2343,6 +2364,23 @@ export class Lowerer {
      * defence in depth — it should now be unreachable.
      */
     #checkCBoundary(type: MachineType, at: ts.Node, what: string): boolean {
+        // A `Reference<T>` crosses as `T *`, which the header already spells —
+        // so what has to be checked is `T`, not the address. Without this an
+        // owning struct sailed across behind one: `Reference<Held>` where
+        // `Held` has a `string` field was accepted where a plain `Held` was
+        // refused, and the reference is not what made the difference.
+        //
+        // Deliberately *not* done for `Pointer<T>`. That one is the escape
+        // hatch — an address and nothing more, whose whole job is to carry
+        // something this compiler will not vouch for.
+        if (type.kind === "reference") {
+            return this.#checkCBoundary(
+                type.referent,
+                at,
+                `${what}, which is a reference to a value that`,
+            );
+        }
+
         // A callback is a boundary of its own: whatever C hands *back* through it
         // has to be spellable too. Checked one level in rather than assumed,
         // because the pointer itself is only a word and would otherwise sail

@@ -52,7 +52,7 @@ import {
     TRY_CAST,
 } from "./tables.ts";
 import { CSTRING_TYPE, ERROR, ISIZE, POLY, STRING, type Typed, typed, USIZE, VOID, type Width } from "./types.ts";
-import { describe, elementTypeOf, isStaticMember } from "./util.ts";
+import { behindOneIndirection, describe, elementTypeOf, isStaticMember } from "./util.ts";
 import { Emitter } from "./emit.ts";
 
 export abstract class WidthPass extends Emitter {
@@ -320,7 +320,7 @@ export abstract class WidthPass extends Emitter {
             return ERROR;
         }
 
-        const className = this.outer.classNameAt(expression.expression);
+        const className = this.outer.classNameAt(expression.expression, this.bindings);
         if (className !== undefined) {
             const info = this.outer.classInfo(className);
             const field = info?.fields.find((f) => f.name === expression.name.text);
@@ -385,12 +385,9 @@ export abstract class WidthPass extends Emitter {
             return ERROR;
         }
 
-        // A `Pointer<S>` reaches a struct's fields the same way it reaches a
-        // class's: one dereference, written by nobody.
-        const pointed =
-            subject.type.kind === "pointer" && subject.type.pointee.kind === "struct"
-                ? subject.type.pointee
-                : subject.type;
+        // A `Pointer<S>` and a `Reference<S>` reach a struct's fields the same
+        // way they reach a class's: one dereference, written by nobody.
+        const pointed = behindOneIndirection(subject.type) ?? subject.type;
         if (pointed.kind === "struct") {
             const field = pointed.fields.find((f) => f.name === expression.name.text);
             if (field === undefined) {
@@ -987,7 +984,7 @@ export abstract class WidthPass extends Emitter {
         const info =
             access.expression.kind === ts.SyntaxKind.SuperKeyword
                 ? this.self?.base
-                : this.outer.classInfo(this.outer.classNameAt(access.expression) ?? "");
+                : this.outer.classInfo(this.outer.classNameAt(access.expression, this.bindings) ?? "");
         if (info === undefined) {
             if (access.expression.kind !== ts.SyntaxKind.SuperKeyword) {
                 return "not-a-method";

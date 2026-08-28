@@ -180,7 +180,9 @@ backend failure:
 | **escaping closures — `HeapFn<F>`** | nothing declares the type. DECISIONS §18 step 2: captures by move into an owning environment, reusing `GF0235` for contention. Not started, and deliberately after `LocalFn` | later |
 | **`RefCount<T>`** | nothing declares the type. DECISIONS §18 step 3, and its own feature rather than part of closures — shared ownership does not exist anywhere in the value model yet | later |
 | optional/rest/defaulted/destructured parameters | `lower/module.ts`, `#signature`; `classes.ts`, `#classFnParams` | later |
-| generic **classes**, and a constrained `T` whose methods are called | `classes.ts`, `collectClasses` runs before any call is seen; and `Reference<T>` / `Pointer<T>` do not survive a type parameter at the *tsc* level, which is a prelude problem before it is a lowering one. GENERICS-PLAN stage 5 | later |
+| generic **classes** | `classes.ts`, `collectClasses` runs to completion before any call is seen, so there is nowhere for `Box<i32>` to be made on demand. GENERICS-PLAN stage 5 | later |
+| `Pointer<T>` **used** inside a generic — `p.deref()`, `p.store(v)` | tsc, not the compiler: `Pointer` is a conditional type and does not survive a type parameter. `Reference` had the same problem and stopped being one (DECISIONS §24), but `Pointer`'s conditional is load-bearing — it is what stops `Pointer<i32>` being assignable to `i32` — so it needs a different answer | later |
+| `Reference<string>` | `checker/src/types.ts`, `eraseReferent`. Copying a `string` clones its buffer, so borrowing one is worth doing; nothing reads one back through a reference yet | later |
 | two classes with the same name in two modules | `classes.ts`, `collectClasses` — a stated restriction, see DECISIONS §11.8 | later |
 | incremental builds | `CompileOptions.incremental` is reserved and unread | later |
 | `throw` / unwinding | `Terminator::Resume` errors | later |

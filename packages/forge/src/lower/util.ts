@@ -52,6 +52,25 @@ export function placeOf(local: LocalId): Place {
     return {local, projection: []};
 }
 
+/**
+ * What one dereference reaches, for the two types that are an address.
+ *
+ * `Pointer<S>` and `Reference<S>` are the same machine word and the same one
+ * `Deref` away from the thing itself — which is why a field access through
+ * either is written without an operator. `undefined` for everything else,
+ * which is the caller's cue that the value *is* the thing.
+ */
+export function behindOneIndirection(type: MachineType): MachineType | undefined {
+    switch (type.kind) {
+        case "pointer":
+            return type.pointee;
+        case "reference":
+            return type.referent;
+        default:
+            return undefined;
+    }
+}
+
 /** The element type of anything that can be indexed. */
 export function elementTypeOf(type: MachineType): MachineType | undefined {
     switch (type.kind) {

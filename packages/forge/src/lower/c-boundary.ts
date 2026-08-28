@@ -15,6 +15,7 @@ import {
     layoutKey,
     type MachineType,
     referentOf,
+    typeParameterSymbolOf,
     renderType,
     sameType,
 } from "@goblin-forge/checker";
@@ -364,6 +365,22 @@ export abstract class BoundaryLowerer extends QuatLowerer {
         if (referent === null) {
             return undefined;
         }
+
+        // Inside a generic, `T`'s **constraint** is a contract and `T` is not.
+        // `contractOf` reads the apparent type, so `T extends Speaker` looks
+        // exactly like a `Speaker` from here — and lowering `x.speak()` as
+        // interface dispatch then reads an itable that was never built, because
+        // the value is a thin class reference. It returned zero rather than
+        // crashing, which is the worse of the two.
+        //
+        // Monomorphisation is the answer to what it should be instead: the
+        // instantiation bound `T` to a concrete type, so the call is direct.
+        const parameter = typeParameterSymbolOf(referent);
+        if (parameter !== undefined) {
+            const bound = this.bindings.get(parameter);
+            return bound?.machine.kind === "interface" ? bound.machine : undefined;
+        }
+
         try {
             const contract = contractOf(this.outer.checker, referent);
             return contract?.kind === "interface" ? contract : undefined;
