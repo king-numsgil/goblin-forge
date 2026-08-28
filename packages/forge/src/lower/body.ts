@@ -2295,6 +2295,13 @@ export class BodyLowerer extends BoundaryLowerer {
         if (ts.isTemplateExpression(expression)) {
             return this.#template(expression);
         }
+        // `identity<i32>` — one instantiation's address. Unambiguous, so it is
+        // answered before anything asks what the bare name is worth: `identity`
+        // on its own has no address, and the diagnostic for that would be the
+        // wrong complaint about a program that named the body perfectly well.
+        if (ts.isExpressionWithTypeArguments(expression)) {
+            return this.#instantiatedValue(expression, natural);
+        }
         if (ts.isPropertyAccessExpression(expression)) {
             return this.#propertyValue(expression, natural);
         }
@@ -3023,6 +3030,47 @@ export class BodyLowerer extends BoundaryLowerer {
 
         this.outer.unsupported(expression, "this property access");
         return undefined;
+    }
+
+    /**
+     * `identity<i32>` as a value: the address of that one instantiation.
+     *
+     * The same `Const`/`Func` an ordinary function's address is — the
+     * instantiation has a `FuncId` like any other function, because by the time
+     * this runs it *is* an ordinary function. What made it needs saying only
+     * here.
+     */
+    #instantiatedValue(
+        expression: ts.ExpressionWithTypeArguments,
+        natural: MachineType,
+    ): Typed | undefined {
+        const target = this.outer.instantiatedValue(expression, this.bindings);
+        if (target === undefined || target === "reported") {
+            if (target === undefined) {
+                this.outer.unsupported(expression, "type arguments on something not generic");
+            }
+            return undefined;
+        }
+        if (natural.kind !== "fnptr" || target.kind !== "defined") {
+            this.outer.error(
+                expression,
+                "GF0161",
+                "this names one instantiation of a generic, so it is a code address; " +
+                `it cannot be a \`${renderType(natural)}\`.`,
+            );
+            return undefined;
+        }
+        return {
+            operand: {
+                kind: "Const",
+                value: {
+                    kind: "Func",
+                    func: {kind: "Local", value: target.id},
+                    ty: this.outer.tyOf(natural, expression),
+                },
+            },
+            type: natural,
+        };
     }
 
     /**

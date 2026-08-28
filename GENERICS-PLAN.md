@@ -441,37 +441,62 @@ commit message and the code: a binding cannot be a `ts.Type` (§4.1's
 because a queue never nests; and `Pointer<T>` erases through a *substitution
 type*, which prints as `T`, is `T`, and does not carry the type-parameter flag.
 
-### Stage 2 — generic aggregates
+### Stage 2 — generic aggregates ✅ *(done, 2026-08-28 — no code)*
 
-`interface Pair<T>`, `type Pair<T> = {…}`, and generic type aliases. Mostly
-falls out of stage 0's naming plus stage 1's erasure; the work is the
-registry and making sure a generic aggregate reached only from inside another
-instantiation is queued rather than missed.
+`interface Pair<T>`, `type Pair<T> = {…}`, nested, and holding something
+owning. **This stage needed nothing.** It fell out of stage 0's `layoutKey`
+plus stage 1's leaf substitution: an aggregate mentioning `T` erases through
+the substitution like anything else, and two instantiations differ in their
+layout so they are two structs. The prediction that "the work is the registry"
+was wrong — there is no separate registry, because a generic aggregate is not a
+thing that gets instantiated. It is a type that erases.
 
-*Checkpoint:* the `Pair<u8>` / `Pair<f64>` program from §3, running, both
-values correct. A `Pair<string>` for the ownership half.
+*Checkpoint, met:* the `Pair<u8>` / `Pair<f64>` program from §3 runs and prints
+both values correctly, and a `Boxed<string>` leaks nothing.
 
-### Stage 3 — numeric generics
+### Stage 3 — numeric generics ✅ *(done, 2026-08-28 — no code)*
 
-`T extends i32` and friends. The width pass has to see through a bound type
-parameter to its substituted width, and `cast<T>` has to resolve `T` from the
-substitution rather than from the call's own type.
+Also nothing to build. But **the plan had the spelling wrong**, and it is worth
+saying loudly because it is the sort of mistake a user makes too:
 
-*Checkpoint:* one `clamp<T extends f64>`-shaped function instantiated at `f32`
-and `f64`, with the `f32` result asserted to actually be `f32`-rounded — the
-cheap wrong implementation computes both at `f64`.
+> `T extends i32` does not mean "some integer width". A width brand is an exact
+> string literal — `i32` is `number & __GfWidth<"i32">` — so `T extends i32`
+> **pins** `T` to `i32`, and `sum<f32>(…)` is a `TS2344`. The constraint that
+> means what the plan meant is `T extends number`.
 
-### Stage 4 — instantiations as values
+With that spelling everything works and nothing had to change: `cast<T>` reads
+its target off the call's resolved type, which the substitution has already
+made concrete, and arithmetic happens at the substituted width.
 
-Inference moved into stage 1, so what is left here is the address of one.
+*Checkpoint, met:* `sum<T extends number>` instantiated at `f32` and `f64`
+prints `0.30000000000000004` and `0.30000001192092896` — the cheap wrong
+implementation computes both at `f64` and prints the same number twice. And
+`twice<u8>(200)` wraps to 144 where `twice<i32>(200)` is 400.
 
-`identity<i32>` in value position, as a function pointer. The existing refusal
-in `eraseSignature` ("a generic function type cannot be a function pointer:
-there is no one body to take the address of") stays exactly right for the
-*uninstantiated* form and should keep its wording; what has to change is that a
-written instantiation is not that.
+### Stage 4 — instantiations as values ✅ *(done, 2026-08-28)*
 
-*Checkpoint:* a callback table built from instantiations of one generic.
+Inference moved into stage 1, so what was left here was the address of one, and
+that is `identity<i32>` written outside a call — an `ExpressionWithTypeArguments`,
+which is unambiguous and answered before anything asks what the bare name is
+worth.
+
+Three things it turned on:
+
+- **A generic's `abi` depends on whether its address is taken anywhere.** A
+  `FnPtr`'s signature is classified by the C rules, so an instantiation that is
+  addressed *and* called has to agree with itself. It is conservative — every
+  instantiation of that generic goes C, not just the addressed one — because
+  whether an address is taken is a whole-program fact and instantiations are
+  made one at a time.
+- **Only a call can infer.** An address has no arguments, so `GF0404` says a
+  different sentence there rather than a weaker version of the call's.
+- The refusal in `eraseSignature` — "a generic function type cannot be a
+  function pointer: there is no one body to take the address of" — stays exactly
+  right for the bare name and keeps its wording. Naming the type arguments *is*
+  naming the body.
+
+*Checkpoint, met:* a callback table holding `identity<i32>` beside a plain
+function, both called through it.
 
 ### Stage 5 — generic classes
 

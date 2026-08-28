@@ -52,6 +52,7 @@ import {
     type FnRecord,
     type FnSignature,
     type FnTemplate,
+    type GenericUse,
     type LiftedClosure,
     type LowerResult,
     type PendingInstantiation,
@@ -247,9 +248,38 @@ export class Lowerer {
         const key = this.#keyOf(declaration, declaration.name.text);
         const template = this.#templates.get(key);
         if (template !== undefined) {
-            return this.#instantiate(template, call, bindings) ?? "reported";
+            return this.#instantiate(template, {node: call}, bindings) ?? "reported";
         }
         return this.#functions.get(key);
+    }
+
+    /**
+     * `identity<i32>` written as a **value** — the address of one instantiation.
+     *
+     * Its own entry point rather than a branch of {@link Lowerer.resolveCallee},
+     * because the two differ in what they are allowed to do: a call may infer
+     * its type arguments and an address has nothing to infer them *from*. The
+     * refusal that follows is therefore a different sentence, not a weaker
+     * version of the same one.
+     *
+     * The bare `identity`, with no angle brackets, never reaches here — it is
+     * not an `ExpressionWithTypeArguments` — and answers `undefined` from
+     * `functionValueAt` instead, which is right: a generic has no address of
+     * its own.
+     */
+    instantiatedValue(
+        expression: ts.ExpressionWithTypeArguments,
+        bindings: Substitution,
+    ): FnRecord | "reported" | undefined {
+        const declaration = this.#calleeDeclaration(expression.expression);
+        if (declaration?.name === undefined) {
+            return undefined;
+        }
+        const template = this.#templates.get(this.#keyOf(declaration, declaration.name.text));
+        if (template === undefined) {
+            return undefined;
+        }
+        return this.#instantiate(template, {node: expression}, bindings) ?? "reported";
     }
 
     /**
@@ -268,14 +298,14 @@ export class Lowerer {
      */
     #instantiate(
         template: FnTemplate,
-        call: ts.CallExpression,
+        use: GenericUse,
         bindings: Substitution,
     ): FnRecord | undefined {
         // Written out, or inferred — and inferred is the common spelling, so it
         // is not a lesser path. `at` is what a diagnostic about one of them
         // underlines: the type argument itself when there is one to point at,
-        // and the whole call when tsc worked it out.
-        const supplied = this.#typeArgumentsOf(template, call);
+        // and the whole use when tsc worked it out.
+        const supplied = this.#typeArgumentsOf(template, use);
         if (supplied === undefined) {
             return undefined;
         }
@@ -319,7 +349,7 @@ export class Lowerer {
         const trail = [...(this.#current?.trail ?? []), label];
         if (depth > MAX_INSTANTIATION_DEPTH) {
             this.error(
-                call,
+                use.node,
                 "GF0402",
                 `instantiating \`${label}\` here needs another instantiation, and that ` +
                 `one needs another, ${MAX_INSTANTIATION_DEPTH} deep so far. The last few:` +
@@ -362,10 +392,19 @@ export class Lowerer {
                 name: null,
             })),
             ret: this.tyOf(signature.returns, template.node),
-            // Never `C`, and never exported: an instantiation has no symbol a
-            // caller outside this build could have agreed on. GENERICS-PLAN §6
-            // is what changes that, and it changes the linkage rather than this.
-            abi: "Internal",
+            // Never exported: an instantiation has no symbol a caller outside
+            // this build could have agreed on. GENERICS-PLAN §6 is what changes
+            // that, and it changes the linkage rather than this.
+            //
+            // The convention is C when the generic's *address* is taken
+            // anywhere, for the reason a plain function's is: a `FnPtr`'s
+            // signature is classified by the C rules, so the call through the
+            // pointer and the definition have to agree. Conservative on
+            // purpose — it marks every instantiation of that generic, not the
+            // one whose address was taken — because whether an address is taken
+            // is a whole-program fact and the instantiations are made one at a
+            // time.
+            abi: this.#addressTaken.has(template.node) ? "C" : "Internal",
         });
         const builder = this.#mir.declareFunction({
             name: symbol,
@@ -391,7 +430,7 @@ export class Lowerer {
             label,
             depth,
             trail,
-            at: call,
+            at: use.node,
         });
         return record;
     }
@@ -414,9 +453,9 @@ export class Lowerer {
      */
     #typeArgumentsOf(
         template: FnTemplate,
-        call: ts.CallExpression,
+        use: GenericUse,
     ): readonly { readonly type: ts.Type; readonly at: ts.Node }[] | undefined {
-        const written = call.typeArguments;
+        const written = use.node.typeArguments;
         if (written !== undefined && written.length === template.parameters.length) {
             return written.map((node) => ({
                 type: this.#checker.getTypeFromTypeNode(node),
@@ -424,7 +463,14 @@ export class Lowerer {
             }));
         }
 
-        const resolved = this.#checker.getResolvedSignature(call);
+        // Only a *call* has anything to infer from. `const f = identity;`
+        // written as a value has no argument whose type could say what `T` is,
+        // so the answer below is the only one — and it is the right one rather
+        // than a shortfall, because there is genuinely nothing there.
+        const resolved =
+            use.node.kind === ts.SyntaxKind.CallExpression
+                ? this.#checker.getResolvedSignature(use.node)
+                : undefined;
         const declared = this.#checker.getSignatureFromDeclaration(template.node);
         const inferred =
             resolved === undefined || declared === undefined
@@ -434,26 +480,33 @@ export class Lowerer {
         if (inferred !== undefined) {
             return template.parameters.map((parameter) => ({
                 type: inferred.get(parameter)!,
-                at: call,
+                at: use.node,
             }));
         }
 
         // Not "inference is unimplemented" — it is implemented, and this is a
-        // call it could not finish. The commonest reason by far is a type
-        // parameter that appears nowhere in the arguments, so there is nothing
-        // at the call for tsc to have read it from.
+        // use it could not finish. For a call the commonest reason by far is a
+        // type parameter that appears nowhere in the arguments; for an address
+        // there is no reason at all, because an address has no arguments.
         const undetermined = template.parameters.map((p) => `\`${p.name}\``).join(" and ");
         const one = template.parameters.length === 1;
+        const angles = template.parameters.map(() => "…").join(", ");
         this.error(
-            call,
+            use.node,
             "GF0404",
-            `this call does not determine ${undetermined}, so there is no way to know ` +
-            `which copy of \`${template.name}\` to compile. Write ` +
-            `\`${template.name}<${template.parameters.map(() => "…").join(", ")}>(…)\` ` +
-            `with a concrete type in place of each \`…\`.\n\n` +
-            "A generic is compiled once for each set of type arguments, so " +
-            `${one ? "it has" : "they have"} to be settled here — either by an argument ` +
-            "whose type says so, or in writing.",
+            use.node.kind === ts.SyntaxKind.CallExpression
+                ? `this call does not determine ${undetermined}, so there is no way to ` +
+                `know which copy of \`${template.name}\` to compile. Write ` +
+                `\`${template.name}<${angles}>(…)\` with a concrete type in place of ` +
+                `each \`…\`.\n\nA generic is compiled once for each set of type ` +
+                `arguments, so ${one ? "it has" : "they have"} to be settled at the ` +
+                "call — either by an argument whose type says so, or in writing."
+                : `\`${template.name}\` is generic and this takes its *address*, which ` +
+                `has no arguments to determine ${undetermined} from. Write ` +
+                `\`${template.name}<${angles}>\` with a concrete type in place of each ` +
+                "`…`.\n\nA generic has no address of its own: each set of type " +
+                "arguments is a separate function, so naming one is how you say which " +
+                "function you meant.",
         );
         return undefined;
     }

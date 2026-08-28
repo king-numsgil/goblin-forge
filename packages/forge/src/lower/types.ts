@@ -138,6 +138,19 @@ export interface FnTemplate {
     readonly parameters: readonly ts.Symbol[];
 }
 
+/**
+ * Where a generic is used, which is the two places type arguments can appear.
+ *
+ * A **call** — `first<i32>(xs)`, or `first(xs)` with them inferred — and an
+ * **address**, `identity<i32>` written where a function pointer is wanted. Both
+ * are a `ts.Node` with an optional `typeArguments`, which is the whole of what
+ * instantiation needs; they differ in that only a call has arguments for tsc to
+ * have inferred from.
+ */
+export type GenericUse = {
+    readonly node: ts.CallExpression | ts.ExpressionWithTypeArguments;
+};
+
 /** One instantiation, declared and waiting for its body. */
 export interface PendingInstantiation {
     readonly node: ts.FunctionDeclaration;

@@ -215,6 +215,189 @@ describe("generics", () => {
         expect(result.exitCode).toBe(8);
     });
 
+    describe("generic aggregates", () => {
+        test("two instantiations of one interface are two structs", async () => {
+            // This is the program from GENERICS-PLAN §3 that used to reach clang
+            // and come back as `GF9003` — the compiler calling itself broken
+            // about a program tsc accepted. `layoutKey` is what fixed it, and
+            // this is here as well as in `structs.test.ts` because generics are
+            // how anybody actually hits it.
+            const result = await run(
+                "generic-interface",
+                `interface Pair<T> { a: T; b: T; }
+
+       export function main(): i32 {
+         const small: Pair<u8> = { a: 1, b: 2 };
+         const big: Pair<f64> = { a: 1.5, b: 2.5 };
+         console.log(\`\${small.a} \${big.b}\`);
+         return cast<i32>(small.a) + cast<i32>(big.b);
+       }\n`,
+            );
+            expect(result.stdout).toBe("1 2.5\n");
+            expect(result.exitCode).toBe(3);
+        });
+
+        test("a generic type alias", async () => {
+            const result = await run(
+                "generic-alias-type",
+                `type Pair<T> = { a: T; b: T };
+
+       export function main(): i32 {
+         const p: Pair<i32> = { a: 4, b: 5 };
+         return p.a + p.b;
+       }\n`,
+            );
+            expect(result.exitCode).toBe(9);
+        });
+
+        test("a generic aggregate nested in itself", async () => {
+            const result = await run(
+                "generic-nested",
+                `interface Pair<T> { a: T; b: T; }
+
+       function sum(p: Pair<i32>): i32 { return p.a + p.b; }
+
+       export function main(): i32 {
+         const inner: Pair<i32> = { a: 1, b: 2 };
+         const outer: Pair<Pair<i32>> = { a: inner, b: inner };
+         return sum(outer.a) + sum(outer.b);
+       }\n`,
+            );
+            expect(result.exitCode).toBe(6);
+        });
+
+        test("a generic aggregate holding something owning", async () => {
+            const result = await run(
+                "generic-aggregate-owning",
+                `interface Boxed<T> { held: T; }
+
+       export function main(): i32 {
+         const s: Boxed<string> = { held: "kept" };
+         console.log(s.held);
+         return 0;
+       }\n`,
+            );
+            expect(result.stdout).toBe("kept\n");
+            expect(result.leaked).toBe(0);
+        });
+    });
+
+    describe("numeric generics", () => {
+        // **The constraint is `T extends number`, not `T extends i32`.** A width
+        // brand is an exact string literal, so `T extends i32` *pins* `T` to
+        // `i32` and the generic can only ever be instantiated at the one width —
+        // which makes it not a generic at all. This plan predicted the wrong
+        // spelling and the tests are where that got found.
+
+        test("one body, two widths, arithmetic at each", async () => {
+            const result = await run(
+                "generic-numeric-int",
+                `function twice<T extends number>(x: T): T { return cast<T>(x + x); }
+
+       export function main(): i32 {
+         const small: u8 = twice<u8>(200);
+         const big: i32 = twice<i32>(200);
+         console.log(\`\${small} \${big}\`);
+         return 0;
+       }\n`,
+            );
+            // 400 does not fit a `u8`, so the narrow copy wraps to 144. If both
+            // were computed at `i32` this would say 400.
+            expect(result.stdout).toBe("144 400\n");
+        });
+
+        test("`f32` and `f64` round differently, which is the point", async () => {
+            const result = await run(
+                "generic-numeric-float",
+                `function sum<T extends number>(a: T, b: T): T { return cast<T>(a + b); }
+
+       export function main(): i32 {
+         const wide: f64 = sum<f64>(0.1, 0.2);
+         const narrow: f32 = sum<f32>(0.1, 0.2);
+         console.log(\`\${wide}\`);
+         console.log(\`\${narrow}\`);
+         return 0;
+       }\n`,
+            );
+            // The cheap wrong implementation computes both at `f64` and prints
+            // the same number twice.
+            expect(result.stdout).toBe("0.30000000000000004\n0.30000001192092896\n");
+        });
+
+        test("comparison on a numeric type parameter", async () => {
+            const result = await run(
+                "generic-numeric-compare",
+                `function biggest<T extends number>(a: T, b: T): T { return a > b ? a : b; }
+
+       export function main(): i32 { return biggest<i32>(3, 9); }\n`,
+            );
+            expect(result.exitCode).toBe(9);
+        });
+    });
+
+    describe("an instantiation as a value", () => {
+        test("`identity<i32>` is a code address", async () => {
+            const result = await run(
+                "generic-value",
+                `function identity<T>(x: T): T { return x; }
+
+       export function main(): i32 {
+         const f: (x: i32) => i32 = identity<i32>;
+         return f(9);
+       }\n`,
+            );
+            expect(result.exitCode).toBe(9);
+        });
+
+        test("a callback table mixing an instantiation and a plain function", async () => {
+            const result = await run(
+                "generic-value-table",
+                `function identity<T>(x: T): T { return x; }
+       function negate(x: i32): i32 { return 0 - x; }
+
+       function apply(f: (x: i32) => i32, v: i32): i32 { return f(v); }
+
+       export function main(): i32 {
+         const table: FixedArray<(x: i32) => i32, 2> =
+           fixedArray<(x: i32) => i32, 2>(2, identity<i32>);
+         table[1] = negate;
+         return apply(table[0], 5) + apply(table[1], 2);
+       }\n`,
+            );
+            expect(result.exitCode).toBe(3);
+        });
+
+        test("the same instantiation addressed and called", async () => {
+            // The convention has to agree: a `FnPtr`'s signature is classified
+            // by the C rules, so an instantiation whose address is taken is
+            // emitted that way and the *direct* call has to match.
+            const result = await run(
+                "generic-value-and-call",
+                `function identity<T>(x: T): T { return x; }
+
+       export function main(): i32 {
+         const f: (x: i32) => i32 = identity<i32>;
+         return f(4) + identity<i32>(5);
+       }\n`,
+            );
+            expect(result.exitCode).toBe(9);
+        });
+
+        test("GF0404 — a generic named with no type arguments has no address", async () => {
+            const diagnostic = await expectRejected(
+                "generic-value-bare",
+                `function identity<T>(x: T): T { return x; }
+
+       export function main(): i32 {
+         const f: (x: i32) => i32 = identity;
+         return f(1);
+       }\n`,
+                "GF0404",
+            );
+            expect(diagnostic.message).toContain("has no one address");
+        });
+    });
+
     test("a generic reached through a module namespace instantiates", async () => {
         const result = await run(
             "generic-namespace",

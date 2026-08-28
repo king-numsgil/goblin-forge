@@ -81,6 +81,13 @@ export abstract class WidthPass extends Emitter {
             return this.width(expression.expression);
         }
 
+        // `identity<i32>` — one instantiation's address. Early, because the
+        // node is unambiguous: type arguments outside a call have nowhere else
+        // to appear.
+        if (ts.isExpressionWithTypeArguments(expression)) {
+            return this.#instantiatedValueWidth(expression);
+        }
+
         // A literal has no width of its own; it takes one from wherever it lands.
         if (ts.isNumericLiteral(expression)) {
             return POLY;
@@ -130,6 +137,21 @@ export abstract class WidthPass extends Emitter {
                 // function type, which erasure turns into a `fnptr`.
                 if (this.outer.functionValueAt(expression) !== undefined) {
                     return this.#erasedWidth(expression);
+                }
+                // A generic named with no type arguments. It resolves to a
+                // declaration and still has no address, so "this name is not
+                // supported" would be the wrong complaint about a program whose
+                // only fault is not having said which copy.
+                if (this.outer.namesAGeneric(expression)) {
+                    this.outer.error(
+                        expression,
+                        "GF0404",
+                        `\`${expression.text}\` is generic, so it is not one function and ` +
+                        "has no one address. Each set of type arguments is compiled " +
+                        `separately — write \`${expression.text}<…>\` to name the copy ` +
+                        "you meant.",
+                    );
+                    return ERROR;
                 }
                 this.outer.unsupported(expression, `the name \`${expression.text}\``);
                 return ERROR;
@@ -496,6 +518,32 @@ export abstract class WidthPass extends Emitter {
         }
         const value = this.value(expression, type);
         return value === undefined ? undefined : {value, type};
+    }
+
+    /**
+     * `identity<i32>` — the width of one instantiation's address.
+     *
+     * A `FnPtr` built from the *instantiation's* signature, which is concrete,
+     * rather than from the generic's, which has no signature at all. That is
+     * why `eraseSignature`'s refusal — "a generic function type cannot be a
+     * function pointer: there is no one body to take the address of" — stays
+     * exactly right for the bare name and does not apply here: naming the type
+     * arguments is naming the body.
+     */
+    #instantiatedValueWidth(expression: ts.ExpressionWithTypeArguments): Width {
+        const target = this.outer.instantiatedValue(expression, this.bindings);
+        if (target === "reported") {
+            return ERROR;
+        }
+        if (target === undefined) {
+            this.outer.unsupported(expression, "type arguments on something not generic");
+            return ERROR;
+        }
+        return typed({
+            kind: "fnptr",
+            params: target.signature.params.map((param) => param.type),
+            returns: target.signature.returns,
+        });
     }
 
     /**
