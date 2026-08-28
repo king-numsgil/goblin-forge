@@ -37,6 +37,7 @@ import {
     layoutKey,
     literalDigits,
     type MachineType,
+    type Substitution,
     type Operator,
     OPERATORS,
     rangeOf,
@@ -91,8 +92,14 @@ export class BodyLowerer extends BoundaryLowerer {
      */
     #pendingInitialisers: ClassInfo | undefined;
 
-    constructor(outer: Lowerer, f: FunctionBuilder, scopes: Scopes, returns: MachineType) {
-        super(outer, f, scopes);
+    constructor(
+        outer: Lowerer,
+        f: FunctionBuilder,
+        scopes: Scopes,
+        returns: MachineType,
+        bindings: Substitution,
+    ) {
+        super(outer, f, scopes, bindings);
         this.#returns = returns;
     }
 
@@ -922,7 +929,7 @@ export class BodyLowerer extends BoundaryLowerer {
 
     #bindingType(declaration: ts.VariableDeclaration): MachineType | undefined {
         if (declaration.type !== undefined) {
-            return this.outer.erase(
+            return this.erase(
                 declaration.type,
                 this.outer.checker.getTypeAtLocation(declaration.type),
             );
@@ -2869,7 +2876,7 @@ export class BodyLowerer extends BoundaryLowerer {
         // takes it first: `Pointer<C>` is `C & CorePointer<C>`, and a field of the
         // pointee would otherwise win.
         if (expression.name.text === POINTER_ADDRESS) {
-            const pointer = this.outer.tryErase(expression.expression);
+            const pointer = this.tryErase(expression.expression);
             if (pointer?.kind === "pointer") {
                 const subject = this.value(expression.expression, undefined);
                 if (subject === undefined) {
@@ -3649,7 +3656,13 @@ export class BodyLowerer extends BoundaryLowerer {
             return undefined;
         }
 
-        const lifted = this.outer.liftClosure(node, expected, this.scopes, this.self);
+        const lifted = this.outer.liftClosure(
+            node,
+            expected,
+            this.scopes,
+            this.self,
+            this.bindings,
+        );
         if (lifted === undefined) {
             return undefined;
         }
@@ -3804,7 +3817,7 @@ export class BodyLowerer extends BoundaryLowerer {
             // Probed silently first: `C.free()` on a class *name* has no value to
             // lower, and asking for one reports a name that does not resolve before
             // anything has decided this was not a pointer at all.
-            this.outer.tryErase(access.expression)?.kind === "pointer"
+            this.tryErase(access.expression)?.kind === "pointer"
         ) {
             const subject = this.value(access.expression, undefined);
             if (subject !== undefined && subject.type.kind === "pointer") {
@@ -3848,7 +3861,7 @@ export class BodyLowerer extends BoundaryLowerer {
         // `s.substring(a, b)`, `s.indexOf(t)`, `s.codePointAt(i)` — the three
         // `String` methods that are runtime calls. Before the class and contract
         // paths for the reason the array branch above is: a `string` is neither.
-        if (this.outer.tryErase(access.expression)?.kind === "string") {
+        if (this.tryErase(access.expression)?.kind === "string") {
             return this.#stringMethod(expression, access);
         }
 

@@ -216,7 +216,7 @@ export abstract class WidthPass extends Emitter {
         // `[a, b, c]` — the type comes from tsc, not from the elements, because
         // `[]` has no element to ask and the annotation is what says what it is.
         if (ts.isArrayLiteralExpression(expression)) {
-            const type = this.outer.erase(
+            const type = this.erase(
                 expression,
                 this.outer.checker.getContextualType(expression) ??
                 this.outer.checker.getTypeAtLocation(expression),
@@ -279,7 +279,7 @@ export abstract class WidthPass extends Emitter {
         // this is the half of that rule that makes it worth having.
         if (
             expression.name.text === POINTER_ADDRESS &&
-            this.outer.tryErase(expression.expression)?.kind === "pointer"
+            this.tryErase(expression.expression)?.kind === "pointer"
         ) {
             return typed(USIZE);
         }
@@ -305,7 +305,7 @@ export abstract class WidthPass extends Emitter {
         // accessor returns.
         const staticGet = this.staticAccessorAt(expression, false);
         if (staticGet !== undefined) {
-            const returns = this.outer.accessorType(staticGet.accessor);
+            const returns = this.outer.accessorType(staticGet.accessor, this.bindings);
             return returns === undefined ? ERROR : typed(returns);
         }
         const staticSet = this.staticAccessorAt(expression, true);
@@ -331,7 +331,7 @@ export abstract class WidthPass extends Emitter {
             // getter returns.
             const getter = info?.getters.get(expression.name.text);
             if (getter !== undefined) {
-                const returns = this.outer.accessorType(getter);
+                const returns = this.outer.accessorType(getter, this.bindings);
                 return returns === undefined ? ERROR : typed(returns);
             }
             // The mirror of assigning to a getter that has no setter. tsc lets a
@@ -461,7 +461,7 @@ export abstract class WidthPass extends Emitter {
      * call at all. `console.log` is a property access too.
      */
     protected arrayElementAt(access: ts.PropertyAccessExpression): MachineType | undefined {
-        return this.outer.arrayElementAt(access.expression);
+        return this.outer.arrayElementAt(access.expression, this.bindings);
     }
 
     /**
@@ -493,7 +493,7 @@ export abstract class WidthPass extends Emitter {
         // Asked of tsc and silently, never of the width pass: this runs over every
         // call's callee, including `console.log`, whose receiver has no machine
         // type and would be reported as an unresolvable name.
-        const type = this.outer.tryErase(expression);
+        const type = this.tryErase(expression);
         if (type?.kind !== "fnptr") {
             return undefined;
         }
@@ -558,7 +558,7 @@ export abstract class WidthPass extends Emitter {
 
     /** The width of an expression, taken from tsc's type for it. */
     #erasedWidth(expression: ts.Expression): Width {
-        const type = this.outer.erase(
+        const type = this.erase(
             expression,
             this.outer.checker.getTypeAtLocation(expression),
         );
@@ -675,7 +675,7 @@ export abstract class WidthPass extends Emitter {
         // type's, not any declaration's — there may be no declaration in this
         // build. Probed silently, and first, for the reasons `#call` gives.
         const callee = expression.expression;
-        const callable = this.outer.tryErase(callee);
+        const callable = this.tryErase(callee);
         if (
             callable?.kind === "fnptr" &&
             !this.outer.namesADeclaredFunction(callee) &&
@@ -739,7 +739,7 @@ export abstract class WidthPass extends Emitter {
             // The target width is the call's own type, which tsc has already
             // resolved from the type argument. Reading it from there rather than
             // from `typeArguments` means an aliased or inferred `T` still works.
-            const target = this.outer.erase(
+            const target = this.erase(
                 expression,
                 this.outer.checker.getTypeAtLocation(expression),
             );
@@ -751,7 +751,7 @@ export abstract class WidthPass extends Emitter {
             // literal `0`, which is a plain `number` and has no width — the
             // annotation on the binding is what says `i32`, and it is the answer that
             // matters.
-            const type = this.outer.erase(
+            const type = this.erase(
                 expression,
                 this.outer.checker.getContextualType(expression) ??
                 this.outer.checker.getTypeAtLocation(expression),
@@ -879,7 +879,7 @@ export abstract class WidthPass extends Emitter {
         // gives: this runs over every method call, and reporting on a receiver
         // that turns out not to be a string would complain about the wrong
         // thing.
-        if (this.outer.tryErase(access.expression)?.kind === "string") {
+        if (this.tryErase(access.expression)?.kind === "string") {
             for (const argument of expression.arguments) {
                 if (this.width(argument).kind === "error") {
                     return ERROR;
@@ -910,7 +910,7 @@ export abstract class WidthPass extends Emitter {
         // nothing here is polymorphic and nothing needs inferring.
         const linalgStatic = linalgNamedBy(this.outer.checker, access.expression);
         const linalgType =
-            linalgStatic ?? linalgFromMachine(this.outer.tryErase(access.expression));
+            linalgStatic ?? linalgFromMachine(this.tryErase(access.expression));
         if (linalgType !== undefined) {
             for (const argument of expression.arguments) {
                 if (this.width(argument).kind === "error") {
@@ -924,7 +924,7 @@ export abstract class WidthPass extends Emitter {
         // `Pointer<C>` auto-dereferences to a `C` and would otherwise look for a
         // method of that name on it.
         if (POINTER_METHODS.has(access.name.text)) {
-            const pointer = this.outer.tryErase(access.expression);
+            const pointer = this.tryErase(access.expression);
             if (pointer?.kind === "pointer") {
                 for (const argument of expression.arguments) {
                     if (this.width(argument).kind === "error") {
@@ -1153,7 +1153,7 @@ export abstract class WidthPass extends Emitter {
         // `Pointer<U>` for `reify`. Read from the call rather than from a written
         // type argument, so that `const p: Pointer<Rect> = raw.reify()` takes `U`
         // from the annotation exactly the way tsc does.
-        const result = this.outer.erase(
+        const result = this.erase(
             expression,
             this.outer.checker.getTypeAtLocation(expression),
         );

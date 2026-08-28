@@ -183,6 +183,30 @@ export interface InterfaceMethod {
     readonly returns: MachineType;
 }
 
+/**
+ * What each of a generic's type parameters actually is, at one instantiation.
+ *
+ * Keyed by the type parameter's **symbol**, so an imported generic is the same
+ * generic however the import spelled it — the argument `resolveCallee` already
+ * makes for functions, one level up. Mapping to a `ts.Type` rather than
+ * straight to a {@link MachineType} is what keeps the rest of the compiler
+ * working: erasure is not the only question asked about a type, and
+ * `classNameOf`, `linalgTypeOf` and `isArrayType` all want tsc's answer rather
+ * than this one's.
+ *
+ * The substitution is applied at the **leaf**, in {@link erase}, and that is
+ * the whole of why monomorphisation is a small change here. `erase` already
+ * takes a type apart structurally — `T[]` through `getIndexTypeOfType`,
+ * `Pointer<T>` through `pointeeOf`, `Pair<T>` through `getPropertiesOfType` —
+ * so every composite reaches a bare `T` on its own, and one case at the top of
+ * the cascade answers for all of them. Nothing has to instantiate a `ts.Type`,
+ * which is just as well: tsc does not export a way to.
+ */
+export type Substitution = ReadonlyMap<ts.Symbol, ts.Type>;
+
+/** Not inside a generic. The common case, and every caller outside lowering. */
+export const NO_BINDINGS: Substitution = new Map<ts.Symbol, ts.Type>();
+
 /** Raised when a type is legal TypeScript but outside the language. */
 export class ErasureError extends Error {
     constructor(
@@ -227,7 +251,23 @@ export class ErasureError extends Error {
  * layout pass recursing until the stack ends, and the second is a drop that
  * inlines a copy of itself, forever.
  */
-class Erasure {
+export class Erasure {
+    /**
+     * What this erasure's type parameters are bound to, if it is inside a
+     * generic instantiation. Empty for every other erasure, which is most.
+     *
+     * It lives here rather than being threaded as its own argument because
+     * `state` already reaches every recursive step, and a substitution that
+     * some steps had and others did not would be a substitution applied in
+     * some positions and not others — which is the silent half of getting this
+     * wrong.
+     */
+    readonly bindings: Substitution;
+
+    constructor(bindings: Substitution = NO_BINDINGS) {
+        this.bindings = bindings;
+    }
+
     /** The answer for every aggregate this erasure has reached. */
     readonly #answers = new Map<ts.Type, MachineType>();
 
@@ -444,7 +484,34 @@ export function erase(
         return answered;
     }
 
+    // A type parameter, and what this instantiation bound it to. Before the
+    // flag cascade below, because a `T` bound to `i32` has to *become* an
+    // `i32` before anything asks what an `i32` is.
+    //
+    // Reaching here with nothing bound means a generic's body is being erased
+    // outside any instantiation, which is not a program the compiler should be
+    // looking at: a generic is lowered once per set of type arguments and never
+    // on its own. It is stated as a gap rather than left to fail further in,
+    // because further in it is "`T` has no machine representation", which is
+    // true of every `T` and says nothing about what went wrong.
     const flags = type.getFlags();
+
+    // Asked off the flag rather than through `isTypeParameter()`, which is a
+    // type predicate: narrowing on it leaves everything below thinking `type`
+    // is `never`.
+    if ((flags & ts.TypeFlags.TypeParameter) !== 0) {
+        const bound = state.bindings.get(type.symbol);
+        if (bound === undefined) {
+            throw new ErasureError(
+                `\`${checker.typeToString(type)}\` is a type parameter, and nothing here ` +
+                "says what it is. A generic is compiled once for each set of type " +
+                "arguments it is used with, so there is no code to write until some " +
+                "call decides.",
+                "GF0001",
+            );
+        }
+        return erase(checker, bound, state);
+    }
 
     if (flags & (ts.TypeFlags.Void | ts.TypeFlags.Undefined)) {
         return {kind: "void"};

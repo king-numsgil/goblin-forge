@@ -27,11 +27,14 @@ import {
     type Diagnostic,
     ENUM_UNDERLYING,
     erase,
+    Erasure,
     ErasureError,
     layoutKey,
     type MachineType,
+    NO_BINDINGS,
     rangeOf,
     renderType,
+    type Substitution,
 } from "@goblin-forge/checker";
 import ts from "typescript";
 import {
@@ -169,9 +172,13 @@ export class Lowerer {
      * pass about a receiver before knowing it is a value raises a diagnostic
      * about `console` — which is the wrong complaint and stops the compile.
      */
-    tryErase(expression: ts.Expression): MachineType | undefined {
+    tryErase(expression: ts.Expression, bindings: Substitution): MachineType | undefined {
         try {
-            return erase(this.#checker, this.#checker.getTypeAtLocation(expression));
+            return erase(
+                this.#checker,
+                this.#checker.getTypeAtLocation(expression),
+                new Erasure(bindings),
+            );
         } catch (error) {
             if (error instanceof ErasureError) {
                 return undefined;
@@ -371,7 +378,10 @@ export class Lowerer {
      * asked of whichever half exists, so that `x.name` and `x.name = v` agree
      * about what `name` is.
      */
-    accessorType(accessor: ClassMethod | StaticMethod): MachineType | undefined {
+    accessorType(
+        accessor: ClassMethod | StaticMethod,
+        bindings: Substitution,
+    ): MachineType | undefined {
         const declaration = accessor.declaration;
         if (ts.isSetAccessorDeclaration(declaration)) {
             const parameter = declaration.parameters[0];
@@ -379,14 +389,18 @@ export class Lowerer {
                 this.unsupported(declaration, "a setter with no parameter");
                 return undefined;
             }
-            return this.erase(parameter, this.#checker.getTypeAtLocation(parameter));
+            return this.erase(parameter, this.#checker.getTypeAtLocation(parameter), bindings);
         }
         const signature = this.#checker.getSignatureFromDeclaration(declaration);
         if (signature === undefined) {
             this.unsupported(declaration, "an accessor tsc could not give a signature to");
             return undefined;
         }
-        return this.erase(declaration, this.#checker.getReturnTypeOfSignature(signature));
+        return this.erase(
+            declaration,
+            this.#checker.getReturnTypeOfSignature(signature),
+            bindings,
+        );
     }
 
     /**
@@ -396,7 +410,10 @@ export class Lowerer {
      * is deciding whether a property access is an array call at all and most of
      * them are not.
      */
-    arrayElementAt(expression: ts.Expression): MachineType | undefined {
+    arrayElementAt(
+        expression: ts.Expression,
+        bindings: Substitution,
+    ): MachineType | undefined {
         const type = this.#checker.getTypeAtLocation(expression);
         const candidates = type.isIntersection() ? type.types : [type];
         for (const part of candidates) {
@@ -407,7 +424,7 @@ export class Lowerer {
             if (element === undefined) {
                 continue;
             }
-            return this.erase(expression, element);
+            return this.erase(expression, element, bindings);
         }
         return undefined;
     }
@@ -560,6 +577,14 @@ export class Lowerer {
         type: Extract<MachineType, { kind: "localfn" }>,
         enclosing: Scopes,
         self: ClassInfo | undefined,
+        /**
+         * The enclosing body's substitution, which the lifted one inherits.
+         *
+         * A closure written inside a generic is part of that instantiation and
+         * sees the same `T`. Passing it in rather than starting the lifted body
+         * with an empty one is the whole of what makes that true.
+         */
+        bindings: Substitution,
     ): LiftedClosure | undefined {
         // Where `this` comes from, decided once and for the whole form.
         //
@@ -696,7 +721,7 @@ export class Lowerer {
             });
         });
 
-        const lowerer = new BodyLowerer(this, builder, scopes, type.returns);
+        const lowerer = new BodyLowerer(this, builder, scopes, type.returns, bindings);
         if (self !== undefined) {
             // `inConstructor` is false even for a closure written inside one: the
             // only thing it gates is `super(…)`, which is meaningless in a closure
@@ -918,9 +943,19 @@ export class Lowerer {
         return declaration !== undefined && ts.isEnumMember(declaration) ? declaration : undefined;
     }
 
-    erase(at: ts.Node, type: ts.Type): MachineType | undefined {
+    /**
+     * Erase a type, or report and return `undefined`.
+     *
+     * `bindings` has **no default**, and that is the point: a caller inside a
+     * generic body that forgets to pass the instantiation's substitution
+     * erases `T` as "nothing says what it is" rather than as the concrete type,
+     * and a default would let that happen silently at whichever of the thirty
+     * call sites was overlooked. Requiring it makes tsc the thing that finds
+     * them. Outside a generic the answer is {@link NO_BINDINGS}, written out.
+     */
+    erase(at: ts.Node, type: ts.Type, bindings: Substitution): MachineType | undefined {
         try {
-            return erase(this.#checker, type);
+            return erase(this.#checker, type, new Erasure(bindings));
         } catch (error) {
             if (error instanceof ErasureError) {
                 this.error(at, error.code, error.message);
@@ -1217,7 +1252,9 @@ export class Lowerer {
         this.#classes = collectClasses(this.#program, this.#checker, {
             unsupported: (node, what) => this.unsupported(node, what),
             refuse: (node, message) => this.error(node, "GF0002", message),
-            erase: (at, type) => this.erase(at, type),
+            // A generic class is refused at its declaration (stage 5 of
+            // GENERICS-PLAN), so nothing collected here is inside one.
+            erase: (at, type) => this.erase(at, type, NO_BINDINGS),
         });
         this.#refuseInlineCycles();
 
@@ -1250,7 +1287,8 @@ export class Lowerer {
             // initialisers has work to do without declaring one, and so does a class
             // that only derives from such a class.
             if (info.constructorSymbol !== undefined) {
-                const params = info.ctor === undefined ? [] : this.#classFnParams(info.ctor);
+                const params =
+                    info.ctor === undefined ? [] : this.#classFnParams(info.ctor, NO_BINDINGS);
                 if (params !== undefined) {
                     bodies.push({
                         kind: "constructor",
@@ -1279,7 +1317,7 @@ export class Lowerer {
                 if (method.owner !== info.name) {
                     continue;
                 }
-                const params = this.#classFnParams(method.declaration);
+                const params = this.#classFnParams(method.declaration, NO_BINDINGS);
                 if (params === undefined) {
                     continue;
                 }
@@ -1290,6 +1328,7 @@ export class Lowerer {
                         : this.erase(
                             method.declaration.type ?? method.declaration,
                             this.#checker.getReturnTypeOfSignature(signature),
+                            NO_BINDINGS,
                         );
                 if (returns === undefined) {
                     this.unsupported(method.declaration, "a method tsc could not give a signature to");
@@ -1323,7 +1362,7 @@ export class Lowerer {
                 if (method.owner !== info.name) {
                     continue;
                 }
-                const params = this.#classFnParams(method.declaration);
+                const params = this.#classFnParams(method.declaration, NO_BINDINGS);
                 if (params === undefined) {
                     continue;
                 }
@@ -1334,6 +1373,7 @@ export class Lowerer {
                         : this.erase(
                             method.declaration.type ?? method.declaration,
                             this.#checker.getReturnTypeOfSignature(signature),
+                            NO_BINDINGS,
                         );
                 if (returns === undefined) {
                     this.unsupported(method.declaration, "a method tsc could not give a signature to");
@@ -1505,6 +1545,7 @@ export class Lowerer {
 
     #classFnParams(
         node: ts.ConstructorDeclaration | MethodBody,
+        bindings: Substitution,
     ): { name: string; type: MachineType }[] | undefined {
         const params: { name: string; type: MachineType }[] = [];
         for (const parameter of node.parameters) {
@@ -1521,7 +1562,11 @@ export class Lowerer {
             // written the long way, and the constructor assigns one from the other —
             // so there is one place fields come from and one place they are laid out,
             // which is the property that mattered when this was refused.
-            const type = this.erase(parameter, this.#checker.getTypeAtLocation(parameter));
+            const type = this.erase(
+                parameter,
+                this.#checker.getTypeAtLocation(parameter),
+                bindings,
+            );
             if (type === undefined) {
                 return undefined;
             }
@@ -1635,7 +1680,7 @@ export class Lowerer {
         // of the build's public ABI. Only the second is a C boundary.
         const isPublic = this.#isPublic(statement, exported);
 
-        const signature = this.#signature(statement);
+        const signature = this.#signature(statement, NO_BINDINGS);
         if (signature === undefined) {
             return undefined;
         }
@@ -1756,7 +1801,9 @@ export class Lowerer {
             return;
         }
 
-        const signature = this.#signature(node);
+        // An `extern "C"` import. Never generic — a declaration with no body has
+        // nothing to instantiate, which is why that is a rule rather than a gap.
+        const signature = this.#signature(node, NO_BINDINGS);
         if (signature === undefined) {
             return;
         }
@@ -1905,7 +1952,7 @@ export class Lowerer {
         return false;
     }
 
-    #signature(node: ts.FunctionDeclaration): FnSignature | undefined {
+    #signature(node: ts.FunctionDeclaration, bindings: Substitution): FnSignature | undefined {
         const params: { name: string; type: MachineType }[] = [];
         for (const parameter of node.parameters) {
             if (!ts.isIdentifier(parameter.name)) {
@@ -1916,7 +1963,11 @@ export class Lowerer {
                 this.unsupported(parameter, "an optional, rest, or defaulted parameter");
                 return undefined;
             }
-            const type = this.erase(parameter, this.#checker.getTypeAtLocation(parameter));
+            const type = this.erase(
+                parameter,
+                this.#checker.getTypeAtLocation(parameter),
+                bindings,
+            );
             if (type === undefined) {
                 return undefined;
             }
@@ -1934,6 +1985,7 @@ export class Lowerer {
         const returns = this.erase(
             node.type ?? node,
             this.#checker.getReturnTypeOfSignature(signature),
+            bindings,
         );
         if (returns === undefined) {
             return undefined;
@@ -2030,7 +2082,9 @@ export class Lowerer {
                     ty: this.tyOf(param.type, body.node),
                 });
             });
-            const lowerer = new BodyLowerer(this, body.builder, scopes, body.returns);
+            // A generic class is refused at its declaration (GENERICS-PLAN
+            // stage 5), so no class member is inside an instantiation yet.
+            const lowerer = new BodyLowerer(this, body.builder, scopes, body.returns, NO_BINDINGS);
             lowerer.setClassContext(body.info, false);
             if (body.node.body !== undefined) {
                 lowerer.run(body.node.body);
@@ -2058,7 +2112,7 @@ export class Lowerer {
         });
 
         const returns = body.kind === "constructor" ? VOID : (body.returns ?? VOID);
-        const lowerer = new BodyLowerer(this, body.builder, scopes, returns);
+        const lowerer = new BodyLowerer(this, body.builder, scopes, returns, NO_BINDINGS);
         lowerer.setClassContext(body.info, body.kind === "constructor");
         if (body.kind === "constructor") {
             lowerer.runConstructor(body.info, body.node?.body);
@@ -2147,7 +2201,13 @@ export class Lowerer {
             });
         }
 
-        const lowerer = new BodyLowerer(this, builder, scopes, record.signature.returns);
+        const lowerer = new BodyLowerer(
+            this,
+            builder,
+            scopes,
+            record.signature.returns,
+            NO_BINDINGS,
+        );
         lowerer.run(node.body, isEntry, entryArgs ? record.signature.params[0] : undefined);
     }
 
@@ -2294,7 +2354,7 @@ export class Lowerer {
      */
     #checkEnum(statement: ts.EnumDeclaration): void {
         const type = this.#checker.getTypeAtLocation(statement.name);
-        const width = this.erase(statement.name, type);
+        const width = this.erase(statement.name, type, NO_BINDINGS);
         if (width === undefined || width.kind !== "scalar") {
             return;
         }

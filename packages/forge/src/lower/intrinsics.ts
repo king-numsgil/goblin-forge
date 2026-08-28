@@ -34,7 +34,7 @@ export abstract class IntrinsicLowerer extends WidthPass {
             );
             return undefined;
         }
-        const type = this.outer.erase(argument, this.outer.checker.getTypeAtLocation(argument));
+        const type = this.erase(argument, this.outer.checker.getTypeAtLocation(argument));
         if (type === undefined) {
             return undefined;
         }
@@ -79,7 +79,7 @@ export abstract class IntrinsicLowerer extends WidthPass {
         const type =
             argument === undefined
                 ? natural
-                : this.outer.erase(argument, this.outer.checker.getTypeAtLocation(argument));
+                : this.erase(argument, this.outer.checker.getTypeAtLocation(argument));
         if (type === undefined) {
             return undefined;
         }
@@ -241,7 +241,7 @@ export abstract class IntrinsicLowerer extends WidthPass {
         const pointee =
             natural.kind === "pointer"
                 ? natural.pointee
-                : this.outer.erase(expression, this.outer.checker.getTypeAtLocation(expression));
+                : this.erase(expression, this.outer.checker.getTypeAtLocation(expression));
         if (pointee === undefined) {
             return undefined;
         }
@@ -959,7 +959,7 @@ export abstract class IntrinsicLowerer extends WidthPass {
     ): { place: Place; type: Extract<MachineType, { kind: "localfn" }> } | undefined {
         const contextual = this.outer.checker.getContextualType(argument);
         const expected =
-            contextual === undefined ? undefined : this.outer.erase(argument, contextual);
+            contextual === undefined ? undefined : this.erase(argument, contextual);
         if (expected === undefined || expected.kind !== "localfn") {
             this.outer.unsupported(argument, "a callback that is not a `LocalFn`");
             return undefined;

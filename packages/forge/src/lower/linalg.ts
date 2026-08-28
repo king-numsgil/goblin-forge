@@ -927,7 +927,7 @@ export abstract class LinalgLowerer extends IntrinsicLowerer {
             return this.#staticCall(expression, access, named);
         }
 
-        const type = this.linalgOf(this.outer.tryErase(access.expression));
+        const type = this.linalgOf(this.tryErase(access.expression));
         if (type === undefined) {
             return "not-linalg";
         }
@@ -1049,7 +1049,7 @@ export abstract class LinalgLowerer extends IntrinsicLowerer {
             this.outer.unsupported(expression, "`from` with no value");
             return undefined;
         }
-        const source = this.linalgOf(this.outer.tryErase(argument));
+        const source = this.linalgOf(this.tryErase(argument));
         if (source === undefined) {
             this.outer.unsupported(argument, "`from` on something that is not a vector");
             return undefined;

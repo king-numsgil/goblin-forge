@@ -694,7 +694,7 @@ export abstract class MatrixLowerer extends LinalgLowerer {
             this.outer.unsupported(at, `a \`${type.name}\` axis argument that is missing`);
             return undefined;
         }
-        const axisType = this.linalgOf(this.outer.tryErase(argument));
+        const axisType = this.linalgOf(this.tryErase(argument));
         if (axisType === undefined || axisType.family !== "vec") {
             this.outer.unsupported(argument, "an axis that is not a vector");
             return undefined;
@@ -746,7 +746,7 @@ export abstract class MatrixLowerer extends LinalgLowerer {
         column: LinalgType,
         args: readonly ts.Expression[],
     ): Typed | undefined {
-        const vec3 = this.linalgOf(this.outer.tryErase(args[0] ?? expression));
+        const vec3 = this.linalgOf(this.tryErase(args[0] ?? expression));
         if (vec3 === undefined) {
             this.outer.unsupported(expression, "`lookAt` without vector arguments");
             return undefined;

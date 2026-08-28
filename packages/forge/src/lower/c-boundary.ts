@@ -245,7 +245,7 @@ export abstract class BoundaryLowerer extends QuatLowerer {
             }
             throw error;
         }
-        target ??= this.outer.erase(argument, type);
+        target ??= this.erase(argument, type);
         if (target === undefined) {
             return undefined;
         }

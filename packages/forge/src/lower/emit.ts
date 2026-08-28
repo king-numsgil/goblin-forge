@@ -25,7 +25,7 @@ import {
     type Terminator,
     type TyId,
 } from "@goblin-forge/backend";
-import type { MachineType } from "@goblin-forge/checker";
+import type { MachineType, Substitution } from "@goblin-forge/checker";
 import ts from "typescript";
 import type { ClassInfo } from "../classes.ts";
 import { NO_UNWIND } from "./tables.ts";
@@ -52,10 +52,42 @@ export abstract class Emitter {
     protected self: ClassInfo | undefined;
     protected inConstructor = false;
 
-    constructor(outer: Lowerer, f: FunctionBuilder, scopes: Scopes) {
+    /**
+     * What this body's type parameters are bound to, when it is one
+     * instantiation of a generic. Empty for every ordinary function.
+     *
+     * Set once, at construction, and never changed: a body is lowered once per
+     * instantiation, with a `BodyLowerer` of its own, so there is no point at
+     * which the answer could differ part-way through. That is the whole reason
+     * this is a field rather than something pushed and popped on the
+     * {@link Lowerer} — `liftClosure` runs while the enclosing body is
+     * mid-lowering, so a stack would have a re-entrant case on the first day.
+     */
+    protected readonly bindings: Substitution;
+
+    constructor(outer: Lowerer, f: FunctionBuilder, scopes: Scopes, bindings: Substitution) {
         this.outer = outer;
         this.f = f;
         this.scopes = scopes;
+        this.bindings = bindings;
+    }
+
+    /**
+     * Erase a type under this body's substitution.
+     *
+     * Every erasure in the body chain goes through here rather than through
+     * `this.outer.erase`, so that the substitution cannot be left off at one
+     * site out of thirty. Inside a generic that would not fail loudly — it
+     * would erase `T` as "nothing says what it is", at whichever expression the
+     * missed site happened to cover.
+     */
+    protected erase(at: ts.Node, type: ts.Type): MachineType | undefined {
+        return this.outer.erase(at, type, this.bindings);
+    }
+
+    /** {@link Lowerer.tryErase}, under this body's substitution. */
+    protected tryErase(expression: ts.Expression): MachineType | undefined {
+        return this.outer.tryErase(expression, this.bindings);
     }
 
     setClassContext(info: ClassInfo, inConstructor: boolean): void {
