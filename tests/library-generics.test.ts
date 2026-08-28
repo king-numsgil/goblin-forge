@@ -29,7 +29,8 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { dirname, join } from "node:path";
+import { copyFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 
 import { compileSource, expectRejected, type Project, run, runBinary } from "./harness.ts";
 import type { CompileResult } from "goblin-forge";
@@ -324,6 +325,60 @@ describe("a Goblin library's boundary", () => {
             );
             expect(diagnostic.message).toContain("vtable");
         });
+    });
+
+    test("a generic across a `shared-lib`, with one runtime", async () => {
+        // Two Goblin *artefacts* in one process, which is the configuration
+        // `runtime: "shared"` exists for: each would otherwise carry its own
+        // mimalloc, its own allocation counter and its own `gf_string_free`, and
+        // a `string` made on one side and released on the other would be a free
+        // against a heap that never allocated it.
+        //
+        // Generics do not change that and this proves they do not: the same
+        // generic is instantiated on both sides, a `string` crosses, and the
+        // count still comes back to zero.
+        const {project, result: built} = await compileSource(
+            "gl-shared-lib",
+            `import { first } from "./generic.ts";
+
+       export function firstOfTwo(a: i32, b: i32): i32 {
+         const xs: i32[] = [a, b];
+         return first<i32>(xs);
+       }
+       export function greeting(): string { return "from the dll"; }\n`,
+            {
+                type: "shared-lib",
+                runtime: "shared",
+                files: {"generic.ts": "export function first<T>(xs: T[]): T { return xs[0]; }\n"},
+            },
+        );
+        expect(built.ok).toBe(true);
+
+        const {result} = await compileSource(
+            "gl-shared-app",
+            `import { first } from "${sourceOf(project, "generic.ts")}";
+
+       declare function firstOfTwo(a: i32, b: i32): i32;
+       declare function greeting(): string;
+
+       export function main(): i32 {
+         const xs: i32[] = [7, 8];
+         console.log(greeting());
+         return first<i32>(xs) + firstOfTwo(19, 23);
+       }\n`,
+            {nativeLibs: [built.importLibrary ?? built.output!], runtime: "shared"},
+        );
+        expect(result.ok).toBe(true);
+
+        // The library beside the executable, where the loader looks.
+        copyFileSync(
+            built.output!,
+            join(dirname(result.output!), basename(built.output!)),
+        );
+        const ran = runBinary("gl-shared-app", result.output!);
+        expect(ran.stdout).toBe("from the dll\n");
+        expect(ran.exitCode).toBe(26);
+        expect(ran.leaked).toBe(0);
     });
 
     test("one compilation is still one compilation", async () => {

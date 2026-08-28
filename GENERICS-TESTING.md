@@ -49,13 +49,40 @@ class, a generic aggregate at the C boundary. None of those is exotic.
 - [x] a generic taking a `LocalFn`
 - [x] a generic returning `T[]`; `Pointer<T>` in a signature
 - [x] the flaky `closures.test.ts` case — see below
-- [ ] the instantiation depth limit at its boundary (below the cap, not just
-      above it)
-- [ ] a generic instantiated in a `shared-lib`, where two artefacts and one
-      runtime is the delicate part
-- [ ] a generic whose type argument makes an *erasure* fail, with the
-      instantiation note — covered once, in `library-generics`, not in the
-      language suite
+- [x] the depth limit **below** the cap — twenty deep and ending on its own.
+      A cap can get this wrong in the direction the refusal cannot show
+- [x] a generic across a **`shared-lib`** with `runtime: "shared"`: two
+      artefacts, one runtime, the same generic instantiated on both sides, a
+      `string` crossing, and the count still zero
+- [x] an erasure failure at a type argument — reported at the *call*, without a
+      note, because that is where the reader is. The note is for a failure
+      *inside* the body, which the `sizeOfIt<FILE>` case already covers
+
+### Round 5 — the class hierarchy, and one wrong note
+
+- [x] a copy through a generic **slices** — `copyOf<Base>` handed a `Derived`
+      returns a `Base`, as a copy does anywhere
+- [x] a generic class **overriding a plain base**, dispatched through a
+      `Reference<Base>`: virtual dispatch *into* an instantiation
+- [x] a class with a generic method still converts to a **contract** — the
+      generic method has no slot, so there is nothing for an itable to hold
+- [x] **width promotion** unchanged inside a generic
+
+`instanceof` was on this list and should not have been: it is not supported
+anywhere in the language, generic or not (`GF0001`, and `tryCast` is the
+mechanism that exists). Worth recording, because "untested" and "unimplemented"
+look identical from a checklist.
+
+### What is still only assumed
+
+- The **C++ oracle** has nothing about generics in it. `tests/oracle/` is the
+  arbiter for value semantics, and a generic's copies and drops are exactly the
+  kind of thing it exists to arbitrate — an instantiation at an owning type
+  against the same shape written by hand.
+- Generics on a **non-Windows target**. `.github/workflows/ci.yml` is parked on
+  `workflow_dispatch`, and CLAUDE.md's warning applies: the last two defects
+  were both "passes on Windows, fails on Linux". Nothing here is obviously
+  platform-shaped, but nothing here has been run there either.
 
 **Everything in the first group passed on the first try** except the two cases
 that were my test's fault (a missing `std/linalg` import; a `?:` with no width)

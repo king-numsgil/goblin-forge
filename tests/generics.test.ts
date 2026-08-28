@@ -894,6 +894,82 @@ describe("generics", () => {
         });
     });
 
+    describe("with a class hierarchy", () => {
+        test("a copy through a generic slices, as a copy does anywhere", async () => {
+            // `copyOf<Base>` is handed a `Derived`, and a by-value copy of a
+            // `Base` is a `Base` — the derived half is not there to keep. C++
+            // does the same and REWRITE-PLAN §4.7 says so; being generic
+            // neither causes it nor excuses it.
+            const result = await run(
+                "generic-slices",
+                `class Base { tag(): i32 { return 1; } }
+       class Derived extends Base { override tag(): i32 { return 2; } }
+
+       function copyOf<T>(x: T): T { const c = x; return c; }
+
+       export function main(): i32 {
+         const d = new Derived();
+         return copyOf<Base>(d).tag();
+       }\n`,
+            );
+            expect(result.exitCode).toBe(1);
+        });
+
+        test("a generic class overriding a plain base still dispatches", async () => {
+            // Virtual dispatch *into* an instantiation: the vtable belongs to
+            // `Box<i32>` and the call goes through `Base`'s slot.
+            const result = await run(
+                "generic-class-override",
+                `class Base { tag(): i32 { return 1; } }
+       class Box<T> extends Base {
+         constructor(private value: T) { super(); }
+         override tag(): i32 { return 2; }
+       }
+
+       export function main(): i32 {
+         const b = new Box<i32>(5);
+         const r: Reference<Base> = b;
+         return r.tag();
+       }\n`,
+            );
+            expect(result.exitCode).toBe(2);
+        });
+
+        test("a class with a generic method still converts to a contract", async () => {
+            // The generic method is simply not part of the contract — it has no
+            // slot, so there is nothing for an itable to hold.
+            const result = await run(
+                "generic-method-and-contract",
+                `interface Speaker { speak(): i32; }
+       class Dog implements Speaker {
+         speak(): i32 { return 1; }
+         echo<T>(x: T): T { return x; }
+       }
+
+       export function main(): i32 {
+         const d = new Dog();
+         const s: Reference<Speaker> = d;
+         return s.speak();
+       }\n`,
+            );
+            expect(result.exitCode).toBe(1);
+        });
+
+        test("width promotion is unchanged inside a generic", async () => {
+            const result = await run(
+                "generic-width-promotion",
+                `function scale<T extends number>(x: T): T { return cast<T>(x + x); }
+
+       export function main(): i32 {
+         const small: u8 = 3;
+         const wide: i32 = 100;
+         return cast<i32>(scale<u8>(small)) + scale<i32>(wide);
+       }\n`,
+            );
+            expect(result.exitCode).toBe(206);
+        });
+    });
+
     describe("over the other type families", () => {
         test("a linear-algebra type", async () => {
             const result = await run(
@@ -1210,6 +1286,27 @@ describe("generics", () => {
        export function main(): i32 { return 0; }\n`,
                 "GF0403",
             );
+        });
+
+        test("a deep chain that *does* end is not refused", async () => {
+            // The other side of the limit, and the one a cap can get wrong: a
+            // chain twenty instantiations deep that stops on its own. Without
+            // this, a limit that counted the wrong thing — or counted it in the
+            // wrong place — would look correct from the refusal alone.
+            const lines: string[] = ["interface Wrap<T> { inner: T; }"];
+            for (let i = 0; i < 20; i += 1) {
+                lines.push(`function grow${i}<T>(x: T): i32 {`);
+                lines.push("  const w: Wrap<T> = { inner: x };");
+                lines.push(i + 1 < 20 ? `  return grow${i + 1}<Wrap<T>>(w);` : "  return 7;");
+                lines.push("}");
+            }
+            lines.push("export function main(): i32 {");
+            lines.push("  const n: i32 = 1;");
+            lines.push("  return grow0<i32>(n);");
+            lines.push("}");
+
+            const result = await run("generic-depth-under-cap", `${lines.join("\n")}\n`);
+            expect(result.exitCode).toBe(7);
         });
 
         test("GF0402 — instantiation that never ends", async () => {
