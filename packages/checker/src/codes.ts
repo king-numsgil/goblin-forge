@@ -482,14 +482,20 @@ export const CODES = {
             "in a header.",
     },
     GF0404: {
-        title: "a generic call needs its type arguments written out",
+        title: "a generic call does not determine its type arguments",
         explanation:
-            "`first(xs)` leaves the compiler to work out what `T` is. tsc does infer " +
-            "it, and reading that answer back is implemented — it just is not " +
-            "implemented *yet*, so for now the call has to say:\n\n" +
-            "    first<i32>(xs)\n\n" +
-            "A gap rather than a rule, and a temporary one: this code goes away when " +
-            "inference lands rather than being reused for something else.",
+            "A generic is compiled once for each set of type arguments it is used " +
+            "with, so every call has to settle them. Most do it without saying " +
+            "anything — `first(xs)` where `xs` is an `i32[]` determines `T` — and the " +
+            "ones that reach here are the ones where nothing at the call does.\n\n" +
+            "The usual shape is a type parameter that appears in no argument:\n\n" +
+            "    function sizeOfIt<T>(): usize { return sizeOf<T>(); }\n" +
+            "    sizeOfIt();        // nothing here says what `T` is\n" +
+            "    sizeOfIt<i32>();   // this does\n\n" +
+            "Note what this is *not* about. `identity(1)` fails, but for the older " +
+            "and more basic reason: `1` is a plain `number` with no width, so `T` is " +
+            "determined and has no machine type. That is `GF0161`, and the fix is to " +
+            "give the literal a width rather than to annotate the call.",
     },
 
     // -- The compiler is broken ----------------------------------------------

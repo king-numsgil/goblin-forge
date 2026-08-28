@@ -492,7 +492,7 @@ export function isCStringType(checker: ts.TypeChecker, type: ts.Type): boolean {
  * same conditional-type reason. It makes the erasure honest for the operations
  * that do get past tsc, of which `alloc<T>()` is the useful one.
  */
-function typeParameterSymbolOf(type: ts.Type): ts.Symbol | undefined {
+export function typeParameterSymbolOf(type: ts.Type): ts.Symbol | undefined {
     if ((type.getFlags() & ts.TypeFlags.TypeParameter) !== 0) {
         return type.symbol;
     }

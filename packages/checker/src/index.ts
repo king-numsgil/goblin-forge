@@ -134,5 +134,6 @@ export {
     type StructField,
     type Substitution,
     type TypeBinding,
+    typeParameterSymbolOf,
     SCALARS,
 } from "./types.ts";

@@ -59,6 +59,7 @@ import {
 } from "./types.ts";
 import {
     bindingsOf,
+    inferBindings,
     instantiationKey,
     instantiationSymbol,
     typeParameterSymbolsOf,
@@ -264,26 +265,12 @@ export class Lowerer {
         call: ts.CallExpression,
         bindings: Substitution,
     ): FnRecord | undefined {
-        const written = call.typeArguments;
-        // Stage 1 of GENERICS-PLAN: written out, never inferred. tsc has
-        // already inferred them and `getResolvedSignature` could be unified
-        // against to recover the answer — that is stage 4, and doing it second
-        // means it is built against an implementation that works rather than
-        // beside one that does not.
-        if (written === undefined || written.length !== template.parameters.length) {
-            const one = template.parameters.length === 1;
-            this.error(
-                call,
-                "GF0404",
-                `\`${template.name}\` is generic, and this call does not say what ` +
-                `${template.parameters.map((p) => `\`${p.name}\``).join(" and ")} ` +
-                `${one ? "is" : "are"}. Write ` +
-                `\`${template.name}<${template.parameters.map(() => "…").join(", ")}>(…)\` ` +
-                `with a concrete type in place of each \`…\`.\n\n` +
-                "A gap rather than a rule: tsc infers the type " +
-                `${one ? "argument" : "arguments"} here perfectly well, and reading that ` +
-                "answer back is simply not implemented yet.",
-            );
+        // Written out, or inferred — and inferred is the common spelling, so it
+        // is not a lesser path. `at` is what a diagnostic about one of them
+        // underlines: the type argument itself when there is one to point at,
+        // and the whole call when tsc worked it out.
+        const supplied = this.#typeArgumentsOf(template, call);
+        if (supplied === undefined) {
             return undefined;
         }
 
@@ -295,9 +282,8 @@ export class Lowerer {
         // mentions a parameter. See `TypeBinding` for what goes wrong if this
         // is deferred instead.
         const args: TypeBinding[] = [];
-        for (const argument of written) {
-            const type = this.#checker.getTypeFromTypeNode(argument);
-            const machine = this.erase(argument, type, bindings);
+        for (const {type, at} of supplied) {
+            const machine = this.erase(at, type, bindings);
             if (machine === undefined) {
                 return undefined;
             }
@@ -402,6 +388,68 @@ export class Lowerer {
             at: call,
         });
         return record;
+    }
+
+    /**
+     * A call's type arguments, however it came by them.
+     *
+     * Written out — `first<i32>(xs)` — they are read from the nodes. Left to
+     * tsc — `first(xs)` — they are recovered by unifying the declaration's
+     * signature against the resolved one, which is where tsc has already put
+     * the answer.
+     *
+     * The two are the same thing to everything downstream, and that matters
+     * more than it looks: `first(xs)` and `first<f64>(xs)` have to be *one*
+     * instantiation rather than two identical ones, and they are, because the
+     * memo is on the erased arguments and not on how they were spelled.
+     *
+     * `at` is what a diagnostic about an argument underlines: the argument
+     * itself when one was written, the whole call when tsc worked it out.
+     */
+    #typeArgumentsOf(
+        template: FnTemplate,
+        call: ts.CallExpression,
+    ): readonly { readonly type: ts.Type; readonly at: ts.Node }[] | undefined {
+        const written = call.typeArguments;
+        if (written !== undefined && written.length === template.parameters.length) {
+            return written.map((node) => ({
+                type: this.#checker.getTypeFromTypeNode(node),
+                at: node,
+            }));
+        }
+
+        const resolved = this.#checker.getResolvedSignature(call);
+        const declared = this.#checker.getSignatureFromDeclaration(template.node);
+        const inferred =
+            resolved === undefined || declared === undefined
+                ? undefined
+                : inferBindings(this.#checker, template.parameters, declared, resolved);
+
+        if (inferred !== undefined) {
+            return template.parameters.map((parameter) => ({
+                type: inferred.get(parameter)!,
+                at: call,
+            }));
+        }
+
+        // Not "inference is unimplemented" — it is implemented, and this is a
+        // call it could not finish. The commonest reason by far is a type
+        // parameter that appears nowhere in the arguments, so there is nothing
+        // at the call for tsc to have read it from.
+        const undetermined = template.parameters.map((p) => `\`${p.name}\``).join(" and ");
+        const one = template.parameters.length === 1;
+        this.error(
+            call,
+            "GF0404",
+            `this call does not determine ${undetermined}, so there is no way to know ` +
+            `which copy of \`${template.name}\` to compile. Write ` +
+            `\`${template.name}<${template.parameters.map(() => "…").join(", ")}>(…)\` ` +
+            `with a concrete type in place of each \`…\`.\n\n` +
+            "A generic is compiled once for each set of type arguments, so " +
+            `${one ? "it has" : "they have"} to be settled here — either by an argument ` +
+            "whose type says so, or in writing.",
+        );
+        return undefined;
     }
 
     /**

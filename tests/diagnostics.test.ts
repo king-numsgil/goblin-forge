@@ -428,13 +428,16 @@ describe("codes raised by a program", () => {
         );
     });
 
-    test("GF0404 — a generic call with no type arguments", async () => {
+    test("GF0404 — a generic call that determines nothing", async () => {
+        // `T` is in no argument, so inference has nothing to read it from.
+        // `identity(1)` is deliberately *not* the specimen: that determines `T`
+        // as the literal type `1`, and its complaint is GF0161's.
         await expectRejected(
             "diag-0404",
-            `function identity<T>(x: T): T { return x; }
+            `function sizeOfIt<T>(): usize { return sizeOf<T>(); }
 
        export function main(): i32 {
-         return identity(1);
+         return cast<i32>(sizeOfIt());
        }\n`,
             "GF0404",
         );

@@ -371,14 +371,24 @@ Two properties this needs and does not get for free:
 At `identity<i32>(7)`, from `call.typeArguments` via
 `checker.getTypeFromTypeNode` — all public API, all exact.
 
-At `identity(7)`, tsc inferred it, and the public surface does not hand back
-the inference result directly. Two routes: unify the declared parameter types
-against `checker.getResolvedSignature(call)`'s instantiated ones, or require
-the type arguments to be written. **Stage 1 requires them to be written**, with
-a diagnostic that says so, and stage 4 adds inference by unification. That
-order is not only about effort — "written down rather than inferred" is the
-house style, and shipping the explicit form first means the inferred form is
-built against a working implementation rather than alongside one.
+At `identity(i)`, tsc inferred it, and the public surface does not hand the
+inference result back directly. What it does hand back is
+`getResolvedSignature`, whose parameters are the *instantiated* types — so the
+mapping is recovered by **unification**: walk the declaration's parameter types,
+which still mention `T`, alongside the resolved ones, which do not, and read `T`
+off wherever the two line up. Only three shapes need walking, and that is the
+whole set rather than a shortcut: a bare `T`, a `T[]`, and a type reference's
+arguments pairwise.
+
+Both spellings have to reach the *same* instantiation, and they do, because the
+memo is on the erased arguments rather than on how they were written.
+
+**`identity(1)` is a separate rule and must not be answered by this one.** The
+literal determines `T` perfectly well — as the type `1`, which has no width. So
+the complaint belongs to `GF0161` and the fix is at the literal, and telling the
+programmer to write type arguments there would send them to the wrong place.
+What `GF0404` is left saying is the narrow, true thing: this call determines
+nothing, which in practice means a type parameter that appears in no argument.
 
 ---
 
@@ -399,27 +409,38 @@ name and its layout". Three of them fail without the fix — two of those as
 over-strictness guard and passes either way, on purpose. Full suite green,
 golden MIR unchanged.
 
-### Stage 1 — the substitution, and generic functions over an opaque `T`
+### Stage 1 — the substitution, and generic functions ✅ *(done, 2026-08-28)*
 
-- `Substitution`, the leaf case in `erase`, the threading (§4.1, §4.2).
-- `#declare` stops refusing a generic function and instead registers it as a
-  *template*: no MIR function, no signature, nothing emitted.
-- A call with written type arguments instantiates: erase the arguments, look up
-  or create the instantiation, lower the declaration's body a second time under
-  the substitution with a fresh `BodyLowerer`.
-- The instantiation backtrace: a `Note` pointing at the use site, attached to
-  every diagnostic raised while lowering an instantiated body.
-- A call with *no* written type arguments is refused, pointing at the call and
-  naming what to write.
+`Substitution` and the leaf case in `erase`; templates in `#declare`;
+instantiation behind `resolveCallee`; the worklist; the backtrace note.
+**Inference came with it** rather than waiting for stage 4 — the unification in
+§4.5 turned out to be about sixty lines, and shipping the explicit form alone
+would have meant a diagnostic telling people to write what tsc already knew.
 
-Reaches: `identity<T>`, `first<T>(xs: T[]): T`, `count<T>(xs: T[]): usize`,
-`swap<T>(a: Pointer<T>, b: Pointer<T>)`, `T` in and out by value.
+Reaches: `identity<T>`, `first<T>(xs: T[]): T`, `unwrap<T>(w: Wrap<T>): T`,
+`alloc<T>()`, `sizeOf<T>()`, `T` in and out by value, a generic calling a
+generic with its own `T`, and a generic reached through a module namespace.
 
-*Checkpoint:* a new `tests/generics.test.ts` that runs `first<i32>` and
-`first<string>` in one program and asserts both results **and** the live
-allocation count — the `string` instantiation has to clone and drop where the
-`i32` one does neither, and the harness's automatic check is what proves the
-category came from the substituted type rather than from the declaration.
+**Does not reach `swap<T>(a: Pointer<T>, b: Pointer<T>)`**, which this plan
+listed and should not have. The signature type-checks — which is all the
+original probe established, because `GF0001` stopped it at the declaration and
+the body was never reached — but `p.deref()` and `p.store(v)` inside it are
+`TS2339`/`TS2322`. Same conditional-type problem as `Reference<T>`, same
+prelude spike (§2, stage 5). Erasure sees through the shape now, which is what
+makes `alloc<T>()` work; tsc refusing the member access is the part that is
+left.
+
+*Checkpoint, met:* `tests/generics.test.ts`. `first<i32>` and `first<string>`
+in one program, both results asserted **and** the live-allocation count — the
+`string` instantiation clones and drops where the `i32` one does neither, and
+the harness's automatic check is what proves the category came from the
+substituted type rather than from the declaration.
+
+Three things this plan got wrong, all found by running it, all now in the
+commit message and the code: a binding cannot be a `ts.Type` (§4.1's
+`TypeBinding` is why); the depth limit has to ride on the worklist item,
+because a queue never nests; and `Pointer<T>` erases through a *substitution
+type*, which prints as `T`, is `T`, and does not carry the type-parameter flag.
 
 ### Stage 2 — generic aggregates
 
@@ -441,13 +462,15 @@ substitution rather than from the call's own type.
 and `f64`, with the `f32` result asserted to actually be `f32`-rounded — the
 cheap wrong implementation computes both at `f64`.
 
-### Stage 4 — inference, and instantiations as values
+### Stage 4 — instantiations as values
 
-- Unify against `getResolvedSignature` so `identity(7)` works.
-- `identity<i32>` in value position, as a function pointer. The existing
-  refusal in `eraseSignature` ("a generic function type cannot be a function
-  pointer: there is no one body to take the address of") stays exactly right
-  for the *uninstantiated* form and should keep its wording.
+Inference moved into stage 1, so what is left here is the address of one.
+
+`identity<i32>` in value position, as a function pointer. The existing refusal
+in `eraseSignature` ("a generic function type cannot be a function pointer:
+there is no one body to take the address of") stays exactly right for the
+*uninstantiated* form and should keep its wording; what has to change is that a
+written instantiation is not that.
 
 *Checkpoint:* a callback table built from instantiations of one generic.
 
@@ -610,7 +633,7 @@ documented act rather than a quiet one. `GF04xx` — generics and instantiation:
 | `GF0401` | A published Goblin interface and the archive beside it came from different builds (§6). Only reachable once stage 6 lands. |
 | `GF0402` | Instantiation is unbounded. `f<T>` reaches `f<Pair<T>>`; names the chain. |
 | `GF0403` | A generic `declare function`. There is no body to instantiate. |
-| `GF0404` | Type arguments must be written at the call. **Stage 1 only** — retired by stage 4, and the code retires with it (a code is never reused for a different rule). |
+| `GF0404` | The call determines no type arguments — a type parameter that appears in none of them. *Not* `identity(1)`, which determines `T` as a literal with no width and is `GF0161`. |
 
 Everything else reuses what exists, and should: a type argument with no value
 form is already `GF0002`, an unerasable one is already `GF0001`, and both now

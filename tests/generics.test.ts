@@ -167,6 +167,54 @@ describe("generics", () => {
         expect(result.leaked).toBe(0);
     });
 
+    test("type arguments are inferred when the call determines them", async () => {
+        const result = await run(
+            "generic-inferred",
+            `function first<T>(xs: T[]): T { return xs[0]; }
+       function pick<A, B>(a: A, b: B): A { return a; }
+
+       export function main(): i32 {
+         const numbers: i32[] = [6, 7];
+         const words: string[] = ["hi"];
+         const n: i32 = 3;
+         console.log(first(words));
+         return first(numbers) + pick(n, words);
+       }\n`,
+        );
+        expect(result.stdout).toBe("hi\n");
+        expect(result.exitCode).toBe(9);
+        expect(result.leaked).toBe(0);
+    });
+
+    test("inferred and written are the same instantiation", async () => {
+        // Memoised on the erased arguments rather than on the spelling, so
+        // these are one copy of `identity` and not two identical ones.
+        const result = await run(
+            "generic-inferred-and-written",
+            `function identity<T>(x: T): T { return x; }
+
+       export function main(): i32 {
+         const i: i32 = 2;
+         return identity(i) + identity<i32>(3);
+       }\n`,
+        );
+        expect(result.exitCode).toBe(5);
+    });
+
+    test("inference sees through a generic that is itself being instantiated", async () => {
+        const result = await run(
+            "generic-inferred-nested",
+            `function inner<T>(x: T): T { return x; }
+       function outer<T>(x: T): T { return inner(x); }
+
+       export function main(): i32 {
+         const i: i32 = 8;
+         return outer(i);
+       }\n`,
+        );
+        expect(result.exitCode).toBe(8);
+    });
+
     test("a generic reached through a module namespace instantiates", async () => {
         const result = await run(
             "generic-namespace",
@@ -185,17 +233,35 @@ describe("generics", () => {
     });
 
     describe("what it refuses", () => {
-        test("GF0404 — the type arguments have to be written out", async () => {
+        test("GF0404 — a call that determines nothing", async () => {
+            // `T` appears in no argument, so there is nothing at the call for
+            // tsc to have read it from either.
             const diagnostic = await expectRejected(
-                "generic-inferred",
+                "generic-undetermined",
+                `function sizeOfIt<T>(): usize { return sizeOf<T>(); }
+
+       export function main(): i32 {
+         return cast<i32>(sizeOfIt());
+       }\n`,
+                "GF0404",
+            );
+            expect(diagnostic.message).toContain("does not determine `T`");
+        });
+
+        test("an untyped literal is GF0161, not a generics problem", async () => {
+            // `identity(1)` determines `T` perfectly well — as the literal type
+            // `1`, which has no width. The complaint belongs to the width rules
+            // and the fix is at the literal, so it would be actively unhelpful
+            // to answer it with "write the type arguments".
+            await expectRejected(
+                "generic-literal-argument",
                 `function identity<T>(x: T): T { return x; }
 
        export function main(): i32 {
          return identity(1);
        }\n`,
-                "GF0404",
+                "GF0161",
             );
-            expect(diagnostic.message).toContain("`T`");
         });
 
         test("GF0403 — a generic with no body has nothing to instantiate", async () => {

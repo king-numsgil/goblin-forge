@@ -17,6 +17,7 @@ import {
     type MachineType,
     type Substitution,
     type TypeBinding,
+    typeParameterSymbolOf,
 } from "@goblin-forge/checker";
 import ts from "typescript";
 
@@ -46,6 +47,135 @@ export function typeParameterSymbolsOf(
         symbols.push(symbol);
     }
     return symbols;
+}
+
+/**
+ * What tsc inferred a call's type arguments to be, or `undefined`.
+ *
+ * tsc has already done the inference — `getResolvedSignature` hands back a
+ * signature whose parameters are the *instantiated* types — and what it does
+ * not hand back is the mapping from each type parameter to what it became.
+ * That is recovered by **unification**: walk the declaration's parameter types,
+ * which still mention `T`, alongside the resolved ones, which do not, and read
+ * `T` off wherever the two line up.
+ *
+ * Only the shapes this language has are walked, and that is not a shortcut so
+ * much as the whole set: a bare `T`, a `T[]`, and a type reference's arguments
+ * pairwise. There is nothing else a Goblin signature can be built from.
+ *
+ * The return type is unified too, and last. It is what determines `T` for a
+ * signature that mentions it only there, and going last means a parameter's
+ * answer wins where both say something — parameters are where the call's own
+ * values are, so their answer is the one the programmer can see.
+ *
+ * `undefined` when any parameter is left undetermined, which is the caller's
+ * cue to ask for the arguments in writing.
+ */
+export function inferBindings(
+    checker: ts.TypeChecker,
+    parameters: readonly ts.Symbol[],
+    declared: ts.Signature,
+    resolved: ts.Signature,
+): Map<ts.Symbol, ts.Type> | undefined {
+    const wanted = new Set(parameters);
+    const found = new Map<ts.Symbol, ts.Type>();
+
+    const declaredParams = declared.getParameters();
+    const resolvedParams = resolved.getParameters();
+    for (const [index, parameter] of declaredParams.entries()) {
+        const actual = resolvedParams[index];
+        if (actual === undefined) {
+            break;
+        }
+        const from = typeOfParameter(checker, parameter);
+        const to = typeOfParameter(checker, actual);
+        if (from !== undefined && to !== undefined) {
+            unify(checker, from, to, wanted, found);
+        }
+    }
+    unify(
+        checker,
+        checker.getReturnTypeOfSignature(declared),
+        checker.getReturnTypeOfSignature(resolved),
+        wanted,
+        found,
+    );
+
+    return parameters.every((parameter) => found.has(parameter)) ? found : undefined;
+}
+
+/** A parameter symbol's type, read at its own declaration. */
+function typeOfParameter(checker: ts.TypeChecker, parameter: ts.Symbol): ts.Type | undefined {
+    const declaration = parameter.valueDeclaration;
+    return declaration === undefined
+        ? undefined
+        : checker.getTypeOfSymbolAtLocation(parameter, declaration);
+}
+
+/**
+ * Read type parameters off a declared type by matching it against a concrete
+ * one, position by position.
+ *
+ * **First answer wins.** A call that would bind one parameter two ways —
+ * `pair<T>(a: T, b: T)` called with an `i32` and an `f64` — is one tsc has
+ * already rejected, so reaching here with a conflict is not a program this
+ * needs an opinion about.
+ */
+function unify(
+    checker: ts.TypeChecker,
+    declared: ts.Type,
+    actual: ts.Type,
+    wanted: ReadonlySet<ts.Symbol>,
+    into: Map<ts.Symbol, ts.Type>,
+): void {
+    const parameter = typeParameterSymbolOf(declared);
+    if (parameter !== undefined) {
+        if (wanted.has(parameter) && !into.has(parameter)) {
+            into.set(parameter, actual);
+        }
+        return;
+    }
+
+    if (checker.isArrayType(declared) && checker.isArrayType(actual)) {
+        const element = checker.getIndexTypeOfType(declared, ts.IndexKind.Number);
+        const concrete = checker.getIndexTypeOfType(actual, ts.IndexKind.Number);
+        if (element !== undefined && concrete !== undefined) {
+            unify(checker, element, concrete, wanted, into);
+        }
+        return;
+    }
+
+    // `Wrap<T>` against `Wrap<i32>`, and every other generic type reference —
+    // which is also how `Pointer<T>` and `FixedArray<T, N>` are reached, since
+    // both are ordinary references once the alias is resolved.
+    const from = typeArgumentsOf(checker, declared);
+    const to = typeArgumentsOf(checker, actual);
+    if (from === undefined || to === undefined) {
+        return;
+    }
+    for (const [index, argument] of from.entries()) {
+        const concrete = to[index];
+        if (concrete !== undefined) {
+            unify(checker, argument, concrete, wanted, into);
+        }
+    }
+}
+
+/** A type reference's arguments, or `undefined` when it is not one. */
+function typeArgumentsOf(
+    checker: ts.TypeChecker,
+    type: ts.Type,
+): readonly ts.Type[] | undefined {
+    if ((type.getFlags() & ts.TypeFlags.Object) === 0) {
+        // An intersection is how the prelude spells a wrapper — `Pointer<T>` is
+        // `T & CorePointer<T>` — so its members are walked rather than the type
+        // itself, which has no arguments of its own.
+        return type.isIntersection() ? type.types : undefined;
+    }
+    if (((type as ts.ObjectType).objectFlags & ts.ObjectFlags.Reference) === 0) {
+        return undefined;
+    }
+    return checker.getTypeArguments(type as ts.TypeReference);
 }
 
 /** Pair each of a generic's type parameters with what this use bound it to. */
