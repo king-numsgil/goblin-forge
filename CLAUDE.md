@@ -19,8 +19,9 @@ how the thing is put together and which mistakes it is designed to prevent.
 - [`LINKING.md`](LINKING.md) — what a program links and how, including the
   allocator surface and `runtime: "shared"`.
 - [`GENERICS-PLAN.md`](GENERICS-PLAN.md) — monomorphisation, decided by
-  DECISIONS §11.7. Stages 0 and 1 are done (generic functions); §6 is how a
-  generic crosses a Goblin library boundary, and is not built.
+  DECISIONS §11.7. Stages 0 to 5 are done — generic functions, aggregates,
+  numeric generics, instantiations as values, and generic classes. §6 is how a
+  generic crosses a Goblin library boundary, and is the one stage not built.
 - [`POINTER-ERASURE.md`](POINTER-ERASURE.md) — how `void *` was arrived at,
   including the design that was probed and rejected. Answered by DECISIONS §13;
   worth reading before changing anything about `erase()` / `reify<U>()`, because

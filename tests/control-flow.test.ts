@@ -235,10 +235,13 @@ describe("declarations the language does not have yet", () => {
         // width, and that is a declaration about a type rather than a namespace
         // anybody can put things in.
         ["a `namespace`", "namespace N { export function f(): i32 { return 1; } }\n"],
-        // A generic function is no longer here: it is monomorphised, and
-        // `tests/generics.test.ts` is where that lives. A generic *class* still
-        // is — GENERICS-PLAN stage 5.
-        ["a generic class", "class Box<T> { constructor(readonly v: T) {} }\n"],
+        // Neither a generic function nor a generic class is here any more:
+        // both are monomorphised, and `tests/generics.test.ts` is where that
+        // lives. What is still refused is a generic used as a *base* class.
+        [
+            "a generic base class",
+            "class Box<T> { constructor(readonly v: T) {} }\nclass IntBox extends Box<i32> {}\n",
+        ],
         ["an arrow function", "const f = (a: i32): i32 => a;\n"],
         ["a function expression", "const f = function (a: i32): i32 { return a; };\n"],
         ["a class expression", "const C = class { };\n"],

@@ -498,23 +498,56 @@ Three things it turned on:
 *Checkpoint, met:* a callback table holding `identity<i32>` beside a plain
 function, both called through it.
 
-### Stage 5 — generic classes
+### Stage 5 — generic classes ✅ *(done, 2026-08-28; base classes excepted)*
 
 **Constraints that carry methods came out of this stage** and landed early, as
-DECISIONS §24: `ask<T extends Speaker>(x: Reference<T>): i32 { return
-x.speak(); }` compiles, and the call is *direct* rather than dispatched, which
-is the claim monomorphisation makes. What is left here is generic classes
-alone, and it needs at least:
+DECISIONS §24. What was left was generic classes, and it went as the plan
+guessed: `collectClasses` sets a generic aside instead of flattening it, and
+`Box<i32>` becomes a `ClassInfo` on demand, with its own vtable, constructor,
+destructor and methods.
 
-- `collectClasses` to grow an instantiation phase. It currently runs to
-  completion *before* functions are declared, keyed by bare name, and a generic
-  class cannot be flattened until its arguments are known — so `Box<i32>` is a
-  `ClassInfo` produced on demand, with its own vtable, constructor, destructor
-  and methods.
-- The class-name-collision refusal to be revisited, since instantiated names
-  are no longer bare.
-- `instanceof` and the type descriptors to treat `Box<i32>` and `Box<f64>` as
-  unrelated types, which they are.
+**Interning a class is what makes one.** `tyOf`'s `case "class"` is the choke
+point every mention goes through — a parameter, a field, a `new`, a local — so
+it is the one place that had to know, and everything upstream still treats
+`Box<i32>` as an ordinary class name. That matters because the first mention of
+a `Box<i32>` can be inside a generic *function's* body, which is lowered long
+after the ordinary classes were declared: a syntactic pre-pass could not have
+found it.
+
+Names are readable — `Box<i32>`, and `Box<i32>$get` for its methods. `<` and
+`,` are unforgeable in a TypeScript identifier, and the backend's `ident()`
+quotes any symbol that is not plain, so `@"__gf_vt$Box<i32>"` is legal LLVM and
+still legible in a disassembly. The mangling this plan expected to need was not
+needed.
+
+Four things it turned on, three of them found only by running it:
+
+- **`this` is a type parameter to tsc.** The polymorphic this-type carries
+  `TypeFlags.TypeParameter`, and its symbol is the *class* — so the
+  substitution's leaf case claimed it, found nothing bound, and every
+  `this.field` in a generic class came back as "not supported", pointing inside
+  the class rather than at anything anybody wrote. The flag is not enough: a
+  real type parameter is one whose symbol is declared by a `<T>`.
+- **`this` has no type arguments either**, being a this-type rather than a
+  reference — so inside `Box<T>`'s body the receiver erased as `Box<>`. Its
+  arguments are the class's own parameters, which the substitution resolves.
+- **`defineClass` rewrites a class's interface list wholesale**, so the eager
+  path's three passes cannot be collapsed into one pass doing three things.
+  Interleaving them let `Base implements Speaker` propagate an itab to `Middle`
+  and then `Middle`'s own `defineClass`, one iteration later, wipe it. Every
+  `tryCast` on a derived class answered null.
+- **`new Box<i32>(…)` resolves through the erasure**, not the identifier's
+  text. `Box` on its own is not a class this build has.
+
+**A generic base class is refused** (`class D extends Box<i32>`), narrowly and
+on purpose: resolving a base by its erased type arguments is a different
+question from resolving one by name, which is all the heritage clause is read
+for. Everything else about inheritance is unchanged.
+
+Still open under it, and neither is reachable yet: the class-name-collision
+refusal could be revisited now that instantiated names are not bare, and
+`instanceof` across `Box<i32>` and `Box<f64>` wants a test — they are unrelated
+types and the descriptors should already say so, but nothing checks it.
 
 ### Stage 6 — crossing a Goblin boundary
 

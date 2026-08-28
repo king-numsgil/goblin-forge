@@ -148,9 +148,21 @@ export type MachineType =
            * types, they have different vtables, and one is not assignable to the
            * other. The lowerer holds the fields, the base and the vtable in its own
            * registry, keyed by this name.
+           *
+           * For a generic class the name carries the type arguments —
+           * `Box<i32>` — because `Box<i32>` and `Box<f64>` are different
+           * classes with different layouts and different vtables.
            */
           readonly kind: "class";
           readonly name: string;
+          /**
+           * The erased type arguments, for a generic class's instantiation.
+           *
+           * Absent for an ordinary class. Present so the lowerer can build the
+           * instantiation's `ClassInfo` on demand: the name says *which*
+           * instantiation, and this says what to substitute.
+           */
+          readonly args?: readonly MachineType[];
       }
     | {
           /**
@@ -484,7 +496,18 @@ export function isCStringType(checker: ts.TypeChecker, type: ts.Type): boolean {
  */
 export function typeParameterSymbolOf(type: ts.Type): ts.Symbol | undefined {
     if ((type.getFlags() & ts.TypeFlags.TypeParameter) !== 0) {
-        return type.symbol;
+        // **The flag is not enough.** `this` inside a class body carries it too
+        // — tsc models the polymorphic this-type as a type parameter, and its
+        // symbol is the *class*. Answering with that made `this` inside
+        // `Box<T>` look like an unbound parameter, so every `this.field` in a
+        // generic class came back as "not supported", pointing inside the class
+        // rather than at anything anybody wrote.
+        //
+        // So the declaration decides, not the flag: a real type parameter is
+        // declared by a `<T>`.
+        return type.symbol?.declarations?.some(ts.isTypeParameterDeclaration) === true
+            ? type.symbol
+            : undefined;
     }
     // A *substitution type*: tsc's note-to-itself that inside the true branch
     // of `[T] extends [X] ? … : …`, this `T` is additionally known to satisfy
@@ -692,9 +715,11 @@ export function erase(
         return {kind: "opaque", name: opaqueName};
     }
 
-    const className = classNameOf(type);
-    if (className !== null) {
-        return {kind: "class", name: className};
+    const asClass = classOf(checker, type, state);
+    if (asClass !== null) {
+        return asClass.args === undefined
+            ? {kind: "class", name: asClass.name}
+            : {kind: "class", name: asClass.name, args: asClass.args};
     }
 
     // `T[]` and `Array<T>` are one type in TypeScript and one type here: the
@@ -1000,9 +1025,12 @@ function eraseReferent(
             "GF0302",
         );
     }
-    const className = classNameOf(referent);
-    if (className !== null) {
-        return {kind: "reference", referent: {kind: "class", name: className}};
+    // Through the general path rather than by name, so that a
+    // `Reference<Box<i32>>` names the instantiation and carries its arguments
+    // like every other mention of one.
+    const asClass = classOf(checker, referent, state);
+    if (asClass !== null) {
+        return {kind: "reference", referent: erase(checker, referent, state)};
     }
 
     // Everything else, which in practice means a struct or a fixed array.
@@ -1070,12 +1098,70 @@ function referenceTo(referent: MachineType): MachineType {
  * identities, and one is not the other.
  */
 export function classNameOf(type: ts.Type): string | null {
-    const symbol = type.getSymbol();
-    if (symbol === undefined) {
+    return classDeclarationOf(type)?.name?.text ?? null;
+}
+
+/** The `class` declaration a type is an instance of, or `undefined`. */
+export function classDeclarationOf(type: ts.Type): ts.ClassDeclaration | undefined {
+    return type.getSymbol()?.declarations?.find(ts.isClassDeclaration);
+}
+
+/**
+ * A class instance, with the type arguments it was instantiated at.
+ *
+ * `Box<i32>` and `Box<f64>` are **different classes** — different layouts,
+ * different vtables, different destructors — so the name has to say which, and
+ * the erased arguments have to travel with it. The lowerer is what turns those
+ * into a `ClassInfo`, and the name alone could not carry them back.
+ *
+ * The name is readable rather than mangled, the way a struct's is: `<`, `>` and
+ * `,` are unforgeable in a TypeScript identifier, so nothing a program declares
+ * can collide with one, and the backend's `ident()` quotes a symbol that is not
+ * plain — `@"__gf_vt$Box<i32>"` is legal LLVM and legible in `llvm-objdump`,
+ * which is the whole reason those symbols keep the class's name at all.
+ *
+ * A non-generic class answers exactly what it always did: its own name, and no
+ * arguments.
+ */
+function classOf(
+    checker: ts.TypeChecker,
+    type: ts.Type,
+    state: Erasure,
+): { readonly name: string; readonly args?: readonly MachineType[] } | null {
+    const declaration = classDeclarationOf(type);
+    const name = declaration?.name?.text;
+    if (declaration === undefined || name === undefined) {
         return null;
     }
-    const declaration = symbol.declarations?.find(ts.isClassDeclaration);
-    return declaration?.name?.text ?? null;
+    if (declaration.typeParameters === undefined || declaration.typeParameters.length === 0) {
+        return {name};
+    }
+
+    const parameters = declaration.typeParameters;
+    const written = checker.getTypeArguments(type as ts.TypeReference);
+
+    // `this` inside `Box<T>`'s own body is tsc's **this-type**, not a reference
+    // to `Box<T>` — so it has no type arguments to read, and asking for them
+    // gives an empty list. Its arguments are the class's own parameters, which
+    // the substitution in force resolves: inside `Box<i32>`'s copy of the body,
+    // `T` is `i32`, and this is what makes `this.value` find the right class.
+    //
+    // Without it a method body erased its own receiver as `Box<>` and the
+    // property access came back as "not supported", pointing inside the class
+    // rather than at anything the programmer wrote.
+    const supplied =
+        written.length === parameters.length
+            ? written
+            : parameters.map((parameter) => checker.getTypeAtLocation(parameter.name));
+
+    // Through, because the arguments are part of this class's *identity* rather
+    // than of its layout: a `Box<Node>` is one machine word whatever `Node`
+    // turns out to be, so a `Node` that reaches itself through one is an
+    // ordinary shape rather than a value containing itself.
+    const args = supplied.map((argument) =>
+        state.through(() => erase(checker, argument, state)),
+    );
+    return {name: `${name}<${args.map(renderType).join(", ")}>`, args};
 }
 
 /**

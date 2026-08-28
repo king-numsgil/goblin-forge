@@ -39,6 +39,7 @@ import {
 } from "@goblin-forge/checker";
 import ts from "typescript";
 import {
+    buildClass,
     type ClassInfo,
     type ClassMethod,
     collectClasses,
@@ -95,6 +96,15 @@ export class Lowerer {
     readonly #root: string;
     readonly #entry: string;
     #classes = new Map<string, ClassInfo>();
+    /**
+     * Generic class declarations, by their bare name — `Box`, not `Box<i32>`.
+     *
+     * Nothing is emitted for one. {@link Lowerer.classInfoFor} makes the
+     * instantiations, on demand, because the first mention of a `Box<i32>` may
+     * be inside a generic function's body and that is lowered long after the
+     * ordinary classes were declared.
+     */
+    #genericClasses = new Map<string, ts.ClassDeclaration>();
     /** Interned `LocalFn` value types, by the mangled name {@link #localFnTy} builds. */
     #localFns = new Map<string, TyId>();
     /** How many closures have been lifted, for naming the next one. */
@@ -145,6 +155,19 @@ export class Lowerer {
      * runs it to a fixed point.
      */
     readonly #pending: PendingInstantiation[] = [];
+
+    /**
+     * Class members declared on demand and still waiting for their bodies.
+     *
+     * Apart from {@link Lowerer.#pending} because a class body is a
+     * {@link ClassBody} rather than a function instantiation, and drained
+     * beside it for the same reason: an instantiated class's method may be what
+     * asks for the next instantiation of anything.
+     */
+    readonly #pendingClasses: ClassBody[] = [];
+
+    /** How deep the current chain of *class* instantiations is. */
+    #classDepth = 0;
 
     /**
      * The instantiation being lowered, and how it was reached.
@@ -524,7 +547,16 @@ export class Lowerer {
      * rides on the item rather than being read off the call stack.
      */
     #drainPending(): void {
-        while (this.#pending.length > 0) {
+        while (this.#pending.length > 0 || this.#pendingClasses.length > 0) {
+            // Class members first, and until there are none: a method's body may
+            // call a generic, and a generic's body may mention a class — so the
+            // two lists feed each other and neither can be finished on its own.
+            while (this.#pendingClasses.length > 0) {
+                this.#lowerClassBody(this.#pendingClasses.shift()!);
+            }
+            if (this.#pending.length === 0) {
+                continue;
+            }
             const pending = this.#pending.shift()!;
             const previousNote = this.#instantiatedAt;
             const previousCurrent = this.#current;
@@ -804,6 +836,106 @@ export class Lowerer {
 
     classInfo(name: string): ClassInfo | undefined {
         return this.#classes.get(name);
+    }
+
+    /**
+     * The `ClassInfo` for a class named here, instantiating it if it is a
+     * generic's and this is the first mention.
+     *
+     * `Box<i32>` is a different class from `Box<f64>` — different layout,
+     * different vtable, different destructor — so there is one of these per set
+     * of type arguments, made the first time anything asks. Everything after
+     * that point treats it as an ordinary class, which is the claim
+     * monomorphisation makes and the reason nothing downstream changed.
+     *
+     * The bodies go on {@link Lowerer.#pendingClasses} rather than being
+     * lowered here, for the reason a function instantiation's do: this runs
+     * from inside a body, and lowering re-entrantly would stack a second
+     * `BodyLowerer` for no reason.
+     */
+    classInfoFor(name: string, args: readonly MachineType[], at: ts.Node): ClassInfo | undefined {
+        const known = this.#classes.get(name);
+        if (known !== undefined) {
+            return known;
+        }
+        if (args.length === 0) {
+            return undefined;
+        }
+
+        // `Box<i32>` names the declaration `Box`. Split at the first `<`, which
+        // is unambiguous because a class's own name cannot contain one — that
+        // is the same property that makes the instantiated name unforgeable.
+        const bare = name.slice(0, name.indexOf("<"));
+        const node = this.#genericClasses.get(bare);
+        if (node === undefined) {
+            return undefined;
+        }
+
+        const parameters = node.typeParameters ?? [];
+        if (parameters.length !== args.length) {
+            this.unsupported(at, `\`${name}\`, whose type arguments do not match \`${bare}\``);
+            return undefined;
+        }
+
+        // `class Box<T> { inner: Box<Box<T>> }` is the class-shaped version of
+        // an unbounded generic, and needs the same limit for the same reason.
+        if (this.#classDepth >= MAX_INSTANTIATION_DEPTH) {
+            this.error(
+                at,
+                "GF0402",
+                `instantiating \`${name}\` needs another instantiation of \`${bare}\`, and ` +
+                `that one needs another, ${MAX_INSTANTIATION_DEPTH} deep. Each set of ` +
+                "type arguments is a separate class with its own layout, so one that " +
+                "contains itself at a *larger* type has no end.",
+            );
+            return undefined;
+        }
+
+        const bindings = new Map<ts.Symbol, MachineType>();
+        for (const [index, parameter] of parameters.entries()) {
+            const symbol = this.#checker.getSymbolAtLocation(parameter.name);
+            if (symbol === undefined) {
+                this.unsupported(parameter, "a type parameter tsc could not resolve");
+                return undefined;
+            }
+            bindings.set(symbol, args[index]!);
+        }
+
+        this.#classDepth += 1;
+        try {
+            const info = buildClass(
+                node,
+                name,
+                (baseName) => this.#classes.get(baseName),
+                this.#checker,
+                {
+                    unsupported: (node_, what) => this.unsupported(node_, what),
+                    refuse: (node_, message) => this.error(node_, "GF0002", message),
+                    erase: (eraseAt, type) => this.erase(eraseAt, type, bindings),
+                },
+            );
+            if (info === undefined) {
+                return undefined;
+            }
+            // Registered **before** the members are declared, so that a method
+            // taking or returning a `Box<i32>` interns the class it is a member
+            // of rather than asking for it again and recursing.
+            this.#classes.set(name, info);
+            this.#registerClass(info);
+            this.#pendingClasses.push(...this.#declareClassMembers(info, bindings));
+            // Layout then contracts, immediately, where the eager path has to
+            // do each in its own pass. It is safe here for the reason the two
+            // passes exist there: by the time anything asks for a `Box<i32>`
+            // every ordinary class already has its methods, and nothing derives
+            // from an instantiation, because a generic base class is refused —
+            // so there is no *other* class whose `defineClass` could come along
+            // afterwards and wipe this one's interface list.
+            this.#defineClassLayout(info);
+            this.#registerDeclaredInterfaces(info);
+            return info;
+        } finally {
+            this.#classDepth -= 1;
+        }
     }
 
     /** The record for a function emitted under a generated symbol. */
@@ -1232,6 +1364,15 @@ export class Lowerer {
             case "struct":
                 return this.#structTy(type, at);
             case "class": {
+                // Interning a class is also what *makes* one, when it is a
+                // generic's instantiation nothing has mentioned yet. This is
+                // the choke point every mention goes through — a parameter, a
+                // field, a `new`, a local — so it is the one place that has to
+                // know, and everything upstream keeps treating `Box<i32>` as an
+                // ordinary class name.
+                if (type.args !== undefined && this.classTy(type.name) === undefined) {
+                    this.classInfoFor(type.name, type.args, at);
+                }
                 const ty = this.classTy(type.name);
                 if (ty === undefined) {
                     this.unsupported(at, `the class \`${type.name}\``);
@@ -1726,27 +1867,70 @@ export class Lowerer {
      *    declared, so a method can call one.
      */
     #declareClasses(): ClassBody[] {
-        this.#classes = collectClasses(this.#program, this.#checker, {
+        const collected = collectClasses(this.#program, this.#checker, {
             unsupported: (node, what) => this.unsupported(node, what),
             refuse: (node, message) => this.error(node, "GF0002", message),
-            // A generic class is refused at its declaration (stage 5 of
-            // GENERICS-PLAN), so nothing collected here is inside one.
+            // Nothing collected eagerly is inside a generic: a generic class is
+            // set aside rather than analysed, and instantiated on demand by
+            // {@link Lowerer.classInfoFor}.
             erase: (at, type) => this.erase(at, type, NO_BINDINGS),
         });
+        this.#classes = collected.classes;
+        this.#genericClasses = collected.generics;
         this.#refuseInlineCycles();
 
-        for (const [name, info] of this.#classes) {
-            const id = this.#mir.declareClass({
-                name,
-                base: (info.base ? this.#classIds.get(info.base.name) : null) ?? null,
-                span: this.span(info.node),
-            });
-            this.#classIds.set(name, id);
-            this.#classTys.set(name, this.#mir.ty({kind: "Class", value: id}));
+        for (const info of this.#classes.values()) {
+            this.#registerClass(info);
         }
 
         const bodies: ClassBody[] = [];
         for (const info of this.#classes.values()) {
+            bodies.push(...this.#declareClassMembers(info, NO_BINDINGS));
+        }
+        // Three passes over all of them, not one pass doing three things, and
+        // the separation is load-bearing in both directions.
+        //
+        // `implement` needs every class's methods to have a `FuncId`, because
+        // it resolves each derived class's *final overriders* — so it cannot
+        // run before the declaring loop above has finished.
+        //
+        // And `defineClass` **rewrites a class's interface list wholesale**, so
+        // it cannot run after. Interleaving the two per class did exactly that:
+        // `Base implements Speaker` propagated an itab to `Middle`, and
+        // `Middle`'s own `defineClass` — one iteration later — wiped it. Every
+        // `tryCast` on a derived class then answered null.
+        for (const info of this.#classes.values()) {
+            this.#defineClassLayout(info);
+        }
+        for (const info of this.#classes.values()) {
+            this.#registerDeclaredInterfaces(info);
+        }
+        return bodies;
+    }
+
+    /** Reserve a class's `ClassId` and `TyId`, so `Reference<Self>` can intern. */
+    #registerClass(info: ClassInfo): void {
+        const id = this.#mir.declareClass({
+            name: info.name,
+            base: (info.base ? this.#classIds.get(info.base.name) : null) ?? null,
+            span: this.span(info.node),
+        });
+        this.#classIds.set(info.name, id);
+        this.#classTys.set(info.name, this.#mir.ty({kind: "Class", value: id}));
+    }
+
+    /**
+     * Declare every function one class owns, and hand back its bodies.
+     *
+     * Split out of {@link Lowerer.#declareClasses} so it can run *on demand*.
+     * A `Box<i32>` is not knowable up front: the first mention of one may be
+     * inside a generic function's body, which is lowered long after the
+     * eager classes were declared. So this has to be callable at any point,
+     * which is the whole of why it is a function rather than a loop body.
+     */
+    #declareClassMembers(info: ClassInfo, bindings: Substitution): ClassBody[] {
+        const bodies: ClassBody[] = [];
+        {
             const self: MachineType = {kind: "class", name: info.name};
             const selfRef: MachineType = {kind: "reference", referent: self};
 
@@ -1756,6 +1940,7 @@ export class Lowerer {
             bodies.push({
                 kind: "destructor",
                 info,
+                bindings,
                 builder: this.#declareClassFn(info.destructorSymbol, [selfRef], VOID, info.node),
             });
 
@@ -1765,11 +1950,12 @@ export class Lowerer {
             // that only derives from such a class.
             if (info.constructorSymbol !== undefined) {
                 const params =
-                    info.ctor === undefined ? [] : this.#classFnParams(info.ctor, NO_BINDINGS);
+                    info.ctor === undefined ? [] : this.#classFnParams(info.ctor, bindings);
                 if (params !== undefined) {
                     bodies.push({
                         kind: "constructor",
                         info,
+                        bindings,
                         node: info.ctor,
                         builder: this.#declareClassFn(
                             info.constructorSymbol,
@@ -1794,7 +1980,7 @@ export class Lowerer {
                 if (method.owner !== info.name) {
                     continue;
                 }
-                const params = this.#classFnParams(method.declaration, NO_BINDINGS);
+                const params = this.#classFnParams(method.declaration, bindings);
                 if (params === undefined) {
                     continue;
                 }
@@ -1805,7 +1991,7 @@ export class Lowerer {
                         : this.erase(
                             method.declaration.type ?? method.declaration,
                             this.#checker.getReturnTypeOfSignature(signature),
-                            NO_BINDINGS,
+                            bindings,
                         );
                 if (returns === undefined) {
                     this.unsupported(method.declaration, "a method tsc could not give a signature to");
@@ -1814,6 +2000,7 @@ export class Lowerer {
                 bodies.push({
                     kind: "method",
                     info,
+                    bindings,
                     node: method.declaration,
                     builder: this.#declareClassFn(
                         method.symbol,
@@ -1839,7 +2026,7 @@ export class Lowerer {
                 if (method.owner !== info.name) {
                     continue;
                 }
-                const params = this.#classFnParams(method.declaration, NO_BINDINGS);
+                const params = this.#classFnParams(method.declaration, bindings);
                 if (params === undefined) {
                     continue;
                 }
@@ -1850,7 +2037,7 @@ export class Lowerer {
                         : this.erase(
                             method.declaration.type ?? method.declaration,
                             this.#checker.getReturnTypeOfSignature(signature),
-                            NO_BINDINGS,
+                            bindings,
                         );
                 if (returns === undefined) {
                     this.unsupported(method.declaration, "a method tsc could not give a signature to");
@@ -1861,6 +2048,7 @@ export class Lowerer {
                 bodies.push({
                     kind: "static",
                     info,
+                    bindings,
                     node: method.declaration,
                     builder: this.#declareClassFn(
                         method.symbol,
@@ -1874,27 +2062,31 @@ export class Lowerer {
                 });
             }
         }
+        return bodies;
+    }
 
-        for (const [name, info] of this.#classes) {
-            const id = this.#classIds.get(name);
+    /**
+     * Fill in a class's fields and vtable, once its functions exist.
+     *
+     * After {@link Lowerer.#declareClassMembers} and not before: the vtable
+     * holds `FuncId`s, and those are made by declaring the methods.
+     */
+    #defineClassLayout(info: ClassInfo): void {
+        {
+            const id = this.#classIds.get(info.name);
             if (id === undefined) {
-                continue;
+                return;
             }
             const vtable: FuncId[] = [];
-            let complete = true;
             for (const symbol of info.slots) {
                 const record = this.#functions.get(symbol);
                 if (record === undefined || record.kind !== "defined") {
                     // Only reachable when a member failed to lower, which has already
                     // been reported. Leaving the class out keeps one bad method from
                     // becoming a second, more confusing error about a missing vtable.
-                    complete = false;
-                    break;
+                    return;
                 }
                 vtable.push(record.id);
-            }
-            if (!complete) {
-                continue;
             }
 
             this.#mir.defineClass(id, {
@@ -1908,32 +2100,33 @@ export class Lowerer {
             });
         }
 
-        // Declared `implements`, registered eagerly and **after** `defineClass`,
-        // which rewrites the list wholesale.
-        //
-        // A static conversion registers its own itab at the conversion site, so
-        // this is not what makes those work. It is what makes a *dynamic* cast
-        // work: `tryCast<Pet>(x)` searches the object's type descriptor, and a
-        // class whose only mention of `Pet` is in another module — or in no
-        // module, because nothing converted it statically — would have an empty
-        // table and answer "no" to a question whose answer is yes.
-        for (const info of this.#classes.values()) {
-            for (const clause of info.node.heritageClauses ?? []) {
-                if (clause.token !== ts.SyntaxKind.ImplementsKeyword) {
+    }
+
+    /**
+     * Declared `implements`, registered eagerly and **after** `defineClass`,
+     * which rewrites the list wholesale.
+     *
+     * A static conversion registers its own itab at the conversion site, so
+     * this is not what makes those work. It is what makes a *dynamic* cast
+     * work: `tryCast<Pet>(x)` searches the object's type descriptor, and a
+     * class whose only mention of `Pet` is in another module — or in no module,
+     * because nothing converted it statically — would have an empty table and
+     * answer "no" to a question whose answer is yes.
+     */
+    #registerDeclaredInterfaces(info: ClassInfo): void {
+        for (const clause of info.node.heritageClauses ?? []) {
+            if (clause.token !== ts.SyntaxKind.ImplementsKeyword) {
+                continue;
+            }
+            for (const expression of clause.types) {
+                const contract = this.#contractFrom(expression);
+                if (contract === undefined) {
                     continue;
                 }
-                for (const expression of clause.types) {
-                    const contract = this.#contractFrom(expression);
-                    if (contract === undefined) {
-                        continue;
-                    }
-                    this.tyOf(contract, expression);
-                    this.implement(info.name, contract, expression);
-                }
+                this.tyOf(contract, expression);
+                this.implement(info.name, contract, expression);
             }
         }
-
-        return bodies;
     }
 
     /**
@@ -2621,9 +2814,13 @@ export class Lowerer {
                     ty: this.tyOf(param.type, body.node),
                 });
             });
-            // A generic class is refused at its declaration (GENERICS-PLAN
-            // stage 5), so no class member is inside an instantiation yet.
-            const lowerer = new BodyLowerer(this, body.builder, scopes, body.returns, NO_BINDINGS);
+            const lowerer = new BodyLowerer(
+                this,
+                body.builder,
+                scopes,
+                body.returns,
+                body.bindings,
+            );
             lowerer.setClassContext(body.info, false);
             if (body.node.body !== undefined) {
                 lowerer.run(body.node.body);
@@ -2651,7 +2848,7 @@ export class Lowerer {
         });
 
         const returns = body.kind === "constructor" ? VOID : (body.returns ?? VOID);
-        const lowerer = new BodyLowerer(this, body.builder, scopes, returns, NO_BINDINGS);
+        const lowerer = new BodyLowerer(this, body.builder, scopes, returns, body.bindings);
         lowerer.setClassContext(body.info, body.kind === "constructor");
         if (body.kind === "constructor") {
             lowerer.runConstructor(body.info, body.node?.body);

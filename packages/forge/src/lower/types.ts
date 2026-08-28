@@ -190,11 +190,25 @@ export interface PendingInstantiation {
     readonly at: ts.Node;
 }
 
-/** One member of a class, waiting for its body to be lowered. */
+/**
+ * One member of a class, waiting for its body to be lowered.
+ *
+ * `bindings` is the class's substitution — empty for an ordinary class, and
+ * the instantiation's for a `Box<i32>`. It rides on the body rather than being
+ * looked up from the class because it is what the body is lowered *under*, and
+ * a member found without it would erase `T` as unbound at whichever expression
+ * mentioned it.
+ */
 export type ClassBody =
-    | { readonly kind: "destructor"; readonly info: ClassInfo; readonly builder: FunctionBuilder }
+    | {
+          readonly kind: "destructor";
+          readonly info: ClassInfo;
+          readonly builder: FunctionBuilder;
+          readonly bindings: Substitution;
+      }
     | {
           readonly kind: "constructor";
+          readonly bindings: Substitution;
           readonly info: ClassInfo;
           /** Absent when the class declares none and the constructor is generated. */
           readonly node: ts.ConstructorDeclaration | undefined;
@@ -203,6 +217,7 @@ export type ClassBody =
       }
     | {
           readonly kind: "method";
+          readonly bindings: Substitution;
           readonly info: ClassInfo;
           readonly node: MethodBody;
           readonly builder: FunctionBuilder;
@@ -215,6 +230,7 @@ export type ClassBody =
            * one. No `this` is bound, so parameters start at local 1 rather than 2.
            */
           readonly kind: "static";
+          readonly bindings: Substitution;
           readonly info: ClassInfo;
           readonly node: MethodBody;
           readonly builder: FunctionBuilder;

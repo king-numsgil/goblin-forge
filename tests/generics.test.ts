@@ -335,6 +335,125 @@ describe("generics", () => {
         });
     });
 
+    describe("generic classes", () => {
+        // `Box<i32>` and `Box<f64>` are two *classes*, not one with a variable
+        // in it: different layouts, different vtables, different destructors.
+        // They are made on demand, because the first mention of one may be
+        // inside a generic function's body — which is lowered long after the
+        // ordinary classes were declared.
+
+        test("a generic class, instantiated once", async () => {
+            const result = await run(
+                "generic-class",
+                `class Box<T> {
+         constructor(private value: T) {}
+         get(): T { return this.value; }
+       }
+
+       export function main(): i32 {
+         const b = new Box<i32>(3);
+         return b.get();
+       }\n`,
+            );
+            expect(result.exitCode).toBe(3);
+        });
+
+        test("two instantiations, one of them owning", async () => {
+            // The `string` one has a destructor that releases a buffer and the
+            // `i32` one has nothing to do. Same source, two classes.
+            const result = await run(
+                "generic-class-two",
+                `class Box<T> {
+         constructor(private value: T) {}
+         get(): T { return this.value; }
+       }
+
+       export function main(): i32 {
+         const n = new Box<i32>(4);
+         const s = new Box<string>("held");
+         console.log(s.get());
+         return n.get();
+       }\n`,
+            );
+            expect(result.stdout).toBe("held\n");
+            expect(result.exitCode).toBe(4);
+            expect(result.leaked).toBe(0);
+        });
+
+        test("an instantiation in a signature", async () => {
+            const result = await run(
+                "generic-class-signature",
+                `class Box<T> {
+         constructor(private value: T) {}
+         get(): T { return this.value; }
+       }
+
+       function read(b: Reference<Box<i32>>): i32 { return b.get(); }
+
+       export function main(): i32 {
+         const b = new Box<i32>(6);
+         return read(b);
+       }\n`,
+            );
+            expect(result.exitCode).toBe(6);
+        });
+
+        test("a generic class instantiated inside a generic function", async () => {
+            // The case a pre-pass could not have found: `Box<T>` is only
+            // `Box<i32>` once `wrap<i32>` exists, and that happens while a body
+            // is being lowered.
+            const result = await run(
+                "generic-class-in-generic-fn",
+                `class Box<T> {
+         constructor(private value: T) {}
+         get(): T { return this.value; }
+       }
+
+       function wrap<T>(v: T): T {
+         const b = new Box<T>(v);
+         return b.get();
+       }
+
+       export function main(): i32 {
+         const words = wrap<string>("through");
+         console.log(words);
+         return wrap<i32>(8);
+       }\n`,
+            );
+            expect(result.stdout).toBe("through\n");
+            expect(result.exitCode).toBe(8);
+            expect(result.leaked).toBe(0);
+        });
+
+        test("a public field of the substituted type", async () => {
+            const result = await run(
+                "generic-class-field",
+                `class Box<T> { constructor(public value: T) {} }
+
+       export function main(): i32 {
+         const b = new Box<i32>(5);
+         return b.value;
+       }\n`,
+            );
+            expect(result.exitCode).toBe(5);
+        });
+
+        test("a generic base class is refused, for now", async () => {
+            // Narrow, and honest about why: resolving a base by its erased type
+            // arguments is a different question from resolving one by name,
+            // which is all the heritage clause is read for today.
+            const diagnostic = await expectRejected(
+                "generic-class-base",
+                `class Box<T> { constructor(public value: T) {} }
+       class IntBox extends Box<i32> {}
+
+       export function main(): i32 { return 0; }\n`,
+                "GF0001",
+            );
+            expect(diagnostic.message).toContain("base class");
+        });
+    });
+
     describe("an instantiation as a value", () => {
         test("`identity<i32>` is a code address", async () => {
             const result = await run(

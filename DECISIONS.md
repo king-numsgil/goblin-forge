@@ -2439,9 +2439,13 @@ symbol both compilations agree on, and a vague linkage the MIR does not have.
 
 ### Still open under it
 
-Generic **classes**. Calling a method on a constrained `T` was open here too and
-is not any more — §24 above is what it took, and it was three fixes rather than
-the one the plan expected.
+A generic used as a **base class** — `class D extends Box<i32>` — which is
+narrow: `baseOf` resolves a base by its bare name, and an instantiation needs
+resolving by its erased type arguments. Generic classes themselves work.
+
+Calling a method on a constrained `T` was open here too and is not any more —
+§24 above is what it took, and it was three fixes rather than the one the plan
+expected.
 
 `Pointer<T>` over a type parameter is still a conditional type and still does
 not survive one, so `p.deref()` inside a generic remains a `TS2322`. Unlike

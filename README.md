@@ -748,15 +748,17 @@ function ask<T extends Speaker>(x: Reference<T>): i32 {
 }
 ```
 
-Generic **classes** are not there yet.
+Generic **classes** work the same way — `Box<i32>` and `Box<f64>` are two
+classes, with two layouts, two vtables and two destructors. What is not there
+yet is using one as a *base* class.
+
 [`GENERICS-PLAN.md`](GENERICS-PLAN.md) is the design and the order of work.
 
 ### Not there yet
 
-Generic classes, exceptions (`try`/`catch` and `throw`), escaping closures
-(`HeapFn`), static fields, top-level statements and top-level `const`. On
-arrays, everything past `push`/`pop`/`forEach`: `map`, `filter`, `reduce` and
-the rest.
+Exceptions (`try`/`catch` and `throw`), escaping closures (`HeapFn`), static
+fields, top-level statements and top-level `const`. On arrays, everything past
+`push`/`pop`/`forEach`: `map`, `filter`, `reduce` and the rest.
 
 All of them are declared or valid TypeScript, and all of them produce a
 `GF0001` diagnostic naming the construct and pointing at it.

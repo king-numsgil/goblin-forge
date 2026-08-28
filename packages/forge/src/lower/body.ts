@@ -328,14 +328,22 @@ export class BodyLowerer extends BoundaryLowerer {
             this.outer.unsupported(expression, "an expression after `new`");
             return undefined;
         }
-        const name = expression.expression.text;
+        // From the erasure of the whole `new`, so that `new Box<i32>(…)` makes
+        // a `Box<i32>` — see the same reasoning in the width pass. Interning
+        // the type is what instantiates a generic class, so it happens before
+        // `classInfo` is asked.
+        const type = this.erase(expression, this.outer.checker.getTypeAtLocation(expression));
+        if (type?.kind !== "class") {
+            this.outer.unsupported(expression, `\`new ${expression.expression.text}\``);
+            return undefined;
+        }
+        const ty = this.outer.tyOf(type, expression);
+        const name = type.name;
         const info = this.outer.classInfo(name);
         if (info === undefined) {
             this.outer.unsupported(expression, `\`new ${name}\``);
             return undefined;
         }
-        const type: MachineType = {kind: "class", name};
-        const ty = this.outer.tyOf(type, expression);
 
         const local = this.f.addLocal({
             ty,

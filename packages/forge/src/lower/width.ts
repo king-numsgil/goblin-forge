@@ -227,12 +227,26 @@ export abstract class WidthPass extends Emitter {
                 }
                 return typed(linalgStruct(linalg));
             }
-            const name = expression.expression.text;
-            if (this.outer.classInfo(name) === undefined) {
-                this.outer.unsupported(expression, `\`new ${name}\``);
+            // The **erasure** of the whole `new`, not the identifier's text:
+            // `new Box<i32>(…)` makes a `Box<i32>`, and `Box` on its own is not
+            // a class this build has — it is a generic, and `Box<i32>` and
+            // `Box<f64>` are the two classes it stands for.
+            const created = this.erase(
+                expression,
+                this.outer.checker.getTypeAtLocation(expression),
+            );
+            if (created?.kind !== "class") {
+                this.outer.unsupported(expression, `\`new ${expression.expression.text}\``);
                 return ERROR;
             }
-            return typed({kind: "class", name});
+            // Interning is also what instantiates a generic class, so this is
+            // what makes `classInfo` below find one.
+            this.outer.tyOf(created, expression);
+            if (this.outer.classInfo(created.name) === undefined) {
+                this.outer.unsupported(expression, `\`new ${created.name}\``);
+                return ERROR;
+            }
+            return typed(created);
         }
 
         // `[a, b, c]` — the type comes from tsc, not from the elements, because

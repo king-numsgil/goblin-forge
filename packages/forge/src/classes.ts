@@ -194,8 +194,29 @@ export interface ClassReport {
     /** A construct that is not part of the language. */
     refuse(node: ts.Node, message: string): void;
 
-    /** Erase a type, or report and return `undefined`. */
+    /**
+     * Erase a type under the instantiation's substitution, or report.
+     *
+     * The substitution is the caller's rather than a parameter here because a
+     * class is built once per instantiation and the whole build runs under one.
+     */
     erase(at: ts.Node, type: ts.Type): MachineType | undefined;
+}
+
+/** What {@link collectClasses} found: the classes, and the generic ones. */
+export interface CollectedClasses {
+    /** Every non-generic class, flattened, base classes first. */
+    readonly classes: Map<string, ClassInfo>;
+
+    /**
+     * Generic class declarations, by their bare name.
+     *
+     * Not analysed: `Box<i32>` and `Box<f64>` are different classes with
+     * different layouts and different vtables, so there is nothing to flatten
+     * until some use says which. {@link buildClass} is what makes one, and the
+     * lowerer calls it on demand.
+     */
+    readonly generics: Map<string, ts.ClassDeclaration>;
 }
 
 /**
@@ -210,7 +231,7 @@ export function collectClasses(
     program: ts.Program,
     checker: ts.TypeChecker,
     report: ClassReport,
-): Map<string, ClassInfo> {
+): CollectedClasses {
     const declarations = new Map<string, ts.ClassDeclaration>();
     for (const source of program.getSourceFiles()) {
         if (source.isDeclarationFile || program.isSourceFileFromExternalLibrary(source)) {
@@ -259,6 +280,7 @@ export function collectClasses(
     }
 
     const result = new Map<string, ClassInfo>();
+    const generics = new Map<string, ts.ClassDeclaration>();
     const inProgress = new Set<string>();
 
     const analyse = (name: string): ClassInfo | undefined => {
@@ -279,7 +301,7 @@ export function collectClasses(
             return undefined;
         }
         inProgress.add(name);
-        const info = build(node, name, analyse, checker, report);
+        const info = buildClass(node, name, analyse, checker, report);
         inProgress.delete(name);
 
         if (info !== undefined) {
@@ -288,26 +310,42 @@ export function collectClasses(
         return info;
     };
 
-    for (const name of declarations.keys()) {
+    for (const [name, node] of declarations) {
+        // A generic class is set aside rather than analysed. There is nothing
+        // to flatten until a use says what `T` is: the field types, the
+        // constructor's parameters and every method's signature all depend on
+        // it, and `Box<i32>` and `Box<f64>` are two classes rather than one
+        // with a variable in it.
+        if (node.typeParameters !== undefined && node.typeParameters.length > 0) {
+            generics.set(name, node);
+            continue;
+        }
         analyse(name);
     }
-    return result;
+    return {classes: result, generics};
 }
 
-function build(
+/**
+ * Flatten one class: its fields, its vtable, and every function it owns.
+ *
+ * `name` is what the class is *called here*, which for an instantiation of a
+ * generic is `Box<i32>` rather than `Box` — every symbol it owns is built from
+ * it (`Box<i32>$drop`, `Box<i32>$get`), so it is what keeps two instantiations
+ * from colliding. `<` and `,` are unforgeable in a TypeScript identifier, and
+ * the backend quotes a symbol that is not plain, so `@"Box<i32>$get"` is legal
+ * LLVM and legible in a disassembly.
+ *
+ * The substitution the members are erased under is the caller's, carried on
+ * `report.erase` — a class is built once per instantiation, so there is exactly
+ * one in force for the whole build and nothing here has to thread it.
+ */
+export function buildClass(
     node: ts.ClassDeclaration,
     name: string,
     analyse: (name: string) => ClassInfo | undefined,
     checker: ts.TypeChecker,
     report: ClassReport,
 ): ClassInfo | undefined {
-    if (node.typeParameters && node.typeParameters.length > 0) {
-        // REWRITE-PLAN §11.7 is open. Until it is answered this is a gap in the
-        // implementation rather than a rule about the language.
-        report.unsupported(node.typeParameters[0]!, "a generic class");
-        return undefined;
-    }
-
     const base = baseOf(node, analyse, report);
     if (base === null) {
         return undefined;
@@ -683,6 +721,15 @@ function baseOf(
     }
     if (!ts.isIdentifier(expression.expression)) {
         report.unsupported(expression, "an expression in an `extends` clause");
+        return null;
+    }
+    // `class D extends Box<i32>` — a *generic* base. Refused for now, and
+    // narrowly: what it needs is for `analyse` to resolve a base by its erased
+    // arguments rather than by a bare name, which is a different question from
+    // the one this function asks. A generic class with a plain base is fine,
+    // and so is a plain class with a plain base.
+    if (expression.typeArguments !== undefined && expression.typeArguments.length > 0) {
+        report.unsupported(expression, "a generic class as a base class");
         return null;
     }
     const base = analyse(expression.expression.text);
