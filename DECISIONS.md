@@ -479,7 +479,6 @@ this only when it is not emitting, which is permanently true.
 
 | § | Question | Needed by |
 |---|---|---|
-| 11.7 | Generics: monomorphisation or nothing. Either way the MIR is monomorphic, so this is a frontend decision. Milestone 3 turned out not to need it — see below. | milestone 8 at the earliest |
 | — | **`free()` and `freeArray()` are callable on a `FixedArray<T, N>`.** They come with the `CorePointer<T>` that makes array-to-pointer decay work, and calling either is undefined behaviour — exactly as `free(buf)` is in C, and for the same reason. Taken deliberately over adding a second pointer type whose only difference is which mistakes it permits, but it is a real unsafety rather than an oversight, and it is the kind that a diagnostic could close cheaply: the compiler knows statically that the receiver is a fixed array. Revisit once classes settle what `Pointer<T>`'s member surface actually needs to be. | revisit at milestone 8 |
 
 ---
@@ -2284,6 +2283,58 @@ diff to the headers this change is actually about.
 
 ---
 
+## §11.7 — Generics: monomorphisation *(settled 2026-08-28; functions built)*
+
+**Answer: monomorphisation, in the frontend, before any MIR is built.** One
+copy per set of type arguments a generic is *used* with; the copies share
+nothing but a source declaration; by the time the MIR exists there are no type
+parameters in the program.
+
+[`GENERICS-PLAN.md`](GENERICS-PLAN.md) is the argument and the order of work,
+and it is not repeated here. The short form of why the alternative was not
+available: uniform representation needs out-of-line copy and drop glue, which
+`packages/checker/src/types.ts:329` already names as a missing feature when it
+refuses a `T[]` inside `T`. Uniform representation would have to build that
+first and then witness tables on top of it. Monomorphisation needs neither, and
+leaves the drop pass, the layout rules and the C boundary exactly as they were.
+
+The 2026-08-11 note below — that §11.7 "did not need answering yet" — was
+right at the time and stayed right for two and a half months. What changed is
+nothing about the compiler: user-written generic code started to matter.
+
+### Three things worth carrying forward
+
+**tsc checks a generic at its declaration, not at its instantiation.** So
+Goblin's generics are Rust-shaped rather than C++-shaped, and this compiler
+does not enforce that — tsc does, before it is called, with a `TS####` that
+underlines in the editor. It also means a body cannot be re-checked per
+instantiation, and does not want to be.
+
+**But instantiation can still fail**, because erasure is a Goblin rule tsc
+knows nothing about. So every diagnostic raised while lowering an instantiation
+carries a note saying which call asked for it — C++'s "required from here".
+That is not a nicety: without it the error points inside a generic the reader
+may never have opened.
+
+**A generic has no symbol**, so it is not something a linker can hand over. A
+Goblin library's generics travel as *source* and are instantiated in whoever
+uses them, the way a C++ template travels in a header — Goblin to Goblin only,
+exactly as `std::vector<T>` cannot cross into C. GENERICS-PLAN §6 is that
+design, including the two things it is not free in: an instantiation needs a
+symbol both compilations agree on, and a vague linkage the MIR does not have.
+
+### Still open under it
+
+Generic **classes**, and calling a method on a constrained `T`. The second is
+blocked before the lowering: `Reference<T>` and `Pointer<T>` are conditional
+types, tsc will not resolve one over an unresolved `T`, and member access
+against the two retained branches is a `TS2339`. That is a question about how
+the prelude declares its wrappers, and the distribution hazard the current
+spelling exists to avoid is documented at length in `global.d.ts` — so it wants
+a spike rather than an edit.
+
+---
+
 ## Class decisions *(2026-08-12, milestone 8)*
 
 ### Every class has a vtable pointer, including one with no virtual methods
@@ -2912,6 +2963,9 @@ monomorphic, since monomorphisation would happen in the frontend.
 So it stays open, and a user-written generic function is `GF0001` — a gap in the
 implementation rather than a rule about the language. The question now lands
 wherever generic *user code* first matters, which is milestone 8 at the earliest.
+
+> **Answered 2026-08-28** — see §11.7 above. The guess held: monomorphisation,
+> in the frontend, and the MIR did not change.
 
 ### The TypeScript encoder is generated, not written *(2026-08-11)*
 

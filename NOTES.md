@@ -179,7 +179,8 @@ backend failure:
 | static **fields** | `classes.ts`, the `isStatic` branch over property declarations — needs module-level storage the backend has never emitted; see below | later |
 | **escaping closures — `HeapFn<F>`** | nothing declares the type. DECISIONS §18 step 2: captures by move into an owning environment, reusing `GF0235` for contention. Not started, and deliberately after `LocalFn` | later |
 | **`RefCount<T>`** | nothing declares the type. DECISIONS §18 step 3, and its own feature rather than part of closures — shared ownership does not exist anywhere in the value model yet | later |
-| generic functions, optional/rest/defaulted/destructured parameters | `lower/module.ts`, `#signature`; `classes.ts`, `#classFnParams` | later |
+| optional/rest/defaulted/destructured parameters | `lower/module.ts`, `#signature`; `classes.ts`, `#classFnParams` | later |
+| generic **classes**, and a constrained `T` whose methods are called | `classes.ts`, `collectClasses` runs before any call is seen; and `Reference<T>` / `Pointer<T>` do not survive a type parameter at the *tsc* level, which is a prelude problem before it is a lowering one. GENERICS-PLAN stage 5 | later |
 | two classes with the same name in two modules | `classes.ts`, `collectClasses` — a stated restriction, see DECISIONS §11.8 | later |
 | incremental builds | `CompileOptions.incremental` is reserved and unread | later |
 | `throw` / unwinding | `Terminator::Resume` errors | later |

@@ -718,11 +718,39 @@ the C ABI contract — while internal ones are qualified by a hash of the module
 path relative to the project root, so the same sources produce the same symbols
 on two machines.
 
+### Generics
+
+Generic **functions** work, by monomorphisation: one copy per set of type
+arguments, and the copies share nothing but a source declaration.
+
+```ts
+function first<T>(xs: T[]): T { return xs[0]; }
+
+const n = first(numbers);   // an i32[] — T is inferred
+const s = first(words);     // a string[] — a different function
+```
+
+Two copies, and they behave differently where the type does: the `string` one
+clones what it returns and its scope releases it, the `i32` one does neither.
+Nothing in the source says so — every type has a category, and the substituted
+type is the one that has it.
+
+Type arguments are inferred where the call determines them, and written where
+it does not — `sizeOf<T>()` mentions `T` in no argument, so `sizeOfIt<i32>()`
+is how you say which.
+
+Generic **classes** are not there yet, and neither is calling a method on a
+constrained `T`: `Reference<T>` over a type parameter is refused by *tsc*
+before this compiler sees it, which is a problem in the prelude's declarations
+rather than in the lowering. [`GENERICS-PLAN.md`](GENERICS-PLAN.md) is the
+design and the order of work.
+
 ### Not there yet
 
-Generics, exceptions (`try`/`catch` and `throw`), escaping closures (`HeapFn`),
-static fields, top-level statements and top-level `const`. On arrays,
-everything past `push`/`pop`/`forEach`: `map`, `filter`, `reduce` and the rest.
+Generic classes, exceptions (`try`/`catch` and `throw`), escaping closures
+(`HeapFn`), static fields, top-level statements and top-level `const`. On
+arrays, everything past `push`/`pop`/`forEach`: `map`, `filter`, `reduce` and
+the rest.
 
 All of them are declared or valid TypeScript, and all of them produce a
 `GF0001` diagnostic naming the construct and pointing at it.

@@ -18,6 +18,9 @@ how the thing is put together and which mistakes it is designed to prevent.
   operations and the checkpoint each stage ended at. All seven stages are done.
 - [`LINKING.md`](LINKING.md) — what a program links and how, including the
   allocator surface and `runtime: "shared"`.
+- [`GENERICS-PLAN.md`](GENERICS-PLAN.md) — monomorphisation, decided by
+  DECISIONS §11.7. Stages 0 and 1 are done (generic functions); §6 is how a
+  generic crosses a Goblin library boundary, and is not built.
 - [`POINTER-ERASURE.md`](POINTER-ERASURE.md) — how `void *` was arrived at,
   including the design that was probed and rejected. Answered by DECISIONS §13;
   worth reading before changing anything about `erase()` / `reify<U>()`, because
@@ -290,6 +293,7 @@ prose.
 - `GF01xx` — widths and arithmetic
 - `GF02xx` — ownership, references, pointers, the value model
 - `GF03xx` — layout and the C boundary
+- `GF04xx` — generics and instantiation
 - `GF90xx` — the compiler is broken, not your program
 
 `GF0001` is "valid TypeScript, meant to be valid Goblin, not lowered yet" — a
