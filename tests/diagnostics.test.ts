@@ -391,6 +391,24 @@ describe("codes raised by a program", () => {
         expect(diagnostic.message).toContain("Pointer<Cell>");
     });
 
+    test("GF0308 — two types cross under one C name", async () => {
+        const diagnostic = await expectRejected(
+            "diag-0308",
+            `import type { Pair as Wide } from "./other.ts";
+
+       interface Pair { a: i32; b: i32; }
+
+       export function takeNarrow(p: Pair): i32 { return p.a + p.b; }
+       export function takeWide(p: Wide): u8 { return cast<u8>(p.a + p.b); }\n`,
+            "GF0308",
+            {
+                type: "static-lib",
+                files: {"other.ts": "export interface Pair { a: u8; b: u8; }\n"},
+            },
+        );
+        expect(diagnostic.message).toContain("`Pair`");
+    });
+
     // -- Generics and instantiation ------------------------------------------
     //
     // `tests/generics.test.ts` is where these are tested properly, against
@@ -499,6 +517,7 @@ describe("the registry and the suite agree", () => {
             "GF0305",
             "GF0306",
             "GF0307",
+            "GF0308",
             "GF0402",
             "GF0403",
             "GF0404",

@@ -549,11 +549,11 @@ refusal could be revisited now that instantiated names are not bare, and
 `instanceof` across `Box<i32>` and `Box<f64>` wants a test — they are unrelated
 types and the descriptors should already say so, but nothing checks it.
 
-### Stage 6 — crossing a Goblin boundary
+### Stage 6 — crossing a Goblin boundary ✅ *(done, 2026-08-28)*
 
-A generic exported by a Goblin library, instantiated in a Goblin consumer.
-Its own section, because it is the one stage that reaches past the frontend:
-§6.
+A generic exported by a Goblin library, instantiated in a Goblin consumer. Its
+own section — §6 — where it also turns out that two of the three things it was
+supposed to need were not true. DECISIONS §25 is the settled version.
 
 ---
 
@@ -592,44 +592,40 @@ is the part the first cannot express. That distinction is worth keeping sharp,
 because the wrong reading of it is "let us also send classes and strings this
 way", which §11.8 deliberately did not do.
 
-### Three things this needs, and none of them are free
+### Three things this looked like it needed — two of them wrong
 
-**Instantiations must fold, so they need stable symbols and weak linkage.**
-If the library instantiates `Vec<i32>` internally and the consumer instantiates
-it too, both objects reach one link. Today `#symbolOf` qualifies an internal
-symbol with a hash of the module's path *relative to that build's project
-root* — and the library and the consumer have different roots, so the two
-copies get different symbols, do not fold, and both ship. An instantiation's
-symbol therefore has to be derived from something **both compilations agree
-on**: the generic's declaring module identified package-relatively, its name,
-and the erased type arguments. The same reasoning that made `#relative` use the
-project root instead of the absolute path, taken one level further out.
+*Kept as written, because being wrong about them is the useful part. DECISIONS
+§25 is the settled version.*
 
-Folding then needs a linkage the MIR does not have. `Export` and `Internal` are
-the two today; an instantiation wants C++'s vague linkage —
-`linkonce_odr` — so that N copies collapse to one and the odd one out is not a
-duplicate-symbol error. **That is a wire-format change** (a new `Linkage`
-variant), which is fine and expected: regenerate, read the diff. It is called
-out here because it is the one part of this plan that reaches past the frontend.
+**~~Instantiations must fold, so they need stable symbols and weak linkage.~~**
+They do not fold and should not. They also do not **collide**: an instantiation
+is `Internal`, so the library's copy is not a symbol the consumer could reach.
+What happens is duplication, and duplication is correct.
 
-**Vtable identity is the sharp edge.** For a generic *function*, two unfolded
-copies are wasted bytes and nothing worse. For a generic *class*, `Box<i32>`
-instantiated on both sides without folding has two `ClassId`s, two vtables and
-two type descriptors — so `instanceof` across the boundary answers no, and an
-interface conversion resolves against the wrong itab. This is C++'s ODR problem
-exactly, and it is why folding is not optional once generic classes cross.
-Non-generic classes cannot cross today at all (`abi.rs` refuses one: "a vtable
-pointer that only means something inside this build"), so this hazard is
-entirely new with this section, and it arrives with stage 5 rather than before.
+Making them fold needs a symbol both compilations agree on, which needs a
+package identity — a name *and a version* — that this compiler has no notion
+of. Without the version, two builds compiling different versions of the same
+generic fold under one symbol and one silently wins: C++'s ODR violation,
+undetectable. Rust folds safely only because it hashes the crate version in.
+Duplication costs bytes; folding, with the identity available here, costs
+correctness.
 
-**The two halves must come from one build.** A consumer compiling the library's
-published generic source against a *different* build's archive gets layouts
-that disagree, silently — the §3 bug again, arrived at from across a boundary
-where no single compilation can see both. The compiler already has the pattern
-for this and should reuse it rather than invent one: the MIR bindings carry a
-wire-format fingerprint that is checked on every decode, for exactly this
-reason. The published Goblin interface wants the same stamp, checked when the
-consumer compiles.
+**~~Vtable identity is the sharp edge.~~** This was the argument that made
+folding look *required*, and it is false. Measured: a value has exactly **one**
+vtable — its maker's — and travels with it; the consumer never installs a
+second. And the itab lookup is keyed by a *hash of the interface's name* rather
+than by the address of a table, which is what makes a C++ `dynamic_cast` work
+across a shared object. A library-made object answers a consumer's `tryCast`
+for an interface the library never converted to. There is no identity to
+reconcile.
+
+**The two halves must come from one build.** This one stands, and is the open
+gap. A consumer that links archive *vN* and imports source *vN+1* gets layouts
+that disagree with nothing to say so. Detecting it needs the archive to carry a
+stamp the consumer reads at compile time — a publishing format §11.8
+deliberately did not build — so it stays a packaging question for as long as
+the consumer imports the library's *own* source, which is what a relative path
+or a `node_modules` entry gives.
 
 ### And it makes `runtime: "shared"` matter more
 
@@ -642,20 +638,33 @@ Nothing new is required — `runtime: "shared"` is already the answer — but th
 documentation for a library that exports generics should say so rather than
 leaving it to be discovered.
 
-### Stage
+### Stage 6 ✅ *(done, 2026-08-28 — the mechanism needed no code)*
 
-This is **stage 6**, after generic classes, and it should not be pulled
-earlier. Stages 0–5 are all within one compilation, where none of the above
-exists: the generic and its instantiation are in the same `ts.Program`, share
-one symbol table and one set of `ClassId`s, and fold trivially by being one
-thing. Getting the single-compilation case right first is what makes the
-boundary case a linkage-and-naming problem rather than a design problem.
+Doing stages 0–5 first was right, but not for the reason given: the boundary
+turned out not to be a linkage problem at all. What it was, was a place where
+four defects in the *single-compilation* work became visible, because the C
+header is the one artefact that has to publish a name rather than a shape.
 
-*Checkpoint:* a Goblin `static-lib` exporting `Vec<T>`-shaped source and a
-Goblin `bin` consuming it, where both sides instantiate `Vec<i32>`, the symbol
-appears **once** in the linked binary (checked with `llvm-objdump`, as
-`tests/libraries.test.ts` already reaches for), and the live-allocation count
-comes back to zero across the boundary.
+- A generic aggregate's name did not carry its type arguments, so a library
+  exporting `sumI32(p: Pair<i32>)` and `sumU8(p: Pair<u8>)` published two
+  `typedef struct Pair` with different bodies. Invalid C, silently.
+- Two genuinely different types could cross under one C name: `GF0308`.
+- `alloc(Box, n)` could not name a generic class's instantiation.
+- Asking what class an expression is did not *make* one, so a
+  `Pointer<Box<i32>>` reified out of an erased pointer had no methods.
+
+*Checkpoint, met:* `tests/library-generics.test.ts` — a Goblin `bin` links a
+Goblin `static-lib`, instantiates a generic from its source, and does it while
+the library instantiates the same generic itself. The layouts agree, a `string`
+the library made is released by the consumer, and a dynamic cast on a
+library-made object works. Every one of those runs a real binary and is
+leak-checked. And `tests/libraries.test.ts` builds a **C** consumer against a
+header with two instantiations in it, which is what proves the header fix — a
+`typedef` redefinition is exactly what a C compiler is for.
+
+The checkpoint this plan originally asked for — the symbol appearing *once*
+under `llvm-objdump` — is deliberately not met. It appears twice, and that is
+the right answer.
 
 ---
 

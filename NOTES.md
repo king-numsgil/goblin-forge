@@ -184,6 +184,7 @@ backend failure:
 | `Pointer<T>` **used** inside a generic — `p.deref()`, `p.store(v)` | tsc, not the compiler: `Pointer` is a conditional type and does not survive a type parameter. `Reference` had the same problem and stopped being one (DECISIONS §24), but `Pointer`'s conditional is load-bearing — it is what stops `Pointer<i32>` being assignable to `i32` — so it needs a different answer | later |
 | `Reference<string>` | `checker/src/types.ts`, `eraseReferent`. Copying a `string` clones its buffer, so borrowing one is worth doing; nothing reads one back through a reference yet | later |
 | two classes with the same name in two modules | `classes.ts`, `collectClasses` — a stated restriction, see DECISIONS §11.8 | later |
+| a consumer linking archive *vN* while importing its generic source at *vN+1* | nothing detects it, and the layouts would disagree silently. Needs the archive to carry a stamp the consumer reads at compile time — a publishing format DECISIONS §11.8 deliberately did not build. A packaging question for as long as the consumer imports the library's own source. DECISIONS §25 | later |
 | incremental builds | `CompileOptions.incremental` is reserved and unread | later |
 | `throw` / unwinding | `Terminator::Resume` errors | later |
 | a binding with no initialiser — `let e: SDL_Event;` | `lower/body.ts` — tsc wants `let e!: T` for its own definite-assignment rule, and the lowerer refuses either spelling. `zeroed<T>()` is the way to write it meanwhile | later |

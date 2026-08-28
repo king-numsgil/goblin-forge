@@ -62,9 +62,24 @@ function linkingAdvice(options: HeaderOptions): readonly string[] {
     ];
 }
 
-/** Raised when an exported signature has no C spelling. */
+/**
+ * Raised when a header cannot be written.
+ *
+ * Two quite different reasons, and the `code` is which. **`GF9006`** is the
+ * default and means the compiler is broken: the ABI classifier is supposed to
+ * refuse anything with no C spelling long before this is asked, so the two
+ * disagreeing is a bug here rather than in the program.
+ *
+ * The other reason is a real conflict in the program that only this file can
+ * see — see the name check in {@link emitStructs} — and it carries its own
+ * code, because telling somebody to report a compiler bug when what they need
+ * to do is rename a type is the wrong instruction.
+ */
 export class HeaderError extends Error {
-    constructor(message: string) {
+    constructor(
+        message: string,
+        readonly code: string = "GF9006",
+    ) {
         super(message);
         this.name = "HeaderError";
     }
@@ -293,6 +308,44 @@ function emitStructs(module: Module): string[] {
             visit(param.ty);
         }
         visit(signature.ret);
+    }
+
+    // **Two different structs cannot share a C name.** Inside this compiler
+    // they are told apart by `layoutKey`, which is a whole shape; a header has
+    // only the name, and C has no way to say "the other `Pair`". Emitting both
+    // produced two `typedef struct Pair` with different bodies — invalid C that
+    // nothing here reported, and if a compiler accepted it every signature
+    // would name whichever came first.
+    //
+    // Checked on the *sanitised* identifier rather than the name, because that
+    // is what actually lands in the file: `Pair<i32>` and `Pair<u8>` are
+    // different names that stay different (`Pair_i32_`, `Pair_u8_`), but
+    // `identifier()` maps every character C cannot take onto `_`, so it is the
+    // spelling after that which has to be unique.
+    const named = new Map<string, number>();
+    for (const id of order) {
+        const def = module.structs[id];
+        if (def === undefined) {
+            continue;
+        }
+        const name = identifier(sym(module, def.name));
+        const first = named.get(name);
+        if (first !== undefined && first !== id) {
+            const shape = (which: number): string =>
+                (module.structs[which]?.fields ?? [])
+                    .map((field) => `${cType(module, field.ty)} ${sym(module, field.name)}`)
+                    .join("; ");
+            throw new HeaderError(
+                `two different types both cross this library's boundary as \`${name}\`, ` +
+                `one holding \`${shape(first)}\` and the other \`${shape(id)}\`. A C ` +
+                "header has only the name to tell them apart, and C has no way to say " +
+                "\"the other one\" — so both would be declared and one of them would be " +
+                "wrong.\n\nRename one of them. A generic carries its arguments in its " +
+                "name already, so this is two declarations that genuinely share a name.",
+                "GF0308",
+            );
+        }
+        named.set(name, id);
     }
 
     const out: string[] = [];

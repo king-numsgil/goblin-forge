@@ -752,7 +752,14 @@ Generic **classes** work the same way — `Box<i32>` and `Box<f64>` are two
 classes, with two layouts, two vtables and two destructors. What is not there
 yet is using one as a *base* class.
 
-[`GENERICS-PLAN.md`](GENERICS-PLAN.md) is the design and the order of work.
+A generic **crosses a library boundary as source**, and is compiled into
+whoever uses it — the way a C++ template travels in a header. Goblin to Goblin
+only: a generic has no symbol for a linker to hand over, which is also why
+`std::vector<T>` cannot be used from C. The non-generic half of a library
+crosses as symbols through the generated header, as it always did.
+
+[`GENERICS-PLAN.md`](GENERICS-PLAN.md) is the design and the order of work;
+DECISIONS §25 is what the boundary turned out to be.
 
 ### Not there yet
 

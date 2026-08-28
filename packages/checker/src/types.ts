@@ -1377,7 +1377,7 @@ export function contractOf(
         return null;
     }
 
-    const name = structNameOf(checker, type);
+    const name = structNameOf(checker, type, state);
     if (methods.length !== properties.length) {
         const data = properties.find((property) => !methods.includes(property));
         throw new ErasureError(
@@ -1493,7 +1493,7 @@ function eraseObject(checker: ts.TypeChecker, type: ts.Type, state: Erasure): Ma
         );
     }
 
-    const name = structNameOf(checker, type);
+    const name = structNameOf(checker, type, state);
     // Built empty and filled below, because the answer has to exist before its
     // own fields are erased: `next: Pointer<Node>` comes back through here for
     // `Node`, and what closes that cycle is this object (see {@link Erasure}).
@@ -1706,21 +1706,70 @@ function isBrand(property: ts.Symbol): boolean {
  * An `interface Point` or a `type Point = { … }` gives its own name. An inline
  * object type has none, so one is built from its property names.
  *
- * **A name is not an identity.** Two files may each declare an `interface
+ * **A generic's name carries its type arguments** — `Pair<i32>`, not `Pair` —
+ * for the reason a generic class's does, and it took the C boundary to make it
+ * visible. A library exporting both `sumI32(p: Pair<i32>)` and
+ * `sumU8(p: Pair<u8>)` published a header with *two* `typedef struct Pair`, one
+ * of them silently wrong, and both signatures naming whichever came first. The
+ * compiler was right inside — {@link layoutKey} kept the two structs apart — but
+ * the name it published could not say which was which.
+ *
+ * **A name is still not an identity.** Two files may each declare an `interface
  * Pair`, both are legal TypeScript, and tsc says they are different types.
- * What tells them apart is {@link layoutKey}, and everything that interns or
+ * What tells those apart is {@link layoutKey}, and everything that interns or
  * compares a struct has to use that instead.
  */
-function structNameOf(checker: ts.TypeChecker, type: ts.Type): string {
-    const symbol = type.aliasSymbol ?? type.getSymbol();
+function structNameOf(checker: ts.TypeChecker, type: ts.Type, state: Erasure): string {
+    const alias = type.aliasSymbol;
+    if (alias !== undefined) {
+        // `type Pair<T> = { … }` — the arguments hang off the alias rather than
+        // off the type, because the type is the object literal underneath.
+        return withArguments(checker, alias.getName(), type.aliasTypeArguments, state);
+    }
+
+    const symbol = type.getSymbol();
     const name = symbol?.getName();
     if (name !== undefined && name !== "__type" && name !== "__object") {
-        return name;
+        const generic = symbol?.declarations?.some(
+            (declaration) =>
+                (ts.isInterfaceDeclaration(declaration) ||
+                    ts.isClassDeclaration(declaration) ||
+                    ts.isTypeAliasDeclaration(declaration)) &&
+                declaration.typeParameters !== undefined &&
+                declaration.typeParameters.length > 0,
+        );
+        return generic === true
+            ? withArguments(
+                checker,
+                name,
+                checker.getTypeArguments(type as ts.TypeReference),
+                state,
+            )
+            : name;
     }
     return `{${checker
         .getPropertiesOfType(type)
         .map((property) => property.name)
         .join(",")}}`;
+}
+
+/** `Pair` plus `<i32, f64>`, with the arguments erased through the state. */
+function withArguments(
+    checker: ts.TypeChecker,
+    name: string,
+    args: readonly ts.Type[] | undefined,
+    state: Erasure,
+): string {
+    if (args === undefined || args.length === 0) {
+        return name;
+    }
+    // Through, for the reason a class's arguments are: they are part of this
+    // type's *identity* rather than of its layout, so a type that reaches
+    // itself as one of its own arguments is not a value containing itself.
+    const rendered = args.map((argument) =>
+        renderType(state.through(() => erase(checker, argument, state))),
+    );
+    return `${name}<${rendered.join(", ")}>`;
 }
 
 /**

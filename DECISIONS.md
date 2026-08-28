@@ -2283,6 +2283,102 @@ diff to the headers this change is actually about.
 
 ---
 
+## §25 — A generic crosses a Goblin boundary as source *(settled and built, 2026-08-28)*
+
+GENERICS-PLAN §6, and it is worth reading that section against this one: of the
+three things it said the boundary would need, **two were wrong**, and the
+mechanism itself needed no code at all.
+
+### What crosses, and how
+
+A generic has no symbol, so it is not something a linker can hand over. Its
+body travels with the library and is compiled into whoever uses it — C++'s
+header-only template, Rust's rlib, and `std::vector<T>` cannot be used from C
+for the same reason.
+
+**That mechanism already existed.** DECISIONS §11.8 decided a Goblin module is
+TypeScript source and tsc resolves the imports, so a generic imported from a
+library is compiled in the consumer's own compilation like any other file.
+There is no interface format, nothing to serialise, and nothing to keep in step
+by hand — which was §11.8's whole argument, arriving again.
+
+So a Goblin library has two published halves, and only one of them is a
+linker's business:
+
+| Half | Crosses as | Consumer |
+|---|---|---|
+| non-generic | a symbol, through the C ABI and the header | C or Goblin |
+| generic | source, instantiated locally | Goblin only |
+
+The two correctness properties that have to hold across that seam both do, and
+are tested: **the layouts agree**, because a layout is a function of the field
+types and nothing else; and **the heap agrees**, because a `static-lib`'s
+objects go into the executable and the consumer supplies the runtime once.
+
+### Instantiations are not folded, and should not be
+
+§6 assumed the two sides' copies of `first<i32>` would have to fold into one,
+and that this needed a symbol stable across compilations plus a vague linkage
+the MIR does not have. Neither is true.
+
+They **do not collide**. An instantiation is `Internal`, so the library's copy
+is not a symbol the consumer could reach even if it wanted to. What happens is
+duplication, and duplication is correct.
+
+The argument that made folding look *required* was that a generic class would
+otherwise get two vtables and a dynamic cast would answer no across the
+boundary. Measured, it does not: a value has exactly **one** vtable — its
+maker's — and travels with it, and the itab lookup is keyed by a *hash of the
+interface's name* rather than by the address of a table. A library-made object
+answers a consumer's `tryCast` for an interface the library never converted to.
+That is the same arrangement that makes a C++ `dynamic_cast` work across a
+shared object, and it means there is no identity to reconcile.
+
+So folding would be a **size** optimisation, and it is one this compiler should
+not take. Making it work needs a symbol both compilations agree on, which needs
+a package identity — a name *and a version* — that the compiler has no notion
+of. Without the version, two builds compiling different versions of the same
+generic would fold under one symbol and one of them would silently win: C++'s
+ODR violation, undetectable, and exactly the class of failure the whole design
+is arranged to prevent. Rust folds safely only because it hashes the crate
+version into the symbol.
+
+Duplication costs bytes. Folding, done with the identity available here, costs
+correctness. The trade is not close.
+
+### What it did turn up
+
+Testing the boundary found four real defects, none of them the ones §6
+predicted:
+
+- **A generic's name did not carry its type arguments.** A library exporting
+  `sumI32(p: Pair<i32>)` and `sumU8(p: Pair<u8>)` published a header with two
+  `typedef struct Pair`, different bodies, and both signatures naming whichever
+  came first — invalid C that nothing reported. A generic aggregate now names
+  itself `Pair<i32>`, as a generic class already did, and the header spells
+  those `Pair_i32_` and `Pair_u8_`.
+- **Two genuinely different types could still cross under one C name** —
+  `GF0308` now, because C has no way to say "the other `Pair`" and renaming one
+  is the only fix.
+- **`alloc(Box, n)` could not name a generic class's instantiation.** It
+  resolved the class from the identifier's text, where the instantiation is in
+  the call's own type.
+- **Asking what class an expression is did not make one.** A
+  `Pointer<Box<i32>>` reified out of an erased pointer could be the first
+  mention of `Box<i32>` anywhere, and the method-call path found no class.
+
+### Still open
+
+Nothing guards a consumer that links archive *vN* and imports source *vN+1*.
+The layouts would disagree and nothing would say so. Detecting it needs the
+archive to carry a stamp the consumer reads at compile time, which is a
+publishing format this compiler does not have and §11.8 deliberately did not
+build. It is a packaging question rather than a compiler one for as long as the
+consumer imports the library's own source — which is what a path or a
+`node_modules` entry gives — because then there is only ever one version.
+
+---
+
 ## §24 — `Reference<T>` is an address *(settled and built, 2026-08-28)*
 
 The question that started this was whether `Reference<T>` is C++ baggage:

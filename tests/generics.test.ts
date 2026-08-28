@@ -438,6 +438,55 @@ describe("generics", () => {
             expect(result.exitCode).toBe(5);
         });
 
+        test("one on the heap, through `alloc`", async () => {
+            // `alloc(Box, n)` names the *declaration*, and `Box` on its own is
+            // not a class this build has — the instantiation comes from the
+            // call's own type, which tsc has already inferred from the
+            // constructor's argument. The same route `new` takes.
+            const result = await run(
+                "generic-class-alloc",
+                `class Box<T> {
+         constructor(private value: T) {}
+         get(): T { return this.value; }
+       }
+
+       export function main(): i32 {
+         const n: i32 = 3;
+         const p = alloc(Box, n);
+         const v = p.get();
+         p.free();
+         return v;
+       }\n`,
+            );
+            expect(result.exitCode).toBe(3);
+            expect(result.leaked).toBe(0);
+        });
+
+        test("one reached back through an erased pointer", async () => {
+            // `reify` may be the first mention of `Box<i32>` anywhere, so the
+            // path that asks what class an expression is has to be able to make
+            // one — not only the path that interns a type.
+            const result = await run(
+                "generic-class-reify",
+                `class Box<T> {
+         constructor(private value: T) {}
+         get(): T { return this.value; }
+       }
+
+       export function main(): i32 {
+         const n: i32 = 4;
+         const p = alloc(Box, n);
+         const erased = p.erase();
+         const back = erased.reify<Box<i32>>();
+         const v = back.get();
+         back.free();
+         return v;
+       }\n`,
+            );
+            expect(result.exitCode).toBe(4);
+            expect(result.leaked).toBe(0);
+        });
+
         test("a generic base class is refused, for now", async () => {
             // Narrow, and honest about why: resolving a base by its erased type
             // arguments is a different question from resolving one by name,

@@ -165,16 +165,34 @@ export abstract class IntrinsicLowerer extends WidthPass {
             );
             return undefined;
         }
-        const info = this.outer.classInfo(klass.text);
-        if (info === undefined) {
+        // The class comes from the **erasure of the call**, not from the
+        // identifier's text: `alloc(Box, n)` where `Box` is generic makes a
+        // `Box<i32>`, and `Box` on its own is not a class this build has. tsc
+        // has already inferred the argument from the constructor's parameters,
+        // so the call's own type is the instantiation — the same route `new`
+        // takes, and for the same reason.
+        const allocated = this.erase(
+            expression,
+            this.outer.checker.getTypeAtLocation(expression),
+        );
+        const object: MachineType | undefined =
+            allocated?.kind === "pointer" && allocated.pointee.kind === "class"
+                ? allocated.pointee
+                : undefined;
+        if (object === undefined) {
             this.outer.unsupported(expression, `\`alloc(${klass.text}, …)\``);
             return undefined;
         }
-
-        const object: MachineType = {kind: "class", name: info.name};
         const pointer: MachineType =
             natural.kind === "pointer" ? natural : {kind: "pointer", pointee: object};
+        // Interning is also what instantiates a generic class, so it happens
+        // before `classInfo` is asked.
         const ty = this.outer.tyOf(object, expression);
+        const info = this.outer.classInfo(object.name);
+        if (info === undefined) {
+            this.outer.unsupported(expression, `\`alloc(${object.name}, …)\``);
+            return undefined;
+        }
 
         const size = this.temporaryTyped(expression, USIZE, {kind: "SizeOf", value: ty});
         const align = this.temporaryTyped(expression, USIZE, {kind: "AlignOf", value: ty});

@@ -380,13 +380,19 @@ export class Compiler {
                 if (!(error instanceof HeaderError)) {
                     throw error;
                 }
-                // The ABI classifier is meant to reject anything with no C spelling
-                // before this is asked, so the two disagreeing is a compiler bug.
+                // `GF9006` unless the error says otherwise: the ABI classifier
+                // is meant to reject anything with no C spelling before this is
+                // asked, so the two disagreeing is a compiler bug. A conflict
+                // only the header can see carries its own code — see
+                // {@link HeaderError}.
                 diagnostics.push({
                     severity: "error",
-                    code: "GF9006",
+                    code: error.code,
                     source: "goblin",
-                    message: `could not write a C header for \`${moduleName}\`: ${error.message}`,
+                    message:
+                        error.code === "GF9006"
+                            ? `could not write a C header for \`${moduleName}\`: ${error.message}`
+                            : error.message,
                 });
                 return {...failed(diagnostics), objects: [artifact.objectPath]};
             }

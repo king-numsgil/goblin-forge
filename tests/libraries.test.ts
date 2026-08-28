@@ -605,6 +605,45 @@ int main(void) {
         });
         expect(stdout).toBe("1\n");
     }, CMAKE_TIMEOUT);
+
+    test("two instantiations of one generic are two C types", async () => {
+        // The header used to declare `typedef struct Pair` **twice**, with
+        // different bodies, and both signatures naming whichever came first.
+        // Invalid C that nothing reported: the compiler was right inside, where
+        // `layoutKey` keeps the two apart, but the name it published could not
+        // say which was which.
+        //
+        // The C compiler is the arbiter here rather than a string assertion —
+        // a `typedef` redefinition is exactly what it exists to catch.
+        const lib = await library(
+            "lib-generic-structs",
+            `interface Pair<T> { a: T; b: T; }
+
+       export function sumI32(p: Pair<i32>): i32 { return p.a + p.b; }
+       export function sumF64(p: Pair<f64>): f64 { return p.a + p.b; }\n`,
+        );
+
+        expect(lib.headerText).toContain("} Pair_i32_;");
+        expect(lib.headerText).toContain("} Pair_f64_;");
+        expect(lib.headerText).toContain("int32_t sumI32(Pair_i32_ p0);");
+        expect(lib.headerText).toContain("double sumF64(Pair_f64_ p0);");
+
+        const stdout = buildConsumer({
+            ...lib,
+            main: `#include <stdio.h>
+#include "main.h"
+
+int main(void) {
+  Pair_i32_ whole = { 19, 23 };
+  Pair_f64_ fraction = { 0.5, 0.25 };
+  printf("%d\\n", sumI32(whole));
+  printf("%.2f\\n", sumF64(fraction));
+  return 0;
+}
+`,
+        });
+        expect(stdout).toBe("42\n0.75\n");
+    }, CMAKE_TIMEOUT);
 });
 
 describe("library targets", () => {

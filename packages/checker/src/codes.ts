@@ -446,6 +446,21 @@ export const CODES = {
             "every site that needs one.",
     },
 
+    GF0308: {
+        title: "two types cross the boundary under one C name",
+        explanation:
+            "Inside this compiler two types are told apart by their whole shape, so " +
+            "two files may each declare an `interface Pair` and they are simply two " +
+            "types. A C header has only the name, and C has no way to say \"the other " +
+            "`Pair`\" — so both would be declared, `typedef struct Pair` twice with " +
+            "different bodies, and every signature would name whichever came first.\n\n" +
+            "It takes both of them actually crossing: a type used only inside the " +
+            "library never reaches the header and never conflicts with anything.\n\n" +
+            "Rename one. A generic is not the usual cause — `Pair<i32>` and " +
+            "`Pair<u8>` carry their arguments in the name and stay apart on their " +
+            "own — so this is normally two declarations that genuinely share a name.",
+    },
+
     // -- Generics and instantiation ------------------------------------------
     GF0402: {
         title: "instantiating this generic never ends",

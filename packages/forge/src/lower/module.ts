@@ -1025,8 +1025,17 @@ export class Lowerer {
         // not erase at all, which is most of what this is asked about.
         const erased = this.tryErase(expression, bindings);
         const behind = erased === undefined ? undefined : behindOneIndirection(erased) ?? erased;
-        if (behind?.kind === "class" && this.#classes.has(behind.name)) {
-            return behind.name;
+        if (behind?.kind === "class") {
+            // Asking is also what *makes* a generic class, here as in `tyOf`:
+            // this is the door the width pass and the method-call path come
+            // through, and a `Pointer<Box<i32>>` reified out of a `void *` may
+            // be the first mention of `Box<i32>` anywhere.
+            if (behind.args !== undefined) {
+                this.classInfoFor(behind.name, behind.args, expression);
+            }
+            if (this.#classes.has(behind.name)) {
+                return behind.name;
+            }
         }
 
         const type = this.#checker.getTypeAtLocation(expression);
