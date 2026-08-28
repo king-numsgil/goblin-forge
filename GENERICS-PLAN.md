@@ -174,7 +174,7 @@ that is a decision with blast radius well beyond generics.
 
 ---
 
-## 3. The bug that has to be fixed first
+## 3. The bug that had to be fixed first *(done, 2026-08-28)*
 
 Found while probing this, and it is not a generics bug — generics only make it
 easy to hit. **Two structs with the same name silently share a layout.**
@@ -221,8 +221,41 @@ direction each time:
   comment saying qualifying is the right fix, is not free, and is cheap to lift
   later.
 
-Structs got neither. Stage 0 closes it, and everything after it depends on
-struct identity being a real identity.
+Structs got neither.
+
+### What it turned out to be
+
+`layoutKey` in `packages/checker/src/types.ts`. A struct is its **name and its
+layout, together**, and neither half alone:
+
+| Two declarations | Same struct? |
+|---|---|
+| `Point {x: i32; y: i32}` in each of two files | yes — one name, one layout |
+| `Pair {a: i32}` and `Pair {a: u32}` | no — the layouts differ |
+| `Point {x: i32}` and `Vec2 {x: i32}` | no — the names differ |
+
+Cycles close on a de Bruijn back reference, which is what keeps
+`interface Node { next: Pointer<Node> }` finite *and* canonical, so two
+identical recursive `Node`s in two files still key alike. `sameType` compares
+the same key, so what the frontend calls one type and what the module gives one
+`TyId` cannot drift apart.
+
+**Two things this cost that are worth knowing before touching it again.**
+
+The first attempt keyed by *declaration site* — file plus name, the argument
+`#keyOf` makes for functions. It over-shot: two files declaring the same
+`Point` became two types, and passing one to the other came back as "this is a
+`Point`, which does not convert to `Point`". A legal program, refused, with a
+message naming one type twice. The rule is that the key may not be *finer* than
+what `sameType` is willing to call equal, and that case is now a test.
+
+The second is that fixing the frontend exposed the same conflation one layer
+down: the itab symbol was `__gf_itab$<interface>$<class>`, and one class
+convertible to two same-named contracts is two itabs under one symbol — an LLVM
+redefinition. The `InterfaceId` is in the symbol now. Adding a
+duplicate-interface-name refusal would have worked too and was the wrong
+direction, because stage 5 wants the *class* one lifted rather than a second
+one added.
 
 ---
 
@@ -354,23 +387,17 @@ built against a working implementation rather than alongside one.
 Each ends somewhere runnable, tested, and committable, in the style
 LLVM-PORT.md set. The checkpoint is behavioural, never "it compiles".
 
-### Stage 0 — struct identity
+### Stage 0 — struct identity ✅ *(done, 2026-08-28)*
 
 **Not a generics change.** A live silent-miscompile fix (§3) that everything
-after it stands on.
+after it stands on. `layoutKey`, `sameType`, `#structTy`, `#interfaceTy`, the
+itab symbol.
 
-- Split a struct's *identity* from its *display name* in `MachineType`, or
-  qualify the single name and teach `renderType` to print the readable half.
-  The former is cleaner and matches what `collectClasses`'s comment says a
-  class will eventually need.
-- `structNameOf` qualifies a **named** aggregate by its declaring symbol;
-  anonymous shapes are untouched.
-- Same question, same answer, for `contractOf`'s interface names.
-
-*Checkpoint:* both programs in §3 compile and print the right answers. A test
-in `tests/structs.test.ts` for the cross-file case and one in
-`tests/layout.test.ts` asserting the two layouts differ. The golden MIR
-snapshots will churn — read the diff.
+*Checkpoint, met:* four tests in `tests/structs.test.ts` under "a struct is its
+name and its layout". Three of them fail without the fix — two of those as
+`GF9003`, which is the compiler calling itself broken — and the fourth is the
+over-strictness guard and passes either way, on purpose. Full suite green,
+golden MIR unchanged.
 
 ### Stage 1 — the substitution, and generic functions over an opaque `T`
 
