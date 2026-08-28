@@ -763,6 +763,30 @@ export function erase(
         return eraseObject(checker, type, state);
     }
 
+    // A **conditional type still waiting on its check type** — `T extends i32 ?
+    // … : …` with `T` a parameter. tsc will not resolve one over an unresolved
+    // parameter, and this compiler cannot resolve it for tsc: the substitution
+    // replaces `T` at the *leaf*, with a machine type, and re-evaluating a
+    // conditional needs the `ts.Type` put back and the whole thing instantiated
+    // — which tsc exports no way to do.
+    //
+    // So it is a real limit rather than an oversight, and it is worth its own
+    // sentence: "`Chosen<T>` has no machine representation" is true of the
+    // shape and says nothing about why, which sends the reader looking for a
+    // missing feature in the wrong place.
+    if (flags & ts.TypeFlags.Conditional) {
+        throw new ErasureError(
+            `\`${checker.typeToString(type)}\` is a conditional type whose condition ` +
+            "still mentions a type parameter, and it stays unresolved here. A generic " +
+            "is compiled once per set of type arguments by substituting *machine* " +
+            "types, and a conditional needs TypeScript's own types put back and the " +
+            "whole thing re-evaluated — which tsc offers no way to ask for.\n\n" +
+            "Write the concrete types out: an overload per case, or a plain type " +
+            "parameter with the choice made at the call.",
+            "GF0001",
+        );
+    }
+
     throw new ErasureError(
         `\`${checker.typeToString(type)}\` has no machine representation yet.`,
         "GF0001",
@@ -1403,10 +1427,23 @@ export function contractOf(
     return state.aggregate(type, {kind: "interface", name, methods: dispatched}, () => {
         for (const method of sorted) {
             const declaration = method.declarations?.find(ts.isMethodSignature);
+            // **Of the symbol at the declaration, not of the declaration.** For
+            // an *instantiated* interface — `Container<i32>`, from `interface
+            // Container<T> { get(): T }` — the symbol carries the substituted
+            // signature while the declaration still reads as it was written. So
+            // reading the declaration gave every method of every generic
+            // contract a raw `T`, which erases as a type parameter nothing has
+            // bound: a contract could be declared generic and never used as one.
+            //
+            // The same correction `eraseSignature` already carries one function
+            // up, for the same reason and found the same way.
             const signature =
                 declaration === undefined
                     ? undefined
-                    : checker.getSignatureFromDeclaration(declaration);
+                    : checker.getSignaturesOfType(
+                        checker.getTypeOfSymbolAtLocation(method, declaration),
+                        ts.SignatureKind.Call,
+                    )[0];
             if (declaration === undefined || signature === undefined) {
                 throw new ErasureError(
                     `tsc could not give \`${name}.${method.name}\` a signature.`,
@@ -1415,9 +1452,12 @@ export function contractOf(
             }
             dispatched.push({
                 name: method.name,
-                params: declaration.parameters.map((parameter) =>
-                    state.through(() => erase(checker, checker.getTypeAtLocation(parameter), state)),
-                ),
+                params: signature.getParameters().map((parameter) => {
+                    const at = parameter.valueDeclaration ?? declaration;
+                    return state.through(() =>
+                        erase(checker, checker.getTypeOfSymbolAtLocation(parameter, at), state),
+                    );
+                }),
                 returns: state.through(() =>
                     erase(checker, checker.getReturnTypeOfSignature(signature), state),
                 ),

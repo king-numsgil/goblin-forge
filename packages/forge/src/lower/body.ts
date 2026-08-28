@@ -46,7 +46,7 @@ import {
     sameType,
 } from "@goblin-forge/checker";
 import ts from "typescript";
-import type { ClassInfo, ClassMethod } from "../classes.ts";
+import type { ClassInfo, ClassMethod, MethodTemplate } from "../classes.ts";
 import {
     ALLOC,
     ALLOC_ARRAY,
@@ -3892,6 +3892,58 @@ export class BodyLowerer extends BoundaryLowerer {
      * receiver is not a class at all, so the caller can go on to try `console`
      * without a spurious diagnostic having been raised.
      */
+    /**
+     * `x.pick<i32>(v)` — a call to one instantiation of a generic method.
+     *
+     * A **direct** call, always: a generic method has no vtable slot, so there
+     * is nothing to dispatch through and nothing to override it. The receiver
+     * is passed as an ordinary first argument, which is what `this` already is
+     * everywhere else.
+     */
+    #genericMethodCall(
+        expression: ts.CallExpression,
+        access: ts.PropertyAccessExpression,
+        info: ClassInfo,
+        template: MethodTemplate,
+    ): Typed | undefined {
+        const record = this.outer.instantiateMethod(info, template, expression, this.bindings);
+        if (record === undefined || record === "reported" || record.kind !== "defined") {
+            return undefined;
+        }
+
+        // A `static` has no receiver, so it is an ordinary direct call.
+        if (template.isStatic) {
+            return this.#directCall(expression, record, expression.arguments);
+        }
+
+        const subject = this.value(access.expression, undefined);
+        if (subject === undefined) {
+            return undefined;
+        }
+        const asClass = this.asClass(subject);
+        if (asClass === undefined) {
+            this.outer.unsupported(access, "a method call on this receiver");
+            return undefined;
+        }
+
+        const args = this.classCallArgs(
+            expression,
+            info,
+            record.name,
+            expression.arguments,
+            this.refTo(access, asClass.place, {kind: "class", name: info.name}),
+        );
+        if (args === undefined || args === null) {
+            return undefined;
+        }
+        return this.emitCall(
+            expression,
+            {kind: "Direct", value: {kind: "Local", value: record.id}},
+            args,
+            record.signature.returns,
+        );
+    }
+
     #methodCall(
         expression: ts.CallExpression,
         access: ts.PropertyAccessExpression,
@@ -3971,8 +4023,21 @@ export class BodyLowerer extends BoundaryLowerer {
         }
 
         const info = this.outer.classInfo(className);
-        const method = info?.methods.get(access.name.text);
-        if (info === undefined || method === undefined) {
+        if (info === undefined) {
+            return "not-a-method";
+        }
+
+        // A method generic in its own right: one copy per set of type
+        // arguments, resolved **directly** rather than through a slot, because
+        // it has none. Before the ordinary lookup because the two maps are
+        // disjoint and this one is the narrower question.
+        const template = info.methodTemplates.get(access.name.text);
+        if (template !== undefined) {
+            return this.#genericMethodCall(expression, access, info, template);
+        }
+
+        const method = info.methods.get(access.name.text);
+        if (method === undefined) {
             return "not-a-method";
         }
 

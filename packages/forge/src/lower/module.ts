@@ -44,6 +44,7 @@ import {
     type ClassMethod,
     collectClasses,
     type MethodBody,
+    type MethodTemplate,
     type StaticMethod,
 } from "../classes.ts";
 import { INT_TY, STD_MODULES } from "./tables.ts";
@@ -276,6 +277,110 @@ export class Lowerer {
     }
 
     /**
+     * `x.pick<i32>(v)` — one instantiation of a generic **method**.
+     *
+     * Close to {@link Lowerer.#instantiate} and deliberately not merged with
+     * it: the two differ in the three things that matter. A method's copies are
+     * keyed by the *class* as well as the method, because `Box<i32>.pick<u8>`
+     * and `Box<f64>.pick<u8>` are different functions. Its substitution is the
+     * class's and the method's **together**, because the body may mention both.
+     * And it takes a receiver, so its signature starts with a
+     * `Reference<Self>` — unless it is `static`, which has none.
+     *
+     * The result is an ordinary {@link FnRecord} for a **direct** call. A
+     * generic method is never virtual: a slot holds one function and this is as
+     * many as it has type arguments, which is the same reason C++ forbids
+     * `virtual` on a member template.
+     */
+    instantiateMethod(
+        info: ClassInfo,
+        template: MethodTemplate,
+        call: ts.CallExpression,
+        bindings: Substitution,
+    ): FnRecord | "reported" | undefined {
+        const supplied = this.#typeArgumentsOf(
+            {name: `${info.name}.${template.name}`, parameters: template.parameters},
+            {node: call},
+            template.declaration,
+        );
+        if (supplied === undefined) {
+            return "reported";
+        }
+
+        const args: MachineType[] = [];
+        for (const {type, at} of supplied) {
+            const machine = this.erase(at, type, bindings);
+            if (machine === undefined) {
+                return "reported";
+            }
+            args.push(machine);
+        }
+
+        const key = instantiationKey(`${info.name}#${template.name}`, args);
+        const existing = this.#instantiations.get(key);
+        if (existing !== undefined) {
+            return existing;
+        }
+
+        // The class's and the method's together. The class's first, so that a
+        // method that shadows its class's parameter name — `<T>` inside
+        // `Box<T>` — resolves to its own, which is what TypeScript says too.
+        const combined = new Map(info.bindings);
+        for (const [parameter, bound] of bindingsOf(template.parameters, args)) {
+            combined.set(parameter, bound);
+        }
+
+        const params = this.#classFnParams(template.declaration, combined);
+        const signature = this.#checker.getSignatureFromDeclaration(template.declaration);
+        const returns =
+            params === undefined || signature === undefined
+                ? undefined
+                : this.erase(
+                    template.declaration.type ?? template.declaration,
+                    this.#checker.getReturnTypeOfSignature(signature),
+                    combined,
+                );
+        if (params === undefined || returns === undefined) {
+            return "reported";
+        }
+
+        const label = `${info.name}.${template.name}<${args.map(renderType).join(", ")}>`;
+        const symbol = instantiationSymbol(
+            `${info.name}$${template.name}`,
+            this.#relative(template.declaration.getSourceFile().fileName),
+            key,
+            args,
+        );
+        const self: MachineType = {
+            kind: "reference",
+            referent: {kind: "class", name: info.name},
+        };
+        const receiver = template.isStatic ? [] : [self];
+        const builder = this.#declareClassFn(
+            symbol,
+            [...receiver, ...params.map((p) => p.type)],
+            returns,
+            template.declaration,
+        );
+        const record = this.#functions.get(symbol);
+        if (record === undefined || record.kind !== "defined") {
+            this.unsupported(call, `a call to \`${label}\``);
+            return "reported";
+        }
+        this.#instantiations.set(key, record);
+        this.#pendingClasses.push({
+            kind: template.isStatic ? "static" : "method",
+            info,
+            bindings: combined,
+            node: template.declaration,
+            builder,
+            params,
+            returns,
+        });
+        return record;
+    }
+
+    /**
      * `identity<i32>` written as a **value** — the address of one instantiation.
      *
      * Its own entry point rather than a branch of {@link Lowerer.resolveCallee},
@@ -327,7 +432,7 @@ export class Lowerer {
         // is not a lesser path. `at` is what a diagnostic about one of them
         // underlines: the type argument itself when there is one to point at,
         // and the whole use when tsc worked it out.
-        const supplied = this.#typeArgumentsOf(template, use);
+        const supplied = this.#typeArgumentsOf(template, use, template.node);
         if (supplied === undefined) {
             return undefined;
         }
@@ -473,8 +578,9 @@ export class Lowerer {
      * itself when one was written, the whole call when tsc worked it out.
      */
     #typeArgumentsOf(
-        template: FnTemplate,
+        template: { readonly name: string; readonly parameters: readonly ts.Symbol[] },
         use: GenericUse,
+        declaration: ts.SignatureDeclaration,
     ): readonly { readonly type: ts.Type; readonly at: ts.Node }[] | undefined {
         const written = use.node.typeArguments;
         if (written !== undefined && written.length === template.parameters.length) {
@@ -492,7 +598,7 @@ export class Lowerer {
             use.node.kind === ts.SyntaxKind.CallExpression
                 ? this.#checker.getResolvedSignature(use.node)
                 : undefined;
-        const declared = this.#checker.getSignatureFromDeclaration(template.node);
+        const declared = this.#checker.getSignatureFromDeclaration(declaration);
         const inferred =
             resolved === undefined || declared === undefined
                 ? undefined
@@ -724,6 +830,11 @@ export class Lowerer {
         return this.#plainCallee(access);
     }
 
+    /** Whether this name is a generic class's, with no type arguments on it. */
+    namesAGenericClass(name: string): boolean {
+        return this.#genericClasses.has(name);
+    }
+
     /** Whether this expression names a generic function. */
     namesAGeneric(expression: ts.Expression): boolean {
         const declaration = this.#calleeDeclaration(expression);
@@ -906,6 +1017,7 @@ export class Lowerer {
             const info = buildClass(
                 node,
                 name,
+                bindings,
                 (baseName) => this.#classes.get(baseName),
                 this.#checker,
                 {
@@ -922,7 +1034,7 @@ export class Lowerer {
             // of rather than asking for it again and recursing.
             this.#classes.set(name, info);
             this.#registerClass(info);
-            this.#pendingClasses.push(...this.#declareClassMembers(info, bindings));
+            this.#pendingClasses.push(...this.#declareClassMembers(info));
             // Layout then contracts, immediately, where the eager path has to
             // do each in its own pass. It is safe here for the reason the two
             // passes exist there: by the time anything asks for a `Box<i32>`
@@ -962,10 +1074,20 @@ export class Lowerer {
      * asked of whichever half exists, so that `x.name` and `x.name = v` agree
      * about what `name` is.
      */
+    /**
+     * The type an accessor reads or writes, under **the class's** substitution.
+     *
+     * Not the asking body's. `b.held` in some other function asks what a
+     * `Box<i32>`'s getter returns, and answering under that function's
+     * substitution erased `T` as a parameter nothing had bound. A method
+     * escaped this because its signature is recorded once at declaration; an
+     * accessor is re-erased at each use, which is what made it visible.
+     */
     accessorType(
+        info: ClassInfo,
         accessor: ClassMethod | StaticMethod,
-        bindings: Substitution,
     ): MachineType | undefined {
+        const bindings = info.bindings;
         const declaration = accessor.declaration;
         if (ts.isSetAccessorDeclaration(declaration)) {
             const parameter = declaration.parameters[0];
@@ -1894,7 +2016,7 @@ export class Lowerer {
 
         const bodies: ClassBody[] = [];
         for (const info of this.#classes.values()) {
-            bodies.push(...this.#declareClassMembers(info, NO_BINDINGS));
+            bodies.push(...this.#declareClassMembers(info));
         }
         // Three passes over all of them, not one pass doing three things, and
         // the separation is load-bearing in both directions.
@@ -1937,7 +2059,8 @@ export class Lowerer {
      * eager classes were declared. So this has to be callable at any point,
      * which is the whole of why it is a function rather than a loop body.
      */
-    #declareClassMembers(info: ClassInfo, bindings: Substitution): ClassBody[] {
+    #declareClassMembers(info: ClassInfo): ClassBody[] {
+        const bindings = info.bindings;
         const bodies: ClassBody[] = [];
         {
             const self: MachineType = {kind: "class", name: info.name};
@@ -2128,7 +2251,7 @@ export class Lowerer {
                 continue;
             }
             for (const expression of clause.types) {
-                const contract = this.#contractFrom(expression);
+                const contract = this.#contractFrom(expression, info.bindings);
                 if (contract === undefined) {
                     continue;
                 }
@@ -2206,11 +2329,18 @@ export class Lowerer {
     /** The contract named by an `implements` clause entry, if it is one. */
     #contractFrom(
         expression: ts.ExpressionWithTypeArguments,
+        bindings: Substitution,
     ): Extract<MachineType, { kind: "interface" }> | undefined {
         try {
+            // Under the class's substitution: `class Box<T> implements
+            // Container<T>` names a contract whose `T` is this instantiation's.
+            // Erased without it, the clause reported `T` as a type parameter
+            // nothing had bound — so a generic class could declare that it
+            // implements a generic contract and never be able to.
             const contract = contractOf(
                 this.#checker,
                 this.#checker.getTypeAtLocation(expression),
+                new Erasure(bindings),
             );
             return contract?.kind === "interface" ? contract : undefined;
         } catch (error) {

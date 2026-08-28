@@ -749,8 +749,32 @@ function ask<T extends Speaker>(x: Reference<T>): i32 {
 ```
 
 Generic **classes** work the same way — `Box<i32>` and `Box<f64>` are two
-classes, with two layouts, two vtables and two destructors. What is not there
-yet is using one as a *base* class.
+classes, with two layouts, two vtables and two destructors — and so do generic
+**methods**, on a plain class or a generic one:
+
+```ts
+class Box<T> {
+    constructor(private value: T) {}
+    paired<U>(other: U): U { return other; }
+}
+```
+
+A generic method has **no vtable slot**, and cannot: a slot holds one function
+and this is as many as it has sets of type arguments. So it is resolved
+statically and inherited by name, exactly as C++ forbids `virtual` on a member
+template. Ordinary methods dispatch as they always did.
+
+Three things about generics are not there:
+
+- a generic used as a **base class** — `class D extends Box<i32>`;
+- a **`static` on a generic class**, because `Box.zero()` names none of the
+  classes `Box` stands for and TypeScript has no syntax for saying which. It
+  never needed one: a `static` may not use `T`, which is also the way out —
+  make it a plain function;
+- a **conditional type** whose condition mentions a type parameter. The
+  substitution replaces `T` with a machine type at the leaf, and re-evaluating
+  a conditional needs TypeScript's own types put back, which tsc offers no way
+  to ask for.
 
 A generic **crosses a library boundary as source**, and is compiled into
 whoever uses it — the way a C++ template travels in a header. Goblin to Goblin

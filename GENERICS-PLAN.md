@@ -544,10 +544,40 @@ on purpose: resolving a base by its erased type arguments is a different
 question from resolving one by name, which is all the heritage clause is read
 for. Everything else about inheritance is unchanged.
 
-Still open under it, and neither is reachable yet: the class-name-collision
-refusal could be revisited now that instantiated names are not bare, and
-`instanceof` across `Box<i32>` and `Box<f64>` wants a test — they are unrelated
-types and the descriptors should already say so, but nothing checks it.
+### What "generic classes work" was missing
+
+Claimed done too early. Testing the *combinatorics* rather than the feature
+found three more, two of them real defects:
+
+- **`implements Container<T>` did not work at all.** The heritage clause was
+  erased with no substitution, so a generic class could declare that it
+  implemented a generic contract and never be able to. And `contractOf` built
+  every method's signature from the *declaration* rather than the instantiated
+  symbol, so even a concrete `Container<i32>` gave its methods a raw `T` — the
+  same correction `eraseSignature` already carried one function up.
+- **An accessor on a generic class did not work**, because its type is
+  re-erased at each *use* and was being erased under the asking body's
+  substitution. A class's substitution belongs to the class; it is on
+  `ClassInfo` now.
+- **`alloc(Box, n)`** could not name an instantiation, and **asking what class
+  an expression is** did not make one. Both found at the library boundary.
+
+### Generic methods
+
+Refused outright until the combinatorics were tested, and the refusal was never
+written down anywhere a reader would find it.
+
+They work now. **A generic method has no vtable slot and cannot have one** — a
+slot holds one function and this is as many as it has sets of type arguments —
+so it is resolved statically, neither overriding nor overridden, and inherited
+by name the way a `static` is. C++ forbids `virtual` on a member template for
+the same reason. Instantiations are keyed by the class as well as the method,
+and lowered under the class's substitution and the method's together.
+
+Still open under this stage: a `static` on a generic class (the name stands for
+every instantiation and TypeScript has no syntax for choosing — it never needed
+one, because a `static` may not use `T`), and `instanceof` across `Box<i32>`
+and `Box<f64>`, which should already be right and is untested.
 
 ### Stage 6 — crossing a Goblin boundary ✅ *(done, 2026-08-28)*
 

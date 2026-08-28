@@ -487,6 +487,27 @@ describe("generics", () => {
             expect(result.leaked).toBe(0);
         });
 
+        test("a `static` on a generic class has no name that resolves", async () => {
+            // `Box.zero()` names none of the classes `Box` stands for, and
+            // TypeScript has no syntax for saying which — it never needed one,
+            // because a `static` may not use `T`. Which is also the way out.
+            const diagnostic = await expectRejected(
+                "generic-class-static",
+                `class Box<T> {
+         constructor(private value: T) {}
+         get(): T { return this.value; }
+         static zero(): i32 { return 0; }
+       }
+
+       export function main(): i32 {
+         const b = new Box<i32>(7);
+         return b.get() + Box.zero();
+       }\n`,
+                "GF0001",
+            );
+            expect(diagnostic.message).toContain("may not use the class's type parameters");
+        });
+
         test("a generic base class is refused, for now", async () => {
             // Narrow, and honest about why: resolving a base by its erased type
             // arguments is a different question from resolving one by name,
@@ -500,6 +521,270 @@ describe("generics", () => {
                 "GF0001",
             );
             expect(diagnostic.message).toContain("base class");
+        });
+    });
+
+    describe("generic methods", () => {
+        // **A generic method has no vtable slot, and cannot have one.** A slot
+        // holds one function and this is as many functions as it has sets of
+        // type arguments, so there is no answer to which one goes in. C++
+        // forbids `virtual` on a member template for exactly that reason, and
+        // the consequence is the same here: a generic method is resolved
+        // statically, neither overriding nor overridden, and inherited by name
+        // the way a `static` is.
+
+        test("on a plain class", async () => {
+            const result = await run(
+                "generic-method",
+                `class Holder {
+         pick<T>(a: T, b: T): T { return a; }
+       }
+
+       export function main(): i32 {
+         const h = new Holder();
+         const x: i32 = 3;
+         return h.pick<i32>(x, x);
+       }\n`,
+            );
+            expect(result.exitCode).toBe(3);
+        });
+
+        test("its type arguments are inferred too", async () => {
+            const result = await run(
+                "generic-method-inferred",
+                `class Holder {
+         pick<T>(a: T, b: T): T { return a; }
+       }
+
+       export function main(): i32 {
+         const h = new Holder();
+         const x: i32 = 3;
+         return h.pick(x, x);
+       }\n`,
+            );
+            expect(result.exitCode).toBe(3);
+        });
+
+        test("two instantiations of one method", async () => {
+            const result = await run(
+                "generic-method-two",
+                `class Holder {
+         echo<T>(x: T): T { const copy = x; return copy; }
+       }
+
+       export function main(): i32 {
+         const h = new Holder();
+         const n: i32 = 4;
+         console.log(h.echo<string>("said"));
+         return h.echo<i32>(n);
+       }\n`,
+            );
+            expect(result.stdout).toBe("said\n");
+            expect(result.exitCode).toBe(4);
+            // The `string` copy clones and drops; the `i32` copy does neither.
+            expect(result.leaked).toBe(0);
+        });
+
+        test("on a generic class, using both parameters", async () => {
+            const result = await run(
+                "generic-method-on-generic-class",
+                `class Box<T> {
+         constructor(private value: T) {}
+         mine(): T { return this.value; }
+         paired<U>(other: U): U { return other; }
+       }
+
+       export function main(): i32 {
+         const b = new Box<string>("kept");
+         const n: i32 = 5;
+         console.log(b.mine());
+         return b.paired<i32>(n);
+       }\n`,
+            );
+            expect(result.stdout).toBe("kept\n");
+            expect(result.exitCode).toBe(5);
+            expect(result.leaked).toBe(0);
+        });
+
+        test("a method's parameter shadows the class's", async () => {
+            // Two different parameters that happen to be spelled alike would be
+            // one entry in a substitution keyed by *name*. It is keyed by
+            // symbol, so `T` inside the method is the method's.
+            const result = await run(
+                "generic-method-shadow",
+                `class Box<T> {
+         constructor(private value: T) {}
+         get(): T { return this.value; }
+         swap<T2>(v: T2): T2 { return v; }
+       }
+
+       export function main(): i32 {
+         const b = new Box<i32>(1);
+         const n: i32 = 6;
+         return b.swap<i32>(n) + b.get();
+       }\n`,
+            );
+            expect(result.exitCode).toBe(7);
+        });
+
+        test("inherited by name, like a `static`", async () => {
+            const result = await run(
+                "generic-method-inherited",
+                `class Base { echo<T>(x: T): T { return x; } }
+       class Derived extends Base {}
+
+       export function main(): i32 {
+         const d = new Derived();
+         const n: i32 = 8;
+         return d.echo<i32>(n);
+       }\n`,
+            );
+            expect(result.exitCode).toBe(8);
+        });
+
+        test("and an ordinary method is still virtual", async () => {
+            // The control: giving generic methods no slot must not have taken
+            // anyone else's away.
+            const result = await run(
+                "generic-method-virtual-control",
+                `class Base { name(): string { return "base"; } }
+       class Derived extends Base { override name(): string { return "derived"; } }
+
+       export function main(): i32 {
+         const d = new Derived();
+         const b: Reference<Base> = d;
+         console.log(b.name());
+         return 0;
+       }\n`,
+            );
+            expect(result.stdout).toBe("derived\n");
+        });
+
+        test("a `static` one", async () => {
+            const result = await run(
+                "generic-static-method",
+                `class Util {
+         static identity<T>(x: T): T { return x; }
+       }
+
+       export function main(): i32 {
+         const n: i32 = 6;
+         return Util.identity<i32>(n);
+       }\n`,
+            );
+            expect(result.exitCode).toBe(6);
+        });
+
+        test("a generic method on a generic class, inside a generic function", async () => {
+            // Three substitutions at once, and the deepest case that works.
+            const result = await run(
+                "generic-method-deep",
+                `class Box<T> {
+         constructor(private value: T) {}
+         paired<U>(other: U): U { return other; }
+       }
+
+       function wrap<T, U>(v: T, other: U): U {
+         const b = new Box<T>(v);
+         return b.paired<U>(other);
+       }
+
+       export function main(): i32 {
+         const n: i32 = 10;
+         return wrap<string, i32>("deep", n);
+       }\n`,
+            );
+            expect(result.exitCode).toBe(10);
+            expect(result.leaked).toBe(0);
+        });
+    });
+
+    describe("generic classes and contracts", () => {
+        test("a generic class implements a plain contract", async () => {
+            const result = await run(
+                "generic-class-plain-contract",
+                `interface Getter { get(): i32; }
+       class Box<T> implements Getter {
+         constructor(private value: i32) {}
+         get(): i32 { return this.value; }
+       }
+
+       export function main(): i32 {
+         const b = new Box<i32>(7);
+         const g: Reference<Getter> = b;
+         return g.get();
+       }\n`,
+            );
+            expect(result.exitCode).toBe(7);
+        });
+
+        test("a generic class implements a *generic* contract", async () => {
+            // `implements Container<T>` names a contract whose `T` is this
+            // instantiation's, and the clause has to be erased under the
+            // class's substitution. It was not, so a generic class could
+            // declare it implemented a generic contract and never be able to.
+            const result = await run(
+                "generic-class-generic-contract",
+                `interface Container<T> { get(): T; }
+       class Box<T> implements Container<T> {
+         constructor(private value: T) {}
+         get(): T { return this.value; }
+       }
+
+       export function main(): i32 {
+         const b = new Box<i32>(8);
+         const c: Reference<Container<i32>> = b;
+         return c.get();
+       }\n`,
+            );
+            expect(result.exitCode).toBe(8);
+        });
+
+        test("two instantiations satisfy the contract at their own type", async () => {
+            // `Container<i32>` and `Container<string>` are two contracts with
+            // two itables, and each `Box` answers its own.
+            const result = await run(
+                "generic-contract-two",
+                `interface Container<T> { get(): T; }
+       class Box<T> implements Container<T> {
+         constructor(private value: T) {}
+         get(): T { return this.value; }
+       }
+
+       export function main(): i32 {
+         const n = new Box<i32>(3);
+         const s = new Box<string>("held");
+         const cn: Reference<Container<i32>> = n;
+         const cs: Reference<Container<string>> = s;
+         console.log(cs.get());
+         return cn.get();
+       }\n`,
+            );
+            expect(result.stdout).toBe("held\n");
+            expect(result.exitCode).toBe(3);
+            expect(result.leaked).toBe(0);
+        });
+
+        test("an accessor on a generic class", async () => {
+            // An accessor's type is re-erased at each *use*, where a method's is
+            // recorded once at declaration — so this is the member that showed
+            // that a class's substitution has to travel with the class rather
+            // than come from whoever is asking.
+            const result = await run(
+                "generic-class-accessor",
+                `class Box<T> {
+         constructor(private value: T) {}
+         get held(): T { return this.value; }
+         set held(v: T) { this.value = v; }
+       }
+
+       export function main(): i32 {
+         const b = new Box<i32>(1);
+         b.held = 6;
+         return b.held;
+       }\n`,
+            );
+            expect(result.exitCode).toBe(6);
         });
     });
 
@@ -584,6 +869,29 @@ describe("generics", () => {
     });
 
     describe("what it refuses", () => {
+        test("a conditional type over `T` stays unresolved, and says so", async () => {
+            // A real limit rather than an oversight. The substitution replaces
+            // `T` at the *leaf*, with a machine type; re-evaluating a
+            // conditional needs TypeScript's own types put back and the whole
+            // thing instantiated, which tsc offers no way to ask for. The
+            // message has to say that, because "`Chosen<T>` has no machine
+            // representation" is true of the shape and sends the reader looking
+            // for a missing feature in the wrong place.
+            const diagnostic = await expectRejected(
+                "generic-conditional",
+                `type Chosen<T> = T extends i32 ? i32 : f64;
+
+       function pick<T>(x: Chosen<T>): Chosen<T> { return x; }
+
+       export function main(): i32 {
+         const n: i32 = 4;
+         return pick<i32>(n);
+       }\n`,
+                "GF0001",
+            );
+            expect(diagnostic.message).toContain("conditional type");
+        });
+
         test("GF0404 — a call that determines nothing", async () => {
             // `T` appears in no argument, so there is nothing at the call for
             // tsc to have read it from either.

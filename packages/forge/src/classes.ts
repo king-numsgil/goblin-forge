@@ -23,7 +23,7 @@
  * library boundary breaks on day one.
  */
 
-import type { MachineType } from "@goblin-forge/checker";
+import { type MachineType, NO_BINDINGS, type Substitution } from "@goblin-forge/checker";
 import ts from "typescript";
 
 /** A field, after flattening. */
@@ -79,6 +79,30 @@ export type MethodBody =
     | ts.GetAccessorDeclaration
     | ts.SetAccessorDeclaration;
 
+/**
+ * A method that is generic in its own right — `pick<U>(x: U): U`.
+ *
+ * **It has no slot, and cannot have one.** A vtable slot holds one function,
+ * and a generic method is as many functions as it has sets of type arguments;
+ * there is no answer to which one the slot would hold. C++ forbids `virtual`
+ * on a member template for exactly this reason, and the consequence is the
+ * same here: a generic method is resolved statically at the call, so it neither
+ * overrides nor is overridden.
+ *
+ * That also means it is inherited the way a `static` is — by name, emitted
+ * where it was written — rather than the way a virtual method is.
+ */
+export interface MethodTemplate {
+    readonly name: string;
+    readonly declaration: MethodBody;
+    /** The class that declared it, which is where its copies are emitted. */
+    readonly owner: string;
+    /** Its own type parameters, as symbols — not the class's. */
+    readonly parameters: readonly ts.Symbol[];
+    /** A `static` has no receiver, and its copies take no `this`. */
+    readonly isStatic: boolean;
+}
+
 /** A method, with the slot it dispatches through. */
 export interface ClassMethod {
     readonly name: string;
@@ -93,6 +117,20 @@ export interface ClassMethod {
 export interface ClassInfo {
     readonly node: ts.ClassDeclaration;
     readonly name: string;
+    /**
+     * What this class's type parameters are bound to — empty for an ordinary
+     * class, and the instantiation's for a `Box<i32>`.
+     *
+     * It lives on the class because **it is a property of the class, not of
+     * whoever is asking**. A member's types have to be erased under it wherever
+     * the question comes from, and the question does not always come from
+     * inside: `b.held` in some other function asks what the getter returns, and
+     * answering under *that* body's substitution erased `T` as unbound. A
+     * method escaped this only because its signature is recorded once, at
+     * declaration; an accessor is re-erased at each use, which is what made the
+     * difference visible.
+     */
+    readonly bindings: Substitution;
     readonly base: ClassInfo | undefined;
     /** Flattened, base classes' fields first. */
     readonly fields: readonly ClassField[];
@@ -105,6 +143,14 @@ export interface ClassInfo {
     readonly slots: readonly string[];
     /** Every method callable on this class, own and inherited, by name. */
     readonly methods: ReadonlyMap<string, ClassMethod>;
+    /**
+     * Methods generic in their own right, own and inherited, by name.
+     *
+     * Apart from {@link ClassInfo.methods} because they have no slot — see
+     * {@link MethodTemplate} — so they are not in the vtable and nothing about
+     * dispatch applies to them.
+     */
+    readonly methodTemplates: ReadonlyMap<string, MethodTemplate>;
     /**
      * `get name()` and `set name(v)`, own and inherited.
      *
@@ -301,7 +347,9 @@ export function collectClasses(
             return undefined;
         }
         inProgress.add(name);
-        const info = buildClass(node, name, analyse, checker, report);
+        // Nothing collected eagerly is generic — a generic class is set aside
+        // below — so there is nothing to substitute.
+        const info = buildClass(node, name, NO_BINDINGS, analyse, checker, report);
         inProgress.delete(name);
 
         if (info !== undefined) {
@@ -342,6 +390,7 @@ export function collectClasses(
 export function buildClass(
     node: ts.ClassDeclaration,
     name: string,
+    bindings: Substitution,
     analyse: (name: string) => ClassInfo | undefined,
     checker: ts.TypeChecker,
     report: ClassReport,
@@ -496,6 +545,7 @@ export function buildClass(
     const staticGetters = new Map<string, StaticMethod>();
     const staticSetters = new Map<string, StaticMethod>();
     const methods = new Map<string, ClassMethod>();
+    const methodTemplates = new Map<string, MethodTemplate>();
     const getters = new Map<string, ClassMethod>();
     const setters = new Map<string, ClassMethod>();
     if (base) {
@@ -524,6 +574,11 @@ export function buildClass(
         for (const [methodName, method] of base.methods) {
             methods.set(methodName, method);
         }
+        // Inherited the way a `static` is — by name, emitted where it was
+        // written — because a generic method has no slot to inherit.
+        for (const [methodName, template] of base.methodTemplates) {
+            methodTemplates.set(methodName, template);
+        }
     }
 
     for (const member of node.members) {
@@ -542,11 +597,30 @@ export function buildClass(
         // slot, no dispatch. Collected apart from the vtable for that reason —
         // giving one a slot would mean an object could override it, and there is
         // no object.
-        if (isStatic(member)) {
-            if (member.typeParameters && member.typeParameters.length > 0) {
-                report.unsupported(member.typeParameters[0]!, "a generic method");
+        // Generic in its own right, `static` or not: no slot, no dispatch, one
+        // copy per set of type arguments made at the call. See
+        // {@link MethodTemplate}.
+        if (member.typeParameters !== undefined && member.typeParameters.length > 0) {
+            const parameters = typeParametersOf(member, checker);
+            if (parameters === undefined) {
+                report.unsupported(member, "a method whose type parameters tsc could not resolve");
                 return undefined;
             }
+            methodTemplates.set(member.name.text, {
+                name: member.name.text,
+                declaration: member,
+                owner: name,
+                parameters,
+                isStatic: isStatic(member),
+            });
+            continue;
+        }
+
+        // A `static` method is a free function in a namespace: no receiver, no
+        // slot, no dispatch. Collected apart from the vtable for that reason —
+        // giving one a slot would mean an object could override it, and there is
+        // no object.
+        if (isStatic(member)) {
             statics.set(member.name.text, {
                 name: member.name.text,
                 declaration: member,
@@ -554,10 +628,6 @@ export function buildClass(
                 owner: name,
             });
             continue;
-        }
-        if (member.typeParameters && member.typeParameters.length > 0) {
-            report.unsupported(member.typeParameters[0]!, "a generic method");
-            return undefined;
         }
 
         const methodName = member.name.text;
@@ -678,11 +748,13 @@ export function buildClass(
     return {
         node,
         name,
+        bindings,
         base: base ?? undefined,
         fields,
         ownFieldsAt,
         slots,
         methods,
+        methodTemplates,
         getters,
         setters,
         statics,
@@ -738,6 +810,28 @@ function baseOf(
         return null;
     }
     return base;
+}
+
+/**
+ * A member's own type parameters, as symbols.
+ *
+ * Symbols rather than names, for the reason a {@link Substitution} is keyed by
+ * them: a method's `<T>` and its class's `<T>` are two different parameters
+ * that happen to be spelled alike, and inside the method both are in scope.
+ */
+function typeParametersOf(
+    member: ts.MethodDeclaration | MethodBody,
+    checker: ts.TypeChecker,
+): readonly ts.Symbol[] | undefined {
+    const symbols: ts.Symbol[] = [];
+    for (const parameter of member.typeParameters ?? []) {
+        const symbol = checker.getSymbolAtLocation(parameter.name);
+        if (symbol === undefined) {
+            return undefined;
+        }
+        symbols.push(symbol);
+    }
+    return symbols;
 }
 
 function isStatic(member: ts.ClassElement): boolean {

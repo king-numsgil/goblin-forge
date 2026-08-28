@@ -153,6 +153,25 @@ export abstract class WidthPass extends Emitter {
                     );
                     return ERROR;
                 }
+                // `Box.zero()` where `Box` is generic. Each set of type
+                // arguments is a separate class, and the class *name* on its own
+                // names none of them — while TypeScript gives no syntax for
+                // saying which, because a `static` may not mention `T` and so
+                // never needed one.
+                if (this.outer.namesAGenericClass(expression.text)) {
+                    this.outer.error(
+                        expression,
+                        "GF0001",
+                        `\`${expression.text}\` is generic, so every set of type arguments ` +
+                        "is a separate class and this names none of them. TypeScript has " +
+                        "no syntax for saying which — it never needed one, because a " +
+                        "`static` may not use the class's type parameters.\n\n" +
+                        "Which is also the way out: a `static` that cannot mention `T` is " +
+                        "a plain function with extra punctuation, so move it beside the " +
+                        "class and the name resolves.",
+                    );
+                    return ERROR;
+                }
                 this.outer.unsupported(expression, `the name \`${expression.text}\``);
                 return ERROR;
             }
@@ -341,7 +360,7 @@ export abstract class WidthPass extends Emitter {
         // accessor returns.
         const staticGet = this.staticAccessorAt(expression, false);
         if (staticGet !== undefined) {
-            const returns = this.outer.accessorType(staticGet.accessor, this.bindings);
+            const returns = this.outer.accessorType(staticGet.info, staticGet.accessor);
             return returns === undefined ? ERROR : typed(returns);
         }
         const staticSet = this.staticAccessorAt(expression, true);
@@ -366,8 +385,8 @@ export abstract class WidthPass extends Emitter {
             // `x.name` where `name` is `get name()`: a call, and its type is what the
             // getter returns.
             const getter = info?.getters.get(expression.name.text);
-            if (getter !== undefined) {
-                const returns = this.outer.accessorType(getter, this.bindings);
+            if (getter !== undefined && info !== undefined) {
+                const returns = this.outer.accessorType(info, getter);
                 return returns === undefined ? ERROR : typed(returns);
             }
             // The mirror of assigning to a getter that has no setter. tsc lets a
@@ -1059,6 +1078,29 @@ export abstract class WidthPass extends Emitter {
             return ERROR;
         }
         const className = info.name;
+
+        // A method generic in its own right. Instantiating is what gives it a
+        // signature at all — there is none until the type arguments are known —
+        // so the width of the call is the width of *this* copy's return.
+        const template = info.methodTemplates.get(access.name.text);
+        if (template !== undefined) {
+            for (const argument of expression.arguments) {
+                if (this.width(argument).kind === "error") {
+                    return ERROR;
+                }
+            }
+            const instance = this.outer.instantiateMethod(
+                info,
+                template,
+                expression,
+                this.bindings,
+            );
+            if (instance === undefined || instance === "reported") {
+                return ERROR;
+            }
+            return typed(instance.signature.returns);
+        }
+
         const method = info.methods.get(access.name.text);
         if (method === undefined) {
             this.outer.unsupported(expression, `\`${className}.${access.name.text}()\``);

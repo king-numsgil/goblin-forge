@@ -2533,11 +2533,46 @@ exactly as `std::vector<T>` cannot cross into C. GENERICS-PLAN §6 is that
 design, including the two things it is not free in: an instantiation needs a
 symbol both compilations agree on, and a vague linkage the MIR does not have.
 
+### A generic method has no slot, and cannot have one
+
+A vtable slot holds one function; a generic method is as many functions as it
+has sets of type arguments, and there is no answer to which one goes in. C++
+forbids `virtual` on a member template for exactly this reason, and the
+consequence here is the same: a generic method is resolved **statically**, so
+it neither overrides nor is overridden, and it is inherited by name the way a
+`static` is rather than through a slot.
+
+It is otherwise an ordinary instantiation — keyed by the *class* as well as the
+method, because `Box<i32>.paired<u8>` and `Box<f64>.paired<u8>` are different
+functions, and lowered under the class's substitution and the method's
+**together**, because the body may mention both.
+
+### A class's substitution belongs to the class
+
+Not to whoever is asking. A member's types have to be erased under it wherever
+the question comes from, and the question does not always come from inside:
+`b.held` in some other function asks what a `Box<i32>`'s getter returns, and
+answering under *that* body's substitution erased `T` as unbound.
+
+Methods escaped this because a method's signature is recorded once, at
+declaration. An **accessor** is re-erased at each use, which is what made the
+difference visible — and the same omission was why `implements Container<T>`
+did not work: the heritage clause was erased with no substitution at all.
+
 ### Still open under it
 
-A generic used as a **base class** — `class D extends Box<i32>` — which is
-narrow: `baseOf` resolves a base by its bare name, and an instantiation needs
-resolving by its erased type arguments. Generic classes themselves work.
+Three things, all narrow and all stated where a reader will meet them:
+
+- a generic used as a **base class** — `baseOf` resolves a base by its bare
+  name, and an instantiation needs resolving by its erased type arguments;
+- a **`static` on a generic class**, because the class name stands for every
+  instantiation and TypeScript has no syntax for choosing between them. It
+  never needed one — a `static` may not use `T` — which is both why it is
+  unimplemented and how to work around it;
+- a **conditional type** whose condition mentions a type parameter. That one is
+  a limit rather than a gap: the substitution replaces `T` at the leaf with a
+  *machine* type, and re-evaluating a conditional needs TypeScript's own types
+  put back and the whole thing instantiated, which tsc exports no way to do.
 
 Calling a method on a constrained `T` was open here too and is not any more —
 §24 above is what it took, and it was three fixes rather than the one the plan
