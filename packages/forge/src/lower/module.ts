@@ -36,7 +36,6 @@ import {
     rangeOf,
     renderType,
     type Substitution,
-    type TypeBinding,
 } from "@goblin-forge/checker";
 import ts from "typescript";
 import {
@@ -315,9 +314,9 @@ export class Lowerer {
         // goes. Inside `outer<T>`, the `T` in `inner<T>(x)` is whatever this
         // instantiation of `outer` bound; and inside `grow<T>`, the `Wrap<T>`
         // in `grow<Wrap<T>>(w)` is a whole struct rather than a type that still
-        // mentions a parameter. See `TypeBinding` for what goes wrong if this
+        // mentions a parameter. See `Substitution` for what goes wrong if this
         // is deferred instead.
-        const args: TypeBinding[] = [];
+        const args: MachineType[] = [];
         for (const {type, at} of supplied) {
             const machine = this.erase(at, type, bindings);
             if (machine === undefined) {
@@ -330,17 +329,16 @@ export class Lowerer {
             // would refuse the second for the first's reason. The body's own
             // checks report it where it actually matters, and the instantiation
             // note says which call put them there.
-            args.push({type, machine});
+            args.push(machine);
         }
 
-        const key = instantiationKey(template.key, args.map((arg) => arg.machine));
+        const key = instantiationKey(template.key, args);
         const existing = this.#instantiations.get(key);
         if (existing !== undefined) {
             return existing;
         }
 
-        const machines = args.map((arg) => arg.machine);
-        const label = `${template.name}<${machines.map(renderType).join(", ")}>`;
+        const label = `${template.name}<${args.map(renderType).join(", ")}>`;
 
         // `f<T>() { f<Pair<T>>() }` type-checks and never runs out of new type
         // arguments. The limit is arbitrary the way every such limit is; what
@@ -372,7 +370,7 @@ export class Lowerer {
             template.name,
             this.#relative(template.node.getSourceFile().fileName),
             key,
-            machines,
+            args,
         );
 
         // Declared under the substitution, so the parameters and the return are

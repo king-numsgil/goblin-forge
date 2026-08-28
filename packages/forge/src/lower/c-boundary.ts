@@ -378,7 +378,7 @@ export abstract class BoundaryLowerer extends QuatLowerer {
         const parameter = typeParameterSymbolOf(referent);
         if (parameter !== undefined) {
             const bound = this.bindings.get(parameter);
-            return bound?.machine.kind === "interface" ? bound.machine : undefined;
+            return bound?.kind === "interface" ? bound : undefined;
         }
 
         try {

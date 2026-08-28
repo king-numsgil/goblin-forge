@@ -184,41 +184,31 @@ export interface InterfaceMethod {
 }
 
 /**
- * What one type parameter is bound to, at one instantiation.
- *
- * **Both halves, and the machine type is the load-bearing one.** It is erased
- * at the call site, under whatever substitution was in force *there*, so by the
- * time it is in here it is concrete and nothing has to resolve it again.
- *
- * That is not an optimisation, it is the only thing that works. Binding to the
- * `ts.Type` alone fails on a type argument that *mentions* the enclosing
- * generic's own parameter: inside `grow<T>`, the call `grow<Wrap<T>>` binds the
- * new `T` to `Wrap<T>` — whose own `T` is still a type parameter, and one that
- * the new substitution maps back to a type containing it. Erasing that walks
- * `Wrap` into `Wrap` with nothing crossed and comes out as "a value cannot
- * contain itself", which is a true sentence about a type nobody wrote. Nothing
- * short of instantiating the `ts.Type` fixes it, and tsc does not export a way
- * to do that — but erasing one level at a time, at each call site, arrives at
- * the same place without needing to.
- *
- * The `ts.Type` is kept because erasure is not the only question asked about a
- * type: `classNameOf`, `linalgTypeOf` and `isArrayType` all want tsc's answer
- * rather than this one's.
- */
-export interface TypeBinding {
-    /** As written at the call site. May still mention an outer parameter. */
-    readonly type: ts.Type;
-
-    /** Erased at the call site, under the substitution in force there. */
-    readonly machine: MachineType;
-}
-
-/**
  * What each of a generic's type parameters actually is, at one instantiation.
  *
  * Keyed by the type parameter's **symbol**, so an imported generic is the same
  * generic however the import spelled it — the argument `resolveCallee` already
  * makes for functions, one level up.
+ *
+ * **To a {@link MachineType}, not to a `ts.Type`.** The type argument is erased
+ * at the *use site*, under whatever substitution was in force there, so by the
+ * time it is in here it is concrete and nothing ever has to resolve it again.
+ *
+ * That is not an optimisation, it is the only thing that works. Binding to the
+ * `ts.Type` fails on a type argument that *mentions* the enclosing generic's
+ * own parameter: inside `grow<T>`, the call `grow<Wrap<T>>` binds the new `T`
+ * to `Wrap<T>` — whose own `T` is still a type parameter, and one the new
+ * substitution maps back to a type containing it. Erasing that walks `Wrap`
+ * into `Wrap` with nothing crossed and comes out as "a value cannot contain
+ * itself", a true sentence about a type nobody wrote. Nothing short of
+ * instantiating the `ts.Type` fixes it and tsc exports no way to do that — but
+ * erasing one level at a time, at each use site, arrives at the same place
+ * without needing to.
+ *
+ * The `ts.Type` was carried alongside for a while, on the theory that erasure
+ * is not the only question asked about a type. It turned out to be dead weight:
+ * everything that asks — `classNameAt`, `contractAt` — wants the *machine*
+ * answer, because the machine answer is the one the substitution made concrete.
  *
  * The substitution is applied at the **leaf**, in {@link erase}, and that is
  * the whole of why monomorphisation is a small change here. `erase` already
@@ -227,10 +217,10 @@ export interface TypeBinding {
  * so every composite reaches a bare `T` on its own, and one case at the top of
  * the cascade answers for all of them.
  */
-export type Substitution = ReadonlyMap<ts.Symbol, TypeBinding>;
+export type Substitution = ReadonlyMap<ts.Symbol, MachineType>;
 
 /** Not inside a generic. The common case, and every caller outside lowering. */
-export const NO_BINDINGS: Substitution = new Map<ts.Symbol, TypeBinding>();
+export const NO_BINDINGS: Substitution = new Map<ts.Symbol, MachineType>();
 
 /** Raised when a type is legal TypeScript but outside the language. */
 export class ErasureError extends Error {
@@ -596,10 +586,10 @@ export function erase(
                 "GF0001",
             );
         }
-        // The machine type, not the `ts.Type` — already erased, at the call
-        // site, under the substitution in force there. {@link TypeBinding} is
-        // why re-erasing it here is not the same thing and does not work.
-        return bound.machine;
+        // Already erased, at the use site, under the substitution in force
+        // there. {@link Substitution} is why re-erasing it here would not be
+        // the same thing and does not work.
+        return bound;
     }
 
     if (flags & (ts.TypeFlags.Void | ts.TypeFlags.Undefined)) {
@@ -944,7 +934,7 @@ function eraseReferent(
     const parameter = typeParameterSymbolOf(referent);
     if (parameter !== undefined) {
         const bound = state.bindings.get(parameter);
-        return bound === undefined ? null : referenceTo(bound.machine);
+        return bound === undefined ? null : referenceTo(bound);
     }
 
     // Before `contractOf`, which would look at `Array<T>`'s declaration and

@@ -16,7 +16,6 @@ import {
     layoutKey,
     type MachineType,
     type Substitution,
-    type TypeBinding,
     typeParameterSymbolOf,
 } from "@goblin-forge/checker";
 import ts from "typescript";
@@ -181,9 +180,9 @@ function typeArgumentsOf(
 /** Pair each of a generic's type parameters with what this use bound it to. */
 export function bindingsOf(
     parameters: readonly ts.Symbol[],
-    args: readonly TypeBinding[],
+    args: readonly MachineType[],
 ): Substitution {
-    const bindings = new Map<ts.Symbol, TypeBinding>();
+    const bindings = new Map<ts.Symbol, MachineType>();
     parameters.forEach((parameter, index) => {
         const bound = args[index];
         if (bound !== undefined) {
