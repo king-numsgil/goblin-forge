@@ -70,7 +70,25 @@ function project(name: string): string {
 
 describe("the executable", () => {
     test("reports a version and a usage message", () => {
-        expect(run(workspace, "--version").stdout.trim()).toMatch(/^\d+\.\d+\.\d+$/);
+        // Not merely *a* version: the one the package claims. `main.ts` holds
+        // its own `VERSION` constant — the executable is bundled, so it cannot
+        // read a `package.json` at run time — and a constant that duplicates a
+        // manifest is a constant that drifts from it. It is also the name of
+        // the on-disk cache directory, so a bump nobody made in both places
+        // would keep serving the previous release's cache.
+        const manifest: unknown = JSON.parse(
+            readFileSync(join(REPO, "packages", "cli", "package.json"), "utf8"),
+        );
+        const version =
+            typeof manifest === "object" && manifest !== null && "version" in manifest
+                ? manifest.version
+                : undefined;
+        if (typeof version !== "string") {
+            throw new Error("packages/cli/package.json declares no version");
+        }
+        const declared: string = version;
+        expect(declared).toMatch(/^\d+\.\d+\.\d+$/);
+        expect(run(workspace, "--version").stdout.trim()).toBe(declared);
 
         const help = run(workspace, "--help");
         expect(help.status).toBe(0);
