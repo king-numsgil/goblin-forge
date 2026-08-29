@@ -79,10 +79,11 @@ look identical from a checklist.
   arbiter for value semantics, and a generic's copies and drops are exactly the
   kind of thing it exists to arbitrate — an instantiation at an owning type
   against the same shape written by hand.
-- Generics on a **non-Windows target**. `.github/workflows/ci.yml` is parked on
-  `workflow_dispatch`, and CLAUDE.md's warning applies: the last two defects
-  were both "passes on Windows, fails on Linux". Nothing here is obviously
-  platform-shaped, but nothing here has been run there either.
+- ~~Generics on a **non-Windows target**.~~ **Closed 2026-08-29**: the whole
+  suite was built and run green on Ubuntu 26 under WSL2, by hand.
+  `.github/workflows/ci.yml` is still parked on `workflow_dispatch`, so this
+  stays a thing someone remembers to do rather than a thing that happens —
+  and macOS remains unrun.
 
 **Everything in the first group passed on the first try** except the two cases
 that were my test's fault (a missing `std/linalg` import; a `?:` with no width)

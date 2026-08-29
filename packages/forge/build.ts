@@ -57,6 +57,26 @@ if (!built.success) {
 await rename(join(dist, "packaged.js"), join(dist, "index.js"));
 await rename(join(dist, "packaged.d.ts"), join(dist, "index.d.ts"));
 
+// The manifest a consumer's package manager reads. Generated, because the copy
+// that used to sit in `dist` by hand was still claiming `0.1.0` after the
+// package had been versioned `0.2.0` — and `dist` is gitignored, so nothing
+// showed a stale file in a diff. The version has one place to be written now,
+// and it is the manifest above this one.
+const own: unknown = await Bun.file("./package.json").json();
+if (typeof own !== "object" || own === null || !("name" in own) || !("version" in own) || !("license" in own)) {
+    console.error("packages/forge/package.json declares no name, version or license.");
+    process.exit(1);
+}
+const {name, version, license} = own;
+if (typeof name !== "string" || typeof version !== "string" || typeof license !== "string") {
+    console.error("packages/forge/package.json: name, version and license must be strings.");
+    process.exit(1);
+}
+await Bun.write(
+    join(dist, "package.json"),
+    `${JSON.stringify({name, version, license, type: "module", main: "./index.js", types: "./index.d.ts"}, null, 4)}\n`,
+);
+
 const addon = (await readdir(backendDir)).find((file) => file.endsWith(".node"));
 if (addon === undefined) {
     console.error("no built addon in packages/backend. Run `bun run build:backend` first.");
