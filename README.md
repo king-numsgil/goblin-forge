@@ -349,6 +349,22 @@ import { mi_calloc, mi_free, mi_malloc, mi_realloc } from "std/alloc";
 SDL_SetMemoryFunctions(mi_malloc, mi_calloc, mi_realloc, mi_free);
 ```
 
+**mimalloc is always built at `-O2`, whatever `optLevel` says.** That option is
+a claim about your code; the allocator is a vendored C library and its build is
+the compiler's business. The reason is not tidiness: `cc` maps optimisation
+levels onto MSVC flags as `{1, s, z}` → `/O1` and `{2, 3}` → `/O2`, and mimalloc
+built with `/O1` hands back blocks that fault when they are touched. A C library
+given the callbacks above died on its third allocation at `O1`, `Os` and `Oz`,
+and was clean at `O0`, `O2` and `O3`.
+
+What that costs is worth knowing rather than discovering. On Windows, nothing:
+`O2` and `O3` already produced `/O2`, so only the three broken levels move. On
+Linux and macOS the level is passed straight through, so an `O0` or `O1` build
+gains an optimised allocator — and an **`Os` or `Oz` build gets a larger one
+than it asked for**, since mimalloc no longer shrinks with the rest. Whether
+those two levels are broken outside MSVC is untested;
+`tests/allocator-boundary.test.ts` covers all six and would say so.
+
 `"std/alloc"` is an **ambient module**: it resolves to no file and there is
 nothing to install, because the declaration in the prelude is the whole of it.
 The standard library arrives this way, and it is the only part of the language
