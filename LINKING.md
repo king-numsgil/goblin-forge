@@ -494,6 +494,25 @@ Five things to know:
   and that is fine. The machinery for taking over unqualified `malloc()` calls
   is deliberately not enabled.
 
+#### The allocator is not built at your optimisation level
+
+`optLevel` is a claim about *your* code. The runtime is built at the same level
+— it is compiled for your target, so it has to be built somewhere — but
+**mimalloc is pinned**, in `packages/runtime/native/Cargo.toml`, and that is
+not tidiness.
+
+`cc` turns cargo's `OPT_LEVEL` into a flag for mimalloc's C, and on MSVC levels
+`1`, `s` and `z` all become `/O1`. mimalloc built that way returns blocks that
+fault when they are touched: a C library given these callbacks died on its third
+allocation at those three levels and was clean at `0`, `2` and `3`.
+
+It was invisible from inside the language, which is why it lasted. A Goblin
+program that allocates heavily is fine at every level — the allocations have to
+arrive through the exported `gf_mi_*` trampolines, *from a caller that is not
+us*, before anything goes wrong. `tests/allocator-boundary.test.ts` is a real C
+library doing exactly that at all six levels, and it fails at three of them if
+the pin is removed.
+
 ### Two Goblin artefacts in one process: `runtime: "shared"`
 
 Everything above assumes one Goblin artefact. Two in the same process — a Goblin

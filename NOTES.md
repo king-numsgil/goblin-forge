@@ -187,6 +187,7 @@ backend failure:
 | `Reference<string>` | `checker/src/types.ts`, `eraseReferent`. Copying a `string` clones its buffer, so borrowing one is worth doing; nothing reads one back through a reference yet | later |
 | two classes with the same name in two modules | `classes.ts`, `collectClasses` — a stated restriction, see DECISIONS §11.8 | later |
 | a consumer linking archive *vN* while importing its generic source at *vN+1* | nothing detects it, and the layouts would disagree silently. Needs the archive to carry a stamp the consumer reads at compile time — a publishing format DECISIONS §11.8 deliberately did not build. A packaging question for as long as the consumer imports the library's own source. DECISIONS §25 | later |
+| whether mimalloc at `/O1` is broken on **non-MSVC** toolchains too | unknown, and the pin in `packages/runtime/native/Cargo.toml` makes it moot rather than answered: `cc` maps opt-levels 1/s/z to `-O1`/`-Os`/`-Oz` for gcc and clang, and nobody has run the boundary test there. `tests/allocator-boundary.test.ts` covers all six levels and would say so | when CI runs on Linux |
 | incremental builds | `CompileOptions.incremental` is reserved and unread | later |
 | `throw` / unwinding | `Terminator::Resume` errors | later |
 | a binding with no initialiser — `let e: SDL_Event;` | `lower/body.ts` — tsc wants `let e!: T` for its own definite-assignment rule, and the lowerer refuses either spelling. `zeroed<T>()` is the way to write it meanwhile | later |
