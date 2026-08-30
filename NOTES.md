@@ -376,6 +376,15 @@ naming the rename.
 erased.** A test helper called `declare(...)` compiles to nothing. Cost half an
 hour in the layout suite; the helper is named `shape` now.
 
+**The program is every non-declaration file tsc resolved, `node_modules`
+included.** `Lowerer.run` and `collectClasses` used to drop what tsc calls an
+"external library", which is right for a TypeScript project and wrong here:
+`std/collection` sits under `node_modules` once the compiler is installed, and
+a Goblin library's generics cross as source from the same place (DECISIONS
+§25). Both were silently skipped, and the symptom was `GF0001` about a class
+whose file had been resolved and read. `tests/node-modules-source.test.ts`
+guards it.
+
 **C dependencies are built with clang on MSVC targets**, set by `cToolchain` in
 `packages/runtime/src/build.ts`. MSVC 14.43.34808 miscompiles mimalloc at `/O1`
 — which `optLevel` reaches at `O1`, `Os` and `Oz` — into an allocator that

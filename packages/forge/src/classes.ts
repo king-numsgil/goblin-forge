@@ -280,7 +280,11 @@ export function collectClasses(
 ): CollectedClasses {
     const declarations = new Map<string, ts.ClassDeclaration>();
     for (const source of program.getSourceFiles()) {
-        if (source.isDeclarationFile || program.isSourceFileFromExternalLibrary(source)) {
+        // Not `isSourceFileFromExternalLibrary` as well: a file under
+        // `node_modules` is where `std/collection` lives once the compiler is
+        // installed, and where a Goblin library's source lives when its
+        // generics cross into a consumer. `Lowerer.run` has the reasoning.
+        if (source.isDeclarationFile) {
             continue;
         }
         for (const statement of source.statements) {

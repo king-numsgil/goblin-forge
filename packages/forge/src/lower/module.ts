@@ -918,12 +918,26 @@ export class Lowerer {
     }
 
     run(): LowerResult {
-        const sources = this.#program
-            .getSourceFiles()
-            .filter(
-                (file) =>
-                    !file.isDeclarationFile && !this.#program.isSourceFileFromExternalLibrary(file),
-            );
+        // Every file in the program that is not a declaration file — including
+        // the ones tsc calls "external library", which is its word for anything
+        // reached through `node_modules`.
+        //
+        // Those used to be filtered out here, which is right for a TypeScript
+        // project: `node_modules` holds JavaScript and `.d.ts` and nothing that
+        // wants compiling. It is wrong for this language, in two ways that only
+        // appear once the compiler is *installed* rather than checked out.
+        // `std/collection` ships inside the package, so a consumer's copy of it
+        // lives under `node_modules` and every class in it was silently
+        // dropped — the symptom being `GF0001` about a class whose file tsc had
+        // resolved and read. And a Goblin library crosses a boundary **as
+        // source** (DECISIONS §25), instantiated in the consumer's own
+        // compilation, which is the same shape and was broken the same way.
+        //
+        // Nothing arrives here by accident to make this risky: `noLib`,
+        // `types: []` and `typeRoots: []` mean the program is the prelude plus
+        // what the entry point imported, transitively. A `.ts` file in it is
+        // source this build was asked to compile, wherever it sits on disk.
+        const sources = this.#program.getSourceFiles().filter((file) => !file.isDeclarationFile);
 
         // The prelude's plain C imports, which the loop below never reaches: it
         // walks the program's own files, and the prelude is a declaration file.

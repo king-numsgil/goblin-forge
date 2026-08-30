@@ -215,6 +215,14 @@ Adding a module under `std/` takes four things, and they are not the four above:
    checked against it by anything.
 4. Nothing in `STD_MODULES`, nothing in `lib.rs`. It is ordinary source.
 
+**There are two shipping paths and they are easy to confuse.** The CLI embeds
+these files (step 3); the *package* copies them, in `packages/forge/build.ts`.
+`0.2.1` shipped with the second one missed entirely — a `dist/` with no `std/`
+in it and a tsconfig `paths` entry naming a directory that was not there. What
+stops that now is `SHIPPED` in that file: it is typed against `RuntimeFiles`,
+so a member added to `paths.ts` fails the package build until something copies
+the file, and the copied names are checked to exist before it reports success.
+
 **A symbol inside one is tagged `std/…`, not by its path.** `#relative` in
 `lower/module.ts` falls back to the absolute path for a file outside the project
 root, which would be the checkout on one machine, a `node_modules` entry on

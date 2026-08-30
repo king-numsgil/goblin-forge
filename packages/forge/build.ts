@@ -11,18 +11,43 @@
  * - the platform's addon beside it, because napi's loader resolves its `.node`
  *   relative to the file that requires it;
  * - the prelude and the tsconfig base, which tsc opens by name;
+ * - the std modules that are real Goblin source, which the tsconfig base's
+ *   `paths` entry points at and tsc opens the same way a checkout does;
  * - the runtime crate, which cargo builds for the *user's* target on demand and
  *   therefore cannot be a prebuilt artefact.
  *
- * Shipping the bundle and not the other four is the mistake this file exists to
+ * Shipping the bundle and not the other five is the mistake this file exists to
  * stop repeating: each of them fails somewhere far from here — a `TS6053` about
  * a missing declaration file, an `extends` that resolves to nothing, a cargo
  * invocation on a directory with no `Cargo.toml`.
+ *
+ * It repeated anyway. `std/` was added to `paths.ts`, to `packaged.ts` and to
+ * the CLI's embedder, and missed here, so `0.2.1` shipped a package whose
+ * tsconfig `paths` entry named a directory that was not in it — `SHIPPED`
+ * below is what makes that a failed build rather than a released one.
  */
 
+import type { RuntimeFiles } from "@goblin-forge/runtime/paths";
 import { dts } from "bun-dts";
+import { existsSync } from "node:fs";
 import { copyFile, mkdir, readdir, rename } from "node:fs/promises";
 import { join } from "node:path";
+
+/**
+ * What has to land in `dist`, keyed by the accessor that will go looking.
+ *
+ * `packaged.ts` computes these same names from its own directory, and this is
+ * the other half of that agreement — typed against `RuntimeFiles` so that
+ * adding a member there stops *this* file from compiling until something puts
+ * the file here. A comment asking the next person to remember is what was in
+ * place before, and it did not work.
+ */
+const SHIPPED = {
+    globalDeclarations: "global.d.ts",
+    tsconfigBase: "tsconfig.base.json",
+    stdLibrary: "std",
+    runtimeCrate: "native",
+} as const satisfies Record<keyof RuntimeFiles, string>;
 
 const dist = "./dist";
 const backendDir = "../backend";
@@ -84,17 +109,44 @@ if (addon === undefined) {
 }
 await copyFile(join(backendDir, addon), join(dist, addon));
 
-await copyFile(join(runtimeDir, "global.d.ts"), join(dist, "global.d.ts"));
-await copyFile(join(runtimeDir, "tsconfig.base.json"), join(dist, "tsconfig.base.json"));
+await copyFile(join(runtimeDir, "global.d.ts"), join(dist, SHIPPED.globalDeclarations));
+await copyFile(join(runtimeDir, "tsconfig.base.json"), join(dist, SHIPPED.tsconfigBase));
+
+// The std modules that are real Goblin source, beside the tsconfig base whose
+// `paths` entry names them — `"std/collection": ["./std/collection.ts"]` is
+// resolved relative to the config, so the two have to travel together.
+//
+// Enumerated rather than listed, for the reason the CLI's embedder gives: a
+// hand-written list is a second copy of a directory's contents that nothing
+// keeps honest, and a file added and not listed would resolve in a checkout and
+// be missing here.
+const stdSource = join(runtimeDir, "std");
+const stdTarget = join(dist, SHIPPED.stdLibrary);
+await mkdir(stdTarget, {recursive: true});
+for (const file of (await readdir(stdSource)).filter((name) => name.endsWith(".ts"))) {
+    await copyFile(join(stdSource, file), join(stdTarget, file));
+}
 
 // The crate's sources and nothing else — `native/` in the checkout also holds
 // `target/`, which is a build of the runtime for whoever built it last and has
 // no business in a package built for someone else's machine.
-const crate = join(dist, "native");
+const crate = join(dist, SHIPPED.runtimeCrate);
 await mkdir(join(crate, "src"), {recursive: true});
 for (const file of ["Cargo.toml", "Cargo.lock"]) {
     await copyFile(join(runtimeDir, "native", file), join(crate, file));
 }
 await copyFile(join(runtimeDir, "native", "src", "lib.rs"), join(crate, "src", "lib.rs"));
+
+// Every name `packaged.ts` will hand to `useRuntimeFiles`, checked to be here
+// before this reports success. Cheap, and the alternative is finding out from
+// somebody else's build — which is how this file came to have a `SHIPPED` at
+// all.
+const absent = Object.entries(SHIPPED).filter(([, name]) => !existsSync(join(dist, name)));
+if (absent.length > 0) {
+    for (const [member, name] of absent) {
+        console.error(`${dist}/${name} is missing — \`${member}\` would resolve to nothing.`);
+    }
+    process.exit(1);
+}
 
 console.log(`packaged ${dist} (addon: ${addon})`);
