@@ -37,6 +37,7 @@ import {
     renderType,
     type Substitution,
 } from "@goblin-forge/checker";
+import { stdLibrary } from "@goblin-forge/runtime/paths";
 import ts from "typescript";
 import {
     buildClass,
@@ -1887,6 +1888,22 @@ export class Lowerer {
         const path = fileName.replaceAll("\\", "/");
         if (this.#root !== "" && path.startsWith(`${this.#root}/`)) {
             return path.slice(this.#root.length + 1);
+        }
+        // A std module that is real Goblin source — `std/collection` — is never
+        // under the project root, so the clause above cannot reach it and the
+        // fallback would tag it with an absolute path. That path is the checkout
+        // on one machine, a `node_modules` entry on another, and a cache
+        // directory under the user's home when the packaged CLI extracts it: the
+        // same sources would produce three different symbols for the same
+        // internal function.
+        //
+        // DECISIONS §20 recorded this as the first thing to fix if a std module
+        // ever became real source. It is, so this is that fix — and the tag it
+        // hands back is the specifier a program would have imported, which is
+        // both stable and legible in a disassembly.
+        const std = stdLibrary().replaceAll("\\", "/");
+        if (std !== "" && path.startsWith(`${std}/`)) {
+            return `std/${path.slice(std.length + 1)}`;
         }
         return path;
     }

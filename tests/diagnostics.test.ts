@@ -461,6 +461,54 @@ describe("codes raised by a program", () => {
         );
     });
 
+    test("GF0405 — a type with no hash", async () => {
+        // A class, which is the arrival that matters: it has a vtable and slices
+        // when it is copied, so there is no structural answer to fall back on.
+        const diagnostic = await expectRejected(
+            "diag-0405",
+            `class Plain {
+         x: i32;
+         constructor(x: i32) { this.x = x; }
+       }
+
+       export function main(): i32 {
+         return cast<i32>(hashOf<Plain>(new Plain(1)));
+       }\n`,
+            "GF0405",
+        );
+        expect(diagnostic.message).toContain("hash(): u64");
+    });
+
+    test("GF0406 — a type with no equality", async () => {
+        // The same class, asked the other half of the question. It declares
+        // `hash` and not `equals`, so this is the shape a half-done key has.
+        await expectRejected(
+            "diag-0406",
+            `class HalfDone {
+         x: i32;
+         constructor(x: i32) { this.x = x; }
+         hash(): u64 { return hashOf<i32>(this.x); }
+       }
+
+       export function main(): i32 {
+         return equalsOf<HalfDone>(new HalfDone(1), new HalfDone(1)) ? 1 : 0;
+       }\n`,
+            "GF0406",
+        );
+    });
+
+    test("GF0407 — a float is not a key", async () => {
+        const diagnostic = await expectRejected(
+            "diag-0407",
+            `export function main(): i32 {
+         const x: f64 = 1.5;
+         return cast<i32>(hashOf<f64>(x));
+       }\n`,
+            "GF0407",
+        );
+        expect(diagnostic.message).toContain("-0.0");
+    });
+
     test("GF9004 — an output kind the backend does not know", async () => {
         const {result} = await compileSource(
             "diag-9004",
@@ -521,6 +569,9 @@ describe("the registry and the suite agree", () => {
             "GF0402",
             "GF0403",
             "GF0404",
+            "GF0405",
+            "GF0406",
+            "GF0407",
             "GF9004",
             "GF9005",
         ]);

@@ -48,6 +48,31 @@
     // permanently true here.
     "allowImportingTsExtensions": true,
 
+    // Where `import { HashMap } from "std/collection"` resolves.
+    //
+    // The rest of the standard library — `std/alloc`, `std/io`, `std/math`,
+    // `std/linalg` — needs nothing here: those are *ambient* modules, declared
+    // in global.d.ts and resolving to no file at all, because everything they
+    // export is a function the compiler lowers or a type it recognises.
+    //
+    // `std/collection` is the first one that is real Goblin source, and it had
+    // to be: a `HashMap<K, V>` is a **value** with a destructor, and an ambient
+    // class is an opaque handle with no layout and no lowered members. DECISIONS
+    // §20 named source as the answer for the day a std module wanted a value
+    // type, and §26 is that day.
+    //
+    // Spelled out rather than as `"std/*"`. A wildcard would send `std/alloc` to
+    // a file that does not exist and rely on tsc falling back to the ambient
+    // declaration, which is a resolution order nobody should have to know.
+    //
+    // Relative to *this* file, not to the project that extends it: tsc resolves
+    // `paths` against the config they are written in. That is what makes one
+    // entry serve every project, and it is why the editor and the compiler
+    // agree without the project having to say anything.
+    "paths": {
+      "std/collection": ["./std/collection.ts"]
+    },
+
     "strict": true,
     "noImplicitOverride": true,
     "noFallthroughCasesInSwitch": true,

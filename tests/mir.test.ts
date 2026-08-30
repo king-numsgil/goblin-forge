@@ -140,7 +140,7 @@ describe("golden MIR", () => {
     test("a class: construction, virtual dispatch, and the generated destructor", async () => {
         // Four things to read in the diff when this changes:
         //
-        // * `Derived$drop` releases its **own** field and then calls `Base$drop` —
+        // * `Derived$~drop` releases its **own** field and then calls `Base$~drop` —
         //   own fields only, or every inherited field is released twice;
         // * `virtual#N` at each call site — a shifted slot is the regression this
         //   file exists to catch, and it is invisible in program output whenever

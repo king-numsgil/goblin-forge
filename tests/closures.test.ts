@@ -901,3 +901,126 @@ describe("LocalFn, nested", () => {
         expect(result.stderr).toBe("");
     });
 });
+
+/**
+ * A `LocalFn` parameter on something other than a free function.
+ *
+ * These all worked at the *value* level and were refused one pass earlier: the
+ * width pass walks a call's arguments for their own widths, and a lambda has
+ * none — its type comes from the parameter it is being passed to. Reaching one
+ * there reported `GF0239` about the single position where something *does* say
+ * what the lambda should be.
+ *
+ * A free function never hit it, because its width path reads the declared return
+ * type and never walks the arguments at all, and `xs.forEach(f)` dodged it by
+ * answering before its loop. Everything else — a method, a generic method, a
+ * static, a contract's method — went through a loop that did not. Which is to
+ * say the feature worked in exactly the one shape it had a test for.
+ */
+describe("a callback parameter, wherever it is declared", () => {
+    test("on a method", async () => {
+        const result = await run(
+            "closure-method-param",
+            `class Bag {
+         private items: i32[] = [];
+         add(v: i32): void { this.items.push(v); }
+         each(f: LocalFn<(value: i32) => void>): void {
+           for (let i: usize = 0; i < this.items.length; i = i + 1) { f(this.items[i]); }
+         }
+       }
+
+       export function main(): i32 {
+         const b = new Bag();
+         b.add(1);
+         b.add(2);
+         let total: i32 = 0;
+         b.each((x) => { total = total + x; });
+         console.log(\`\${total}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("3\n");
+    });
+
+    test("on a generic class's method, with the parameter substituted", async () => {
+        const result = await run(
+            "closure-generic-method-param",
+            `class Bag<T> {
+         private items: T[] = [];
+         add(v: T): void { this.items.push(v); }
+         each(f: LocalFn<(value: T) => void>): void {
+           for (let i: usize = 0; i < this.items.length; i = i + 1) { f(this.items[i]); }
+         }
+       }
+
+       export function main(): i32 {
+         const b = new Bag<string>();
+         b.add("a");
+         b.add("b");
+         let seen = "";
+         b.each((x) => { seen = seen + x; });
+         console.log(seen);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("ab\n");
+        expect(result.leaked).toBe(0);
+    });
+
+    test("on a static method", async () => {
+        const result = await run(
+            "closure-static-param",
+            `class Util {
+         static twice(f: LocalFn<() => void>): void { f(); f(); }
+       }
+
+       export function main(): i32 {
+         let n: i32 = 0;
+         Util.twice(() => { n = n + 1; });
+         console.log(\`\${n}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("2\n");
+    });
+
+    test("with two parameters, which is what a map's `forEach` wants", async () => {
+        const result = await run(
+            "closure-two-params",
+            `class Pairs {
+         each(f: LocalFn<(key: string, value: i32) => void>): void {
+           f("a", 1);
+           f("b", 2);
+         }
+       }
+
+       export function main(): i32 {
+         let keys = "";
+         let total: i32 = 0;
+         new Pairs().each((k, v) => { keys = keys + k; total = total + v; });
+         console.log(\`\${keys} \${total}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("ab 3\n");
+    });
+
+    test("a lambda where no `LocalFn` is expected is still refused", async () => {
+        // The half that must not have been lost. Skipping the lambda in the width
+        // pass hands the question to `#closure`, which knows what was expected and
+        // can say so — a plain function type is a bare code address.
+        const diagnostic = await expectRejected(
+            "closure-method-plain-fn",
+            `class Bag {
+         take(f: (value: i32) => void): void { f(1); }
+       }
+
+       export function main(): i32 {
+         new Bag().take((x) => { console.log(\`\${x}\`); });
+         return 0;
+       }\n`,
+            "GF0239",
+        );
+        expect(diagnostic.message).toContain("bare code address");
+    });
+});

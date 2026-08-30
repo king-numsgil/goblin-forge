@@ -41,6 +41,9 @@ export const USIZE: MachineType = {kind: "scalar", name: "usize"};
 /** `offset` counts in elements and counts **backwards** too, hence signed. */
 export const ISIZE: MachineType = {kind: "scalar", name: "isize"};
 export const VOID: MachineType = {kind: "void"};
+/** What every hash is, whatever it was computed from. */
+export const U64: MachineType = {kind: "scalar", name: "u64"};
+export const BOOL: MachineType = {kind: "bool"};
 
 export const POLY: Width = {kind: "poly"};
 export const ERROR: Width = {kind: "error"};

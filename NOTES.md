@@ -119,7 +119,8 @@ the twelve widths, `boolean`, `string`, structs from `interface`/type literals,
 `FixedArray<T, N>`, `Pointer<T>`, `if`/`while`/`for`/`break`/`continue`/`return`,
 blocks and scoping, arithmetic with the full width rules, `nativeCast`, `move`,
 template literals, `console.*`, object literals, field and element access and
-assignment, `.length`, and **classes**: fields, a constructor, methods,
+assignment, `.length`, `hashOf<T>()` / `equalsOf<T>()`, and **classes**: fields,
+a constructor, methods,
 `super(…)` and `super.m(…)`, single inheritance, virtual dispatch through a
 vtable, slicing on copy, and a generated destructor that chains to the base's.
 Accessibility modifiers (`public`/`private`/`protected`) are accepted and
@@ -159,10 +160,29 @@ imports, `as` renames, re-exports and `import * as ns` all reach the same
 extern, because the extern is registered per declaration rather than per import.
 DECISIONS §15, §20 and §21.
 
-Two things a std module cannot export: a top-level `const` (nothing lowers one,
-so `std/math`'s constants are `dpi()` and friends) and a class with members (an
-ambient class is an opaque handle, so `std/io` is `fileOpen(path)` rather than
-`File.open(path)`).
+Two things an *ambient* std module cannot export: a top-level `const` (nothing
+lowers one, so `std/math`'s constants are `dpi()` and friends) and a class with
+members (an ambient class is an opaque handle, so `std/io` is `fileOpen(path)`
+rather than `File.open(path)`).
+
+**`std/collection` is not ambient — it is real Goblin source**, shipped in
+`packages/runtime/std/` and resolved by a `paths` entry in the tsconfig base, so
+tsc finds it and the editor sees the same file the compiler does. It exports
+`HashMap<K, V>`, `HashSet<K>`, `BinaryHeap<T>` and `RingBuffer<T>`, all of them
+ordinary generic classes compiled into whoever imports them. DECISIONS §26, and
+§20 for why this shape waited for a value type to need it.
+
+A key is anything **`hashOf<T>()` and `equalsOf<T>()`** answer for: the scalars,
+`boolean`, enums, pointers, `CString`, `string`, and structs and fixed arrays of
+those. A class answers by declaring `hash(): u64` and
+`equals(other: Reference<K>): boolean` — the extension point, resolved by name at
+the instantiation the way a `std::hash<T>` specialisation is. A float is refused
+(`GF0407`).
+
+`T[]` also grew **`capacity` and `reserve(n)`**, which is where a growth policy
+in fixed steps comes from: `reserve` goes through mimalloc's `realloc` and can
+extend a block in place, where `push` doubles and allocates a second buffer
+beside the first.
 
 ## What it does not have yet
 
@@ -183,7 +203,8 @@ backend failure:
 | a **generic base class** — `class D extends Box<i32>` | `classes.ts`, `baseOf` resolves a base by its bare name, and an instantiation needs resolving by its erased type arguments. Narrow: a generic class with a plain base is fine, and so is everything else about inheritance | later |
 | a **`static` on a generic class** — `Box.zero()` | `lower/width.ts`, the identifier path. The name stands for every instantiation and TypeScript has no syntax for choosing — it never needed one, because a `static` may not use `T`. Implementable as one copy emitted under the bare name, since a static that cannot mention `T` is the same body for all of them | later |
 | a **conditional type** whose condition mentions a type parameter | `checker/src/types.ts`, `erase`. A real limit rather than a gap: the substitution replaces `T` at the *leaf* with a machine type, and re-evaluating a conditional needs the `ts.Type`s put back and the whole thing instantiated, which tsc exports no way to do | not without tsc |
-| `Pointer<T>` **used** inside a generic — `p.deref()`, `p.store(v)` | tsc, not the compiler: `Pointer` is a conditional type and does not survive a type parameter. `Reference` had the same problem and stopped being one (DECISIONS §24), but `Pointer`'s conditional is load-bearing — it is what stops `Pointer<i32>` being assignable to `i32` — so it needs a different answer | later |
+| `p.deref()` on a `Pointer<T>` whose `T` is a scalar | `checker/src/types.ts` — a `Reference<T>` is only written for a class or a contract, which is the row above and not a generics question. **The rest of `Pointer<T>` inside a generic works**: `p[i]` both ways, `offset`, `address`, `erase`/`reify`, `free`/`freeArray`. This row used to claim all of it was broken by `Pointer`'s conditional type; measured against the tree at 2026-08-29, it is not — the conditional's default constraint is a union of two shapes that both contain `CorePointer<T>`, so every member of that interface resolves through it | later |
+| **moving out of an array element** — `move(xs[i])` | `lower/body.ts`, `#move` — `GF0001`, moving out of anything but a local. The consequence is in `std/collection`: taking a value out of a container copies it, so `BinaryHeap`'s sift copies rather than swaps. The semantics are already right — a moved-from value here is *empty* rather than invalid, so the element would be left destructible — and what is missing is the tracking, which is per-binding and has nothing to say about `xs[i]` | later |
 | `Reference<string>` | `checker/src/types.ts`, `eraseReferent`. Copying a `string` clones its buffer, so borrowing one is worth doing; nothing reads one back through a reference yet | later |
 | two classes with the same name in two modules | `classes.ts`, `collectClasses` — a stated restriction, see DECISIONS §11.8 | later |
 | a consumer linking archive *vN* while importing its generic source at *vN+1* | nothing detects it, and the layouts would disagree silently. Needs the archive to carry a stamp the consumer reads at compile time — a publishing format DECISIONS §11.8 deliberately did not build. A packaging question for as long as the consumer imports the library's own source. DECISIONS §25 | later |
@@ -310,8 +331,9 @@ cannot convert · `GF0164` literal out of range · `GF0165` unary minus on
 unsigned · `GF0227` pointer where a value is expected · `GF0234` reference
 borrowing a temporary · `GF0235` moved-from value read · `GF0236` moving out of
 a by-value parameter · `GF0238` moving out of a capture · `GF0239` a `LocalFn`
-outliving its frame · `GF9001`–`GF9005` the compiler is broken, not your
-program.
+outliving its frame · `GF0405` no hash for this type · `GF0406` no equality for
+this type · `GF0407` a float is not a key · `GF9001`–`GF9005` the compiler is
+broken, not your program.
 
 `GF0227` and `GF0234` are **registered but not yet raised** — they arrive when
 `Pointer<T>` and `Reference<T>` become types you can write.

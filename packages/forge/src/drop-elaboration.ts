@@ -298,17 +298,46 @@ function setInit(
     }
 }
 
+/**
+ * The operands an rvalue reads.
+ *
+ * Every kind that carries one is listed, including the ones whose operands are
+ * always trivial today. A `Move` of an owning local is what this is looking for
+ * and a missing arm hides one silently — the local stays "initialised" and is
+ * destroyed a second time — so the safe default is to enumerate rather than to
+ * reason about which rvalues *could* move something.
+ *
+ * The rest — `Ref`, `AddrOf`, `Len`, `SizeOf`, the interface and class casts —
+ * read a `Place` or a type and never an operand.
+ */
 function readsOf(rvalue: Rvalue): Operand[] {
     switch (rvalue.kind) {
         case "Use":
+            return [rvalue.value];
         case "Unary":
-            return [rvalue.kind === "Use" ? rvalue.value : rvalue.operand];
+            return [rvalue.operand];
         case "Cast":
             return [rvalue.operand];
         case "Binary":
             return [rvalue.lhs, rvalue.rhs];
         case "Aggregate":
             return rvalue.fields;
+        case "Select":
+            return [rvalue.cond, rvalue.ifTrue, rvalue.ifFalse];
+        case "SimdStore":
+            return [rvalue.vector];
+        case "SimdFromParts":
+            return rvalue.lanes;
+        case "SimdSplat":
+            return [rvalue.value];
+        case "SimdBinary":
+            return [rvalue.lhs, rvalue.rhs];
+        case "SimdUnary":
+            return [rvalue.operand];
+        case "SimdShuffle":
+            return [rvalue.lhs, rvalue.rhs];
+        case "SimdFma":
+            return [rvalue.a, rvalue.b, rvalue.c];
         default:
             return [];
     }
@@ -429,6 +458,20 @@ function insertDrops(
             if (statement.kind === "Init" || statement.kind === "Assign") {
                 applyStatement(statement, tracked, running);
                 rewritten.push(statement);
+                // **Sources first, then the destination**, which is the order
+                // {@link applyStatement} reads them in and matters for the
+                // degenerate `x = move x`.
+                //
+                // Clearing on the way out is what a flag is *for* and it was
+                // missing: the flag was raised where the local was written and
+                // lowered only at its `StorageLive`/`StorageDead`, so a local
+                // that was conditionally moved out still had it raised at the
+                // drop. `xs[0] = move(e)` under an `if` therefore moved the
+                // value into the array **and** destroyed it — a double free, and
+                // one that only appeared for a conditional move, because an
+                // unconditional one leaves the local not-initialised on every
+                // path and gets no flag at all.
+                clearMovedFlags(rewritten, flags, readsOf(statement.rvalue));
                 // After, not before: if the construction itself unwinds, the local is
                 // not initialised, and a flag already saying otherwise would have the
                 // cleanup path destroy something that was never built.
@@ -450,6 +493,15 @@ function insertDrops(
             rewritten.push(statement);
         }
 
+        // A terminator moves too — a `Call`'s arguments — and its flag updates
+        // have nowhere to go but the end of the block, which is immediately
+        // before it. That is the right place while nothing unwinds: every
+        // `UnwindAction` this compiler emits is `Unreachable`, so there is no
+        // path on which the call fails to consume what it was passed. When
+        // `throw` arrives (DECISIONS §11.5) this becomes a question about the
+        // cleanup edge, and {@link unwindFor} is the seam it will be answered at.
+        clearMovedFlags(rewritten, flags, movedByTerminator(block.terminator));
+
         applyTerminator(block.terminator, tracked, running);
         block.statements = rewritten;
     }
@@ -465,6 +517,43 @@ function insertDrops(
                 ),
             );
         }
+    }
+}
+
+/**
+ * Lower the drop flag of every whole local these operands move out of.
+ *
+ * Only a *whole* local, which is the same restriction {@link applyOperand}
+ * applies to the dataflow — a move through a projection takes part of something
+ * that stays initialised, and there is no per-field flag to lower.
+ */
+function clearMovedFlags(
+    out: Statement[],
+    flags: ReadonlyMap<number, LocalId>,
+    operands: readonly Operand[],
+): void {
+    for (const operand of operands) {
+        if (operand.kind !== "Move" || operand.value.projection.length !== 0) {
+            continue;
+        }
+        const flag = flags.get(operand.value.local);
+        if (flag !== undefined) {
+            out.push({kind: "SetDropFlag", flag, value: false});
+        }
+    }
+}
+
+/** The operands a terminator reads, so a move in one is seen. */
+function movedByTerminator(terminator: Terminator): readonly Operand[] {
+    switch (terminator.kind) {
+        case "Branch":
+            return [terminator.cond];
+        case "Switch":
+            return [terminator.discr];
+        case "Call":
+            return terminator.args;
+        default:
+            return [];
     }
 }
 

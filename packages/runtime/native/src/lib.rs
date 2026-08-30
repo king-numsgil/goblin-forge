@@ -58,7 +58,7 @@ use core::ffi::{c_char, c_void, CStr};
 
 use libmimalloc_sys::{
     mi_calloc, mi_free, mi_malloc, mi_malloc_aligned, mi_malloc_aligned_at, mi_realloc,
-    mi_realloc_aligned, mi_usable_size, mi_zalloc,
+    mi_realloc_aligned, mi_realloc_aligned_at, mi_usable_size, mi_zalloc,
 };
 
 /// Terminate, the same way every other failure here terminates.
@@ -446,6 +446,28 @@ unsafe fn raw_alloc_at(bytes: usize, align: usize, offset: usize) -> *mut u8 {
         unsafe { mi_malloc(bytes).cast() }
     } else {
         unsafe { mi_malloc_aligned_at(bytes, align, offset).cast() }
+    }
+}
+
+/// [`raw_alloc_at`]'s resize: the same block, `bytes` long, still landing on
+/// `align` at `base + offset`.
+///
+/// **The relocation is the allocator's**, and that is the whole reason this
+/// exists. When mimalloc can extend the block in place there is no copy at all;
+/// when it cannot, it moves the bytes itself. Either way the elements are
+/// *relocated* rather than duplicated — each one keeps whatever it owns and
+/// there is exactly one of it afterwards — which is the same argument
+/// [`gf_array_push_slot`]'s `copy_nonoverlapping` makes for doing it by hand.
+///
+/// The `align`/`offset` pairing has to match the original allocation's or
+/// mimalloc is being asked about a block it did not hand out. Both come from
+/// the element type, so the only way for them to disagree is for a caller to
+/// have used the wrong pair on the way in.
+unsafe fn raw_realloc_at(pointer: *mut u8, bytes: usize, align: usize, offset: usize) -> *mut u8 {
+    if align <= NATURAL_ALIGN {
+        unsafe { mi_realloc(pointer.cast(), bytes).cast() }
+    } else {
+        unsafe { mi_realloc_aligned_at(pointer.cast(), bytes, align, offset).cast() }
     }
 }
 
@@ -909,6 +931,88 @@ pub unsafe extern "C" fn gf_array_len(a: GfArray) -> usize {
     unsafe { (*array_header(a)).len as usize }
 }
 
+/// Elements the buffer has room for, in O(1).
+///
+/// Always at least [`gf_array_len`]. Zero for the shared empty array, which is
+/// not a lie: it has room for nothing and pushing onto it allocates.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gf_array_capacity(a: GfArray) -> usize {
+    if a.is_null() {
+        return 0;
+    }
+    unsafe { (*array_header(a)).cap as usize }
+}
+
+/// Make the buffer hold at least `capacity` elements, without changing `len`.
+///
+/// `slot` is the address of the *handle* rather than the handle, for
+/// [`gf_array_push_slot`]'s reason: growing can move the buffer, so the caller's
+/// variable has to be reseated.
+///
+/// **It never shrinks.** A request below the current capacity is a no-op rather
+/// than a reallocation, so `reserve` is only ever a promise about room and never
+/// a way to invalidate a pointer that a smaller number would have to.
+///
+/// **Growing an existing buffer is a `realloc`, and that is the point.** The
+/// elements are relocated rather than copied — see [`raw_realloc_at`] — so where
+/// mimalloc can extend the block in place, nothing moves and no pointer into the
+/// array is invalidated. Nothing *promises* that, and code may not rely on it;
+/// what it buys is that growing a large array in fixed steps does not
+/// repeatedly allocate a second copy of it beside the first.
+///
+/// `LIVE` moves only when the count of live *allocations* does. Growing a
+/// buffer that already exists is the same allocation at a different size —
+/// exactly as [`reallocate`] is for a string — so only the first growth, out of
+/// the static empty array, is counted.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gf_array_reserve(
+    slot: *mut GfArray,
+    capacity: u64,
+    stride: u64,
+    align: u64,
+) {
+    unsafe {
+        let current = *slot;
+        let header = array_header(current);
+        let len = (*header).len;
+        let cap = (*header).cap;
+        if capacity <= cap {
+            return;
+        }
+
+        install_reporter();
+        let align = (align as usize).max(1);
+        let bytes = array_bytes(capacity, stride);
+
+        // `cap == 0` is the shared static empty array, which is not the
+        // allocator's — handing it to `realloc` would be handing back a pointer
+        // mimalloc never gave out. It also has no elements to carry over, so
+        // there is nothing to relocate.
+        let raw = if cap == 0 {
+            let fresh = raw_alloc_at(bytes, align, ARRAY_HEADER);
+            if fresh.is_null() {
+                abort();
+            }
+            LIVE.fetch_add(1, Ordering::SeqCst);
+            trace("alloc");
+            fresh
+        } else {
+            let grown = raw_realloc_at(header as *mut u8, bytes, align, ARRAY_HEADER);
+            if grown.is_null() {
+                // The original block is still live, exactly as it is in C. It is
+                // also unreachable from here on, so there is nothing to do with
+                // it but stop — every other allocation failure in this file
+                // stops too.
+                abort();
+            }
+            grown
+        };
+
+        (raw as *mut ArrayHeader).write(ArrayHeader { len, cap: capacity });
+        *slot = raw.add(ARRAY_HEADER);
+    }
+}
+
 /// Make room for one more element and hand back the address of it.
 ///
 /// `slot` is the address of the *handle*, not the handle: growing reallocates,
@@ -1011,6 +1115,82 @@ pub unsafe extern "C" fn gf_string_concat(a: GfStr, b: GfStr) -> GfStr {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gf_string_eq(a: GfStr, b: GfStr) -> u8 {
     unsafe { u8::from(bytes_of(a) == bytes_of(b)) }
+}
+
+// ---------------------------------------------------------------------------
+// Hashing
+//
+// What `hashOf<T>()` reaches. Two entry points, because there are two shapes of
+// input: a machine word, and a run of bytes.
+//
+// **Deterministic, and not seeded.** The same value hashes to the same number in
+// every process, on every platform, in every run. That is the opposite of what a
+// language hosting untrusted input wants — there is no HashDoS resistance here
+// and none is claimed — and it is the right trade for this one: a simulation
+// that iterates a map has to replay identically, and a test suite that asserts
+// on printed output cannot have iteration order move between runs.
+// ---------------------------------------------------------------------------
+
+/// SplitMix64's finalizer: the avalanche step, on its own.
+///
+/// Every hash here ends with this, and the reason is where the result is *used*.
+/// A hash table takes the low bits — `h & (capacity - 1)` — so a mixer whose
+/// entropy sits in the high bits is a table whose buckets all collide. FNV-1a
+/// alone has exactly that weakness for short keys, and an integer key that is
+/// just cast to `u64` has it completely: consecutive ids would land in
+/// consecutive buckets and every removal would leave a probe chain behind it.
+///
+/// Chosen over a wider mixer because it is four instructions, has no
+/// multiplication chain longer than two, and is the one whose constants are
+/// published with the avalanche statistics that justify them.
+#[inline]
+fn mix64(mut x: u64) -> u64 {
+    x ^= x >> 30;
+    x = x.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    x ^= x >> 27;
+    x = x.wrapping_mul(0x94d0_49bb_1331_11eb);
+    x ^ (x >> 31)
+}
+
+/// The hash of a machine word — every scalar, `boolean`, enum and pointer.
+///
+/// The frontend widens whatever it has to a `u64` and calls this, so `i8`, `u32`
+/// and a `Pointer<T>` all arrive the same way and there is one mixer rather than
+/// twelve. A negative integer arrives sign-extended, which is what makes `-1`
+/// and `u64::MAX` the same hash — they are the same bits, and equality is asked
+/// separately.
+///
+/// **The golden-ratio constant is added before mixing, and it is not
+/// decoration.** [`mix64`] is a sequence of xors and multiplies, so it maps zero
+/// to zero — `hashOf<i32>(0)` would be `0` exactly. That is not a distribution
+/// problem (one key landing in bucket zero is one key), but it makes "the hash
+/// of zero" and "no hash computed yet" the same number for anyone who caches
+/// one, which is a footgun worth not shipping. Adding the increment first is
+/// what SplitMix64's *generator* does for the same reason its finalizer alone
+/// does not.
+#[unsafe(no_mangle)]
+pub extern "C" fn gf_hash_u64(value: u64) -> u64 {
+    mix64(value.wrapping_add(0x9e37_79b9_7f4a_7c15))
+}
+
+/// The hash of a string's bytes.
+///
+/// FNV-1a for the accumulation and [`mix64`] for the finish. FNV-1a is chosen
+/// for what it costs — one xor and one multiply per byte, no buffering, no
+/// alignment requirement, and it is correct for a one-byte key, which a
+/// block-at-a-time hash is not without a tail path worth more code than this
+/// whole function.
+///
+/// The length is *not* mixed in separately: FNV-1a over a run of bytes already
+/// distinguishes `"ab"` from `"a"`, because the second byte's round happens.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gf_string_hash(s: GfStr) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in unsafe { bytes_of(s) } {
+        h ^= *byte as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    mix64(h)
 }
 
 /// Copy `len` bytes into a managed string, terminator or no terminator.
@@ -1980,6 +2160,104 @@ mod tests {
             assert_eq!(a as usize % align, 0, "elements of a `T[]` are misaligned");
             unsafe { gf_array_free(a) };
         }
+    }
+
+    /// `reserve` keeps the elements, keeps the length, and keeps them aligned —
+    /// including across the `realloc` that a second, larger reserve takes.
+    ///
+    /// The alignment half is the one worth having: `raw_realloc_at` is a
+    /// different mimalloc entry point from `raw_alloc_at` above the
+    /// `NATURAL_ALIGN` branch, so a correct allocation followed by an incorrect
+    /// reallocation is a real shape and would otherwise show up as a fault in a
+    /// compiled program rather than here.
+    #[test]
+    fn reserve_grows_in_place_and_keeps_what_was_there() {
+        for align in ALIGNMENTS {
+            let stride = align.max(1) as u64;
+            let mut a = unsafe { gf_array_new(4, stride, align as u64) };
+            for i in 0..4usize {
+                unsafe { a.add(i * stride as usize).write(0xa0 + i as u8) };
+            }
+
+            for capacity in [16u64, 1024, 4096] {
+                unsafe { gf_array_reserve(&mut a, capacity, stride, align as u64) };
+                assert_eq!(unsafe { gf_array_len(a) }, 4, "reserve changed the length");
+                assert!(
+                    unsafe { gf_array_capacity(a) } >= capacity as usize,
+                    "reserve to {capacity} did not deliver the room"
+                );
+                assert_eq!(a as usize % align, 0, "reserve lost the alignment");
+                for i in 0..4usize {
+                    assert_eq!(
+                        unsafe { a.add(i * stride as usize).read() },
+                        0xa0 + i as u8,
+                        "reserve lost element {i}"
+                    );
+                }
+            }
+            unsafe { gf_array_free(a) };
+        }
+    }
+
+    /// Reserving out of the shared empty array allocates rather than handing a
+    /// static block to `realloc`, and reserving *down* does nothing at all.
+    #[test]
+    fn reserve_starts_from_empty_and_never_shrinks() {
+        let mut a = gf_array_empty();
+        assert_eq!(unsafe { gf_array_capacity(a) }, 0);
+
+        unsafe { gf_array_reserve(&mut a, 32, 8, 8) };
+        assert_eq!(unsafe { gf_array_len(a) }, 0);
+        assert!(unsafe { gf_array_capacity(a) } >= 32);
+        let grown = unsafe { gf_array_capacity(a) };
+
+        unsafe { gf_array_reserve(&mut a, 1, 8, 8) };
+        assert_eq!(
+            unsafe { gf_array_capacity(a) },
+            grown,
+            "a smaller reserve shrank the buffer"
+        );
+        unsafe { gf_array_free(a) };
+    }
+
+    /// The property a hash table takes the *low* bits of a hash depends on: two
+    /// keys one apart must not land one bucket apart.
+    #[test]
+    fn consecutive_keys_do_not_land_in_consecutive_buckets() {
+        const MASK: u64 = 255;
+        let mut seen = [0u32; 256];
+        for i in 0..256u64 {
+            seen[(gf_hash_u64(i) & MASK) as usize] += 1;
+        }
+        // A perfect spread is one per bucket and an identity hash is also one
+        // per bucket, so the count is not the question — the *order* is. The
+        // cheap wrong implementation maps `i` to bucket `i`.
+        let identity = (0..256u64).filter(|i| gf_hash_u64(*i) & MASK == *i).count();
+        assert!(identity < 8, "{identity} of 256 keys hashed to their own bucket");
+        assert!(seen.iter().filter(|n| **n == 0).count() < 128, "the spread collapsed");
+
+        // No input maps to zero, so a cached hash of zero cannot be confused
+        // with one that was never computed. The bare finalizer does map 0 to 0.
+        assert_ne!(gf_hash_u64(0), 0);
+    }
+
+    /// A string's hash is its bytes' — length included, and the empty string is
+    /// not zero.
+    #[test]
+    fn strings_hash_by_their_bytes() {
+        let a = unsafe { from_bytes(b"ab") };
+        let b = unsafe { from_bytes(b"ab") };
+        let c = unsafe { from_bytes(b"a") };
+        let empty = unsafe { from_bytes(b"") };
+
+        assert_eq!(unsafe { gf_string_hash(a) }, unsafe { gf_string_hash(b) });
+        assert_ne!(unsafe { gf_string_hash(a) }, unsafe { gf_string_hash(c) });
+        assert_ne!(unsafe { gf_string_hash(empty) }, 0);
+
+        unsafe { gf_string_free(a) };
+        unsafe { gf_string_free(b) };
+        unsafe { gf_string_free(c) };
+        unsafe { gf_string_free(empty) };
     }
 
     /// Freeing the shared empty array is a no-op rather than a free of static

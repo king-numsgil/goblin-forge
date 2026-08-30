@@ -23,6 +23,7 @@
     "global.d.ts",
     "tsconfig.base.json",
     "src",
+    "std",
     "native"
   ]
 }

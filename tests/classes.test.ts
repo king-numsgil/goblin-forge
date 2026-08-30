@@ -424,7 +424,7 @@ describe("classes: what is rejected", () => {
         // The other side of the same rule, and the reason it is drawn at *inline*
         // storage: both of these are one machine word in the layout. The vector
         // works where a struct's would not because a class's drop is already a
-        // function — `Node$drop` calls itself rather than being spliced in.
+        // function — `Node$~drop` calls itself rather than being spliced in.
         const result = await run(
             "class-cyclic-handles",
             `class Node {
@@ -1335,5 +1335,58 @@ describe("class members the compiler does not have yet", () => {
             "GF0001",
         );
         expect(diagnostic.message).toContain("body");
+    });
+
+    test("a method may be called `drop`, and it does not collide with the destructor", async () => {
+        // The generated destructor is `Class$~drop` and a method is `Class$name`,
+        // so the two used to be the same symbol for a method with this name — and
+        // the failure was clang refusing a redefinition: `GF9003`, the compiler
+        // calling itself broken, about a program whose only fault was a common
+        // word. `~` is not a character a TypeScript identifier can hold, which is
+        // the same trick `linalg.dvec3` and `Pair<i32>` use.
+        //
+        // Both halves are asserted: the method runs, and the destructor still
+        // runs too — the leak check is what says the second one.
+        const result = await run(
+            "class-method-named-drop",
+            `class Holder {
+         private held: string;
+         private times: i32 = 0;
+         constructor(held: string) { this.held = held; }
+         drop(): void { this.times = this.times + 1; }
+         get count(): i32 { return this.times; }
+         get what(): string { return this.held; }
+       }
+
+       export function main(): i32 {
+         const h = new Holder("owned");
+         h.drop();
+         h.drop();
+         console.log(\`\${h.count} \${h.what}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("2 owned\n");
+        expect(result.leaked).toBe(0);
+    });
+
+    test("`drop` on a derived class overrides the base's, like any other method", async () => {
+        const result = await run(
+            "class-drop-override",
+            `class Base {
+         drop(): string { return "base"; }
+       }
+       class Derived extends Base {
+         override drop(): string { return "derived"; }
+       }
+
+       function which(b: Reference<Base>): string { return b.drop(); }
+
+       export function main(): i32 {
+         console.log(\`\${which(new Base())} \${which(new Derived())}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("base derived\n");
     });
 });

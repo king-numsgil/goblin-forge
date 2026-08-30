@@ -513,6 +513,68 @@ export const CODES = {
             "give the literal a width rather than to annotate the call.",
     },
 
+    GF0405: {
+        title: "this type has no hash",
+        explanation:
+            "`hashOf<T>(v)` answers from the type, and it answers for four kinds of " +
+            "type: a scalar, `boolean`, an enum, a pointer or a `CString` — the bits, " +
+            "mixed; a `string` — its bytes; a struct or a `FixedArray` — field by " +
+            "field, recursively; and anything that declares `hash(): u64`.\n\n" +
+            "That last one is the extension point, and it is where a **class** " +
+            "belongs. A class has a vtable pointer and slices when it is copied, so " +
+            "there is no structural answer that is right for one — hashing its bytes " +
+            "would hash the vtable, and hashing its fields would make a base and a " +
+            "derived object with the same fields the same key. Declaring the method " +
+            "says what the identity actually is:\n\n" +
+            "    class Cell {\n" +
+            "        x: i32;\n" +
+            "        y: i32;\n" +
+            "        hash(): u64 { return hashOf<i32>(this.x) ^ hashOf<i32>(this.y); }\n" +
+            "        equals(other: Reference<Cell>): boolean {\n" +
+            "            return this.x === other.x && this.y === other.y;\n" +
+            "        }\n" +
+            "    }\n\n" +
+            "Declare `equals` beside it. A container that hashes a key also compares " +
+            "it, and a type that answers one question and not the other is one that " +
+            "fails at the second call rather than at the first.\n\n" +
+            "A `T[]` is not hashable and this is a gap rather than a rule: it needs a " +
+            "loop over a length known only at run time, which every other case here " +
+            "avoids. Hash something derived from it.",
+    },
+    GF0406: {
+        title: "this type has no equality",
+        explanation:
+            "`equalsOf<T>(a, b)` accepts everything `===` accepts — the scalars, " +
+            "`boolean`, enums, pointers, `CString` and `string` — plus the two things " +
+            "`===` refuses: a struct, compared field by field, and a class that " +
+            "declares `equals(other: Reference<T>): boolean`.\n\n" +
+            "A class with no such method is the usual arrival. See `GF0405`, which is " +
+            "the same rule for the other half of the pair and shows both methods " +
+            "together.\n\n" +
+            "Note what is *not* happening here: nothing compares the bytes. Padding " +
+            "between a struct's fields holds nothing in particular, so two values " +
+            "that are equal in every field can differ in bytes — which is why `===` " +
+            "on a struct is `GF0002` and why this walks the fields instead.",
+    },
+    GF0407: {
+        title: "a float is not a key",
+        explanation:
+            "`hashOf<f64>()` and `hashOf<f32>()` are refused, and so is hashing a " +
+            "struct that contains one, because a float breaks the one property a " +
+            "hashed container depends on: that equal keys hash equally.\n\n" +
+            "`0.0 === -0.0` is true and the two have different bits, so they would " +
+            "land in different buckets and a lookup would miss. `NaN !== NaN`, so a " +
+            "`NaN` key could never be found again, whatever it hashed to.\n\n" +
+            "Rust refuses `Hash` for `f64` for exactly this reason; C++ supplies " +
+            "`std::hash<double>` and inherits both bugs.\n\n" +
+            "Quantise, and hash the integer:\n\n" +
+            "    const cell = { x: cast<i64>(dfloor(p.x / SIZE)), y: cast<i64>(dfloor(p.y / SIZE)) };\n" +
+            "    map.set(cell, body);\n\n" +
+            "`equalsOf` is a different question and accepts a float, because `===` on " +
+            "two floats is well defined — it is only the pairing with a hash that is " +
+            "not.",
+    },
+
     // -- The compiler is broken ----------------------------------------------
     GF9001: {
         title: "the backend could not decode the MIR",

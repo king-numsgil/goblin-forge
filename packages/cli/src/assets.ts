@@ -35,6 +35,14 @@ export interface Materialised {
     readonly buildDeclarations: string;
     readonly tsconfigBase: string;
     readonly runtimeCrate: string;
+    /**
+     * The directory the `paths` entry in the tsconfig base points at.
+     *
+     * It has to land *beside* that config, because the entry is written relative
+     * to it — `"std/collection": ["./std/collection.ts"]` — so moving one
+     * without the other leaves tsc resolving nothing.
+     */
+    readonly stdLibrary: string;
 }
 
 /**
@@ -48,6 +56,8 @@ export interface Materialised {
 export function materialise(root: string): Materialised {
     const crate = join(root, "runtime-crate");
     mkdirSync(join(crate, "src"), {recursive: true});
+    const std = join(root, "std");
+    mkdirSync(std, {recursive: true});
 
     const write = (path: string, contents: string): string => {
         // Only when it differs: cargo rebuilds on mtime, so rewriting the crate
@@ -66,6 +76,12 @@ export function materialise(root: string): Materialised {
             write(join(crate, "Cargo.toml"), EMBEDDED.runtimeCargo);
             write(join(crate, "src", "lib.rs"), EMBEDDED.runtimeSource);
             return crate;
+        })(),
+        stdLibrary: (() => {
+            for (const [file, contents] of Object.entries(EMBEDDED.stdModules)) {
+                write(join(std, file), contents);
+            }
+            return std;
         })(),
     };
 }

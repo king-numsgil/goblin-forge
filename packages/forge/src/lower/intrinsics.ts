@@ -471,7 +471,7 @@ export abstract class IntrinsicLowerer extends WidthPass {
         // destructor and is the one place destruction has to dispatch. Everywhere
         // else the compiler destroys a value whose storage was laid out for exactly
         // its static type, so the dynamic type *is* the static one — but a
-        // `Pointer<Base>` may address a `Derived`, and a direct call to `Base$drop`
+        // `Pointer<Base>` may address a `Derived`, and a direct call to `Base$~drop`
         // would leave the derived class's own fields unreleased.
         if (pointee.kind === "class") {
             const info = this.outer.classInfo(pointee.name);
@@ -884,6 +884,60 @@ export abstract class IntrinsicLowerer extends WidthPass {
             rvalue: {kind: "Use", value: this.forStorage(value)},
         });
         this.push({kind: "StorageDead", value: slot});
+        return {operand: {kind: "Const", value: this.boolConst(true)}, type: VOID};
+    }
+
+    /**
+     * `xs.reserve(n)` — make room for `n`, without adding an element.
+     *
+     * A plain runtime call, where `push` needed a node of its own. The reason is
+     * what each has to be told: `push` has to be told where to *put* something,
+     * which is a slot only the backend can compute, and this only has to be told
+     * how big an element is — which `SizeOf` and `AlignOf` already answer for
+     * any type.
+     *
+     * The **address** of the handle goes across, not the handle. Growing can
+     * move the buffer, so the local holding it has to be reseated, and a copy of
+     * the handle would leave the caller pointing at the old block. That is the
+     * same argument `ArrayPushSlot` makes, arriving at a `Ref` here because this
+     * is an ordinary call.
+     */
+    protected arrayReserve(
+        expression: ts.CallExpression,
+        array: Typed,
+        element: MachineType,
+    ): Typed | undefined {
+        const argument = expression.arguments[0];
+        if (expression.arguments.length !== 1 || argument === undefined) {
+            this.outer.error(expression, "GF0002", "`reserve` takes exactly one capacity.");
+            return undefined;
+        }
+        const resolved = this.asArray(expression, array);
+        if (resolved === undefined) {
+            return undefined;
+        }
+
+        const capacity = this.expressionTyped(argument, USIZE);
+        if (capacity === undefined) {
+            return undefined;
+        }
+
+        // The array *type*, rather than whatever `array.type` was: the value may
+        // have arrived as a `Reference<T[]>`, and `asArray` has already stepped
+        // through that indirection, so the place is a handle either way.
+        const handle: MachineType = {kind: "array", element};
+        const ty = this.outer.tyOf(element, expression);
+        const slot = this.temporaryTyped(expression, {kind: "pointer", pointee: handle}, {
+            kind: "Ref",
+            value: resolved.place,
+        });
+        const size = this.temporaryTyped(expression, USIZE, {kind: "SizeOf", value: ty});
+        const align = this.temporaryTyped(expression, USIZE, {kind: "AlignOf", value: ty});
+        if (slot === undefined || size === undefined || align === undefined) {
+            return undefined;
+        }
+
+        this.callRuntime(expression, RUNTIME.arrayReserve, [slot, capacity, size, align], VOID);
         return {operand: {kind: "Const", value: this.boolConst(true)}, type: VOID};
     }
 

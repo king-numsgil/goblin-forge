@@ -258,6 +258,211 @@ describe("growth", () => {
     });
 });
 
+/**
+ * `capacity` and `reserve` — room, as opposed to length.
+ *
+ * These exist so that a growth policy can be *written* rather than accepted.
+ * `push` on its own doubles, which is the right default and allocates a second
+ * buffer beside the first at every step; `reserve` goes through the allocator's
+ * `realloc`, so growing in fixed steps can extend the block in place.
+ *
+ * What is asserted here is the contract — the room, the length, the elements —
+ * and never that a particular growth happened in place. That is mimalloc's
+ * decision and it is allowed to move the block; a test that required otherwise
+ * would be testing the allocator.
+ */
+describe("capacity and reserve", () => {
+    test("an empty array holds no buffer, so it has no room", async () => {
+        const result = await run(
+            "vec-capacity-empty",
+            `export function main(): i32 {
+         const xs: i32[] = [];
+         console.log(\`\${xs.length} \${xs.capacity}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("0 0\n");
+    });
+
+    test("reserve delivers the room and does not change the length", async () => {
+        const result = await run(
+            "vec-reserve",
+            `export function main(): i32 {
+         const xs: i32[] = [];
+         xs.reserve(1000);
+         console.log(\`\${xs.length} \${xs.capacity}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("0 1000\n");
+    });
+
+    test("pushing up to the reserved capacity does not reallocate", async () => {
+        // The observable half of "reserve means what it says": a thousand pushes
+        // after a thousand-element reserve leave the capacity exactly where it
+        // was, so no growth happened on the way.
+        const result = await run(
+            "vec-reserve-fill",
+            `export function main(): i32 {
+         const xs: i32[] = [];
+         xs.reserve(1000);
+         for (let i: usize = 0; i < 1000; i = i + 1) { xs.push(cast<i32>(i)); }
+         console.log(\`\${xs.length} \${xs.capacity} \${xs[0]} \${xs[999]}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("1000 1000 0 999\n");
+    });
+
+    test("reserve never shrinks", async () => {
+        // A shrink would be a reallocation that invalidates every pointer into
+        // the array, asked for by a number smaller than the one already there.
+        const result = await run(
+            "vec-reserve-shrink",
+            `export function main(): i32 {
+         const xs: i32[] = [];
+         xs.reserve(64);
+         xs.reserve(4);
+         console.log(\`\${xs.capacity}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("64\n");
+    });
+
+    test("growing an existing buffer keeps every element", async () => {
+        // The reallocation path, which is the one that has something to lose:
+        // the elements are relocated by the allocator rather than copied by the
+        // compiler, and a wrong alignment or offset loses them silently.
+        const result = await run(
+            "vec-reserve-regrow",
+            `export function main(): i32 {
+         const xs: i32[] = [];
+         xs.reserve(8);
+         for (let i: usize = 0; i < 8; i = i + 1) { xs.push(cast<i32>(i) * 3); }
+         xs.reserve(4096);
+         let sum: i32 = 0;
+         for (let i: usize = 0; i < xs.length; i = i + 1) { sum = sum + xs[i]; }
+         console.log(\`\${xs.length} \${xs.capacity} \${sum} \${xs[7]}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("8 4096 84 21\n");
+    });
+
+    test("owning elements survive a reserve, and are released once", async () => {
+        // A `string[]` is the case where getting relocation wrong is a double
+        // free rather than a wrong number. The automatic leak check is the other
+        // half of this assertion.
+        const result = await run(
+            "vec-reserve-strings",
+            `export function main(): i32 {
+         const xs: string[] = [];
+         xs.reserve(2);
+         for (let i: i32 = 0; i < 40; i = i + 1) { xs.push(\`item \${i}\`); }
+         xs.reserve(4096);
+         console.log(\`\${xs[0]} | \${xs[39]} | \${xs.length}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("item 0 | item 39 | 40\n");
+        expect(result.leaked).toBe(0);
+    });
+
+    test("a wide struct element survives a reserve intact", async () => {
+        // Four `f64` per element, so a stride the compiler supplies from
+        // `SizeOf` rather than one the runtime could guess.
+        //
+        // This does *not* exercise the over-aligned branch of `raw_realloc_at`:
+        // nothing reachable from Goblin source wants more than eight bytes of
+        // alignment today, since a linalg type is an ordinary struct of `f64`.
+        // That branch is covered directly, at six alignments, by
+        // `reserve_grows_in_place_and_keeps_what_was_there` in the runtime crate.
+        const result = await run(
+            "vec-reserve-aligned",
+            `import { dvec4 } from "std/linalg";
+
+       export function main(): i32 {
+         const xs: dvec4[] = [];
+         xs.reserve(4);
+         for (let i: i32 = 0; i < 4; i = i + 1) {
+           xs.push(new dvec4(cast<f64>(i), 1.0, 2.0, 3.0));
+         }
+         xs.reserve(2048);
+         xs.push(new dvec4(9.0, 9.0, 9.0, 9.0));
+         console.log(\`\${xs[0].x} \${xs[3].x} \${xs[4].w} \${xs.length}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("0 3 9 5\n");
+    });
+
+    test("a growth policy in fixed steps, which is what this is for", async () => {
+        // The capacity lands on a multiple of the step rather than on a power of
+        // two, which is the observable difference between this policy and the
+        // doubling `push` does on its own. Twenty elements in steps of eight is
+        // 8, 16, 24 — where doubling would have reached 32.
+        const result = await run(
+            "vec-reserve-steps",
+            `export function main(): i32 {
+         const step: usize = 8;
+         const xs: f64[] = [];
+         for (let i: usize = 0; i < 20; i = i + 1) {
+           if (xs.length === xs.capacity) { xs.reserve(xs.capacity + step); }
+           xs.push(cast<f64>(i));
+         }
+         console.log(\`\${xs.length} \${xs.capacity} \${xs[19]}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("20 24 19\n");
+    });
+
+    test("reserve reaches an array behind a reference", async () => {
+        const result = await run(
+            "vec-reserve-reference",
+            `function make(xs: Reference<i32[]>): void {
+         xs.reserve(256);
+         xs.push(7);
+       }
+
+       export function main(): i32 {
+         const xs: i32[] = [];
+         make(xs);
+         console.log(\`\${xs.length} \${xs.capacity} \${xs[0]}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("1 256 7\n");
+    });
+
+    test("`capacity` and `reserve` are a `T[]`'s, not a `FixedArray`'s", async () => {
+        // A fixed array has no buffer to have room in and its length *is* its
+        // capacity, so neither question means anything there. tsc is what says
+        // so — the prelude declares both on `Array<T>` and not on
+        // `FixedArray<T, N>` — which is the better refusal of the two available,
+        // because it arrives in the editor.
+        await expectRejected(
+            "vec-capacity-fixed",
+            `export function main(): i32 {
+         const xs: FixedArray<i32, 4> = fixedArray(4, 0);
+         console.log(\`\${xs.capacity}\`);
+         return 0;
+       }\n`,
+            "TS2339",
+        );
+        await expectRejected(
+            "vec-reserve-fixed",
+            `export function main(): i32 {
+         const xs: FixedArray<i32, 4> = fixedArray(4, 0);
+         xs.reserve(8);
+         return 0;
+       }\n`,
+            "TS2339",
+        );
+    });
+});
+
 describe("value semantics", () => {
     test("binding copies the buffer, so writing one does not touch the other", async () => {
         const result = await run(

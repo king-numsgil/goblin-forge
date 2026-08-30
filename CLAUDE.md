@@ -140,11 +140,27 @@ suspected, read it first — that is half of what text IR was chosen for.
 
 ## The standard library
 
-`std/alloc`, `std/io` and `std/math` are **ambient modules**: `declare module
-"std/alloc"` in `packages/runtime/global.d.ts`, resolving to no file. There is
-no package to install and no `paths` entry — tsc matches the specifier against
-the declaration, and the declaration is the whole of it. DECISIONS §15, §20 and
-§21 are the reasoning.
+There are now **two kinds of std module**, and which one a new name belongs in
+is the first question to answer rather than the last.
+
+| Kind | Modules | What it is |
+|---|---|---|
+| ambient | `std/alloc`, `std/io`, `std/math` | `declare module` resolving to no file; every name is an `extern "C"` the lowerer maps |
+| recognised | `std/linalg` | types the compiler knows, lowered to SIMD |
+| **source** | `std/collection` | ordinary Goblin, compiled into whoever imports it |
+
+The rule that decides it: **a value type has to be source.** An ambient class is
+an opaque handle — no layout, no destructor, no lowered members — which is right
+for a `FILE *` and wrong for anything a scope has to release. A recognised type
+is for what has no source-level spelling that survives to the backend, which so
+far is SIMD and nothing else. Everything else is source.
+
+### The ambient ones
+
+`declare module "std/alloc"` in `packages/runtime/global.d.ts`, resolving to no
+file. There is no package to install and no `paths` entry — tsc matches the
+specifier against the declaration, and the declaration is the whole of it.
+DECISIONS §15, §20 and §21 are the reasoning.
 
 Adding a name to one takes four steps, and missing any of them fails in a
 different place:
@@ -165,11 +181,59 @@ different place:
 would match a same-named declaration in any `.d.ts` the project happens to
 include, and silently rebind a user's own `extern` to the runtime's.
 
-Two things a std module cannot export today. A **top-level `const`**, because
-nothing lowers one — the constants in `std/math` are functions (`dpi()`) for
-that reason. And a **class with members**: an ambient class is an opaque handle,
-`collectClasses` skips it, and its statics and methods are never lowered. That
-is why `std/io` is `fileOpen(path)` rather than `File.open(path)`.
+### `std/collection` is real Goblin source
+
+`packages/runtime/std/collection.ts`, resolved by a `paths` entry in
+`tsconfig.base.json`. DECISIONS §26 is the design, and §20 is where it was
+predicted — it listed this shape and set it aside until a std module wanted a
+*value* type. A container is that type, and it needed generics to exist.
+
+**Nothing in the compiler resolves it. tsc does.** That is the point: the `paths`
+entry is in the config every project extends, so the editor and the compiler
+find the same file, which is the property `GF0003` exists to protect. A compiler
+host hook would have been invisible to tsserver.
+
+Adding a module under `std/` takes four things, and they are not the four above:
+
+1. **The file**, in `packages/runtime/std/`.
+2. **A `paths` entry** in `packages/runtime/tsconfig.base.json`, spelled out
+   rather than as `"std/*"` — a wildcard sends `std/alloc` at a file that does
+   not exist and leans on tsc falling back to the ambient declaration.
+3. **`bun run build:cli`**, which embeds the directory's contents. It enumerates
+   rather than listing, so a new file is picked up; the `paths` entry is not
+   checked against it by anything.
+4. Nothing in `STD_MODULES`, nothing in `lib.rs`. It is ordinary source.
+
+**A symbol inside one is tagged `std/…`, not by its path.** `#relative` in
+`lower/module.ts` falls back to the absolute path for a file outside the project
+root, which would be the checkout on one machine, a `node_modules` entry on
+another, and a cache directory under the user's home for the packaged CLI —
+three symbols for one function. `stdLibrary()` is how it recognises the
+directory, and it is a `RuntimeFiles` member for that reason alone: nothing
+*reads* these files but the compiler has to know where they are.
+
+**What a container can and cannot do, and why the module reads the way it does:**
+
+- Storage is `T[]`, never raw memory. There is no syntax for writing a
+  destructor, so the only way a container releases what it holds is for the
+  compiler to generate one — which it does for a class whose fields own.
+- A key answers `hashOf` and `equalsOf`. A class answers by declaring
+  `hash(): u64` and `equals(other: Reference<K>): boolean`; that hook is the
+  extension point, resolved by name at the instantiation.
+- **Taking a value out copies it**, because `move(xs[i])` is `GF0001`. `pop` is
+  the exception and is why `HashMap.remove` is written the way it is.
+- A top-level `const` still does not lower, so a constant inside one of these is
+  a local or an argument.
+
+Two things an **ambient** std module cannot export. A **top-level `const`**,
+because nothing lowers one — the constants in `std/math` are functions (`dpi()`)
+for that reason. And a **class with members**: an ambient class is an opaque
+handle, `collectClasses` skips it, and its statics and methods are never
+lowered. That is why `std/io` is `fileOpen(path)` rather than `File.open(path)`.
+
+The second of those is what a source module answers, and `std/collection` is
+below. The first still applies everywhere: there is no module-level `const` in
+this language, ambient or not.
 
 ### `std/linalg` is not one of those four steps
 

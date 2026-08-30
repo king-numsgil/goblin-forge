@@ -2585,6 +2585,188 @@ answer rather than the same one.
 
 ---
 
+## §26 — `std/collection`, and a std module that is source *(settled and built, 2026-08-29)*
+
+`HashMap`, `HashSet`, `BinaryHeap` and `RingBuffer`, written in Goblin, shipped
+with the runtime and compiled into whoever imports them.
+
+§20 listed "a stdlib written in Goblin" as one of three designs for `std/io`,
+noted that it "works *today*", and set it aside because a `File` is a handle and
+a handle needs no value semantics. It also said which day would change that:
+**the day a std module wants a value type.** A container is that type, and the
+reason it could not have been built then is that a container is generic and
+generics arrived at §11.7.
+
+### Why not the other two shapes
+
+An **ambient module** cannot carry one. `declare module "std/collection"` gets a
+class with no layout, no destructor and no lowered members — `collectClasses`
+skips it and `ambientClassNameOf` turns it into an opaque handle. That is
+exactly right for a `FILE *` and exactly wrong for a `HashMap<K, V>`, which is a
+value whose scope releases every key and value in it.
+
+A **recognised type**, the way `std/linalg`'s `dvec3` is, would mean the
+compiler knowing what a hash table is. §22 took that route for linear algebra
+because the *arithmetic* has to become SIMD and no source-level spelling
+survives to the backend. Nothing about a hash table needs the compiler's help;
+it needs generics, which exist.
+
+So the surface is a `paths` entry in the tsconfig base and a directory of `.ts`
+beside it. Nothing in the compiler resolves it — **tsc does**, which is what
+makes the editor and the compiler agree, the same property `GF0003` exists to
+protect. One entry per module rather than `"std/*"`, because a wildcard would
+send `std/alloc` at a file that does not exist and lean on tsc falling back to
+the ambient declaration, which is a resolution order nobody should have to know.
+
+### The symbol tag §20 predicted, arriving
+
+§20's "first thing to fix if one ever becomes real source" was real: `#relative`
+falls back to the whole path for a file outside the project root, so an internal
+symbol in a std module would be tagged with a hash of the *absolute* path —
+the checkout on one machine, a `node_modules` entry on another, and a cache
+directory under the user's home when the packaged CLI extracts it. Three
+different symbols for one function.
+
+It is tagged `std/collection.ts` now, which is the specifier a program would
+have written. `stdLibrary()` joins `globalDeclarations()` and `runtimeCrate()`
+as a shipped path the compiler has to know.
+
+### A key answers two questions, and a class answers them itself
+
+A container needs one spelling for "hash this" and "are these equal" that works
+for `i32`, for `string` **and** for a user's struct. There was none: `===`
+compares the first two and is `GF0002` on the third, on the stated grounds that
+the compiler should not guess which fields matter, and there is no operator
+overloading for a class to say otherwise.
+
+`hashOf<T>(v)` and `equalsOf<T>(a, b)` are that spelling. They resolve from the
+type at the instantiation:
+
+| `T` | Answer |
+|---|---|
+| scalar, `boolean`, enum, pointer, `CString` | the bits, mixed |
+| `string` | its bytes |
+| struct, `FixedArray` | field by field, recursively |
+| anything declaring `hash()` / `equals()` | those |
+| `Reference<T>` | the referent's, never the address |
+| everything else | `GF0405` / `GF0406` |
+
+**The method hook is the whole of the extension mechanism**, and it is where a
+class lands — a class has a vtable and slices when copied, so there is no
+structural answer that is right for one. It is resolved by *name* at the
+instantiation rather than through a contract, which is the same place and the
+same way C++ resolves a `std::hash<T>` specialisation, and it costs no vtable
+slot. Specialisation proper is not available here and should not be
+(GENERICS-PLAN §7: one body per declaration, always).
+
+**A struct is walked, never memcmp'd.** That is not a softening of `GF0002` —
+it is `GF0002`'s own advice ("compare the fields you care about") applied by the
+compiler, and it is why the padding that made comparing the bytes wrong is never
+read.
+
+**A float is not a key** (`GF0407`). `0.0 === -0.0` with different bits, and
+`NaN !== NaN`: equal keys would hash to different buckets and a `NaN` key could
+never be found again. Rust refuses `Hash` for `f64` for this reason; C++ ships
+`std::hash<double>` and inherits both bugs. `equalsOf` *does* accept a float,
+because comparing two is well defined — it is only the pairing that is not.
+
+The hash is **deterministic and unseeded**: same value, same number, every run
+and every platform. That is what a simulation which has to replay wants and the
+opposite of what a public server wants, and it is stated rather than left to be
+discovered, because iteration order is a function of it and this suite asserts
+on iteration order.
+
+### The table is dense entries plus an index, and that was forced
+
+The textbook open-addressed table stores keys and values in the slots, which
+means every *empty* slot holds a valid `K` and `V` — `zeroed<K>()`. `zeroed`
+refuses a class, so keys and values would have been restricted to non-class
+types across the whole module. Storing entries densely and hashing into a
+separate table of indices means no `K` exists until one is inserted.
+
+Two things fall out and both are worth having: iteration costs the number of
+entries rather than the capacity, and the entries are in insertion order.
+Removal is a swap of the last entry into the hole, so that order holds only
+until the first `remove` — documented as such rather than promised, because the
+alternative is tombstoned entries holding keys and values nobody can reach.
+
+`HashSet<K>` is a `HashMap<K, boolean>`. One padded byte per entry against a
+second copy of the probing, and the probing is the part that has to be right.
+
+### `T[]` grew `capacity` and `reserve`
+
+Not part of the module and the reason it exists: a growth policy should be
+something a program can *write*. `push` doubles, which is the right default and
+allocates a second buffer beside the first at every step — a 400 MB array of
+bodies transiently wants 1.2 GB. `reserve` goes through mimalloc's `realloc`,
+so growing in fixed steps can extend the block in place.
+
+It needed **no MIR node**, where `push` needed `ArrayPushSlot`. The difference
+is what each has to be told: `push` has to be told where to *put* something,
+which is a slot only the backend can compute, and this only has to be told how
+big an element is — `SizeOf` and `AlignOf` already answer that for any type. So
+it is an ordinary runtime call taking a `Ref` of the handle.
+
+It never shrinks. A shrink is a reallocation that invalidates every pointer into
+the array, asked for by a number smaller than the one already there.
+
+`push` was deliberately **not** switched to `realloc`. Its allocation trace is
+compared against `std::vector`'s in the oracle, and a vector cannot realloc —
+it has to run move constructors — so `push` allocating, copying and freeing is
+the behaviour under test rather than an inefficiency.
+
+### Three defects it turned up, none of them in the containers
+
+Building this found three pre-existing bugs, all reachable from ordinary
+programs and none of them needing a container to hit:
+
+- **A conditionally-moved local was destroyed twice.** Drop elaboration raises a
+  local's drop flag where it is written and lowers it at `StorageLive` /
+  `StorageDead`, and never at a **move**. So `xs[0] = move(e)` under an `if`
+  moved the value into the array *and* dropped it. Only conditional moves were
+  affected — an unconditional one leaves the local uninitialised on every path
+  and gets no flag at all — which is why it survived a suite with plenty of
+  moves in it. `readsOf` was also missing every rvalue kind past `Aggregate`,
+  which is the same bug waiting for a `Select` over an owning type.
+- **A `LocalFn` parameter worked only on a free function.** The width pass walks
+  a call's arguments, and a lambda has no width of its own; a free function's
+  width path never walks its arguments, and `xs.forEach` answered before its
+  loop, so those two worked and a method, a generic method, a static and a
+  contract's method all reported `GF0239` about the lambda. The feature worked
+  in exactly the shape it had a test for.
+- **A method named `drop` collided with the generated destructor**, producing
+  two definitions of `Class$drop` and a `GF9003` — the compiler calling itself
+  broken about a program whose only fault was a common word. The destructor is
+  `Class$~drop` now: `~` is not a character a TypeScript identifier can hold,
+  which is the trick `linalg.dvec3` and `Pair<i32>` already use. Taking the name
+  away from the user would have been the smaller change and the wrong one.
+
+### What it costs, and the gap underneath it
+
+**Taking a value out of a container copies it.** `move(xs[i])` is `GF0001` —
+moving out of anything but a local — so `valueAt` copies, `BinaryHeap`'s sift
+copies rather than swaps, and `RingBuffer.pop` copies before zeroing the slot.
+For a scalar or a POD struct, which is what a simulation's maps and queues hold,
+that is a `memcpy` and costs nothing. For a `string` it is an allocation.
+
+`HashMap.remove` is the one place that avoids it, because `pop` *does* move: the
+last entry comes out by move and goes back in with `move` on a local.
+
+Closing the gap properly means moving out of an array element, which needs the
+element left empty-but-destructible — which is what a move already leaves behind
+here ("a moved-from value is empty rather than invalid"), so the obstacle is the
+*tracking* rather than the semantics. Recorded rather than done.
+
+### Still open
+
+`std/collection` is one file. A second module under `std/` needs a second
+`paths` entry, and nothing checks that the entry, the shipped `files` list and
+the CLI's embedded copy agree — the failure would be tsc reporting that a
+specifier does not exist, in the packaged compiler only. `packages/cli/build.ts`
+enumerates the directory rather than listing it, which closes the worst half.
+
+---
+
 ## Class decisions *(2026-08-12, milestone 8)*
 
 ### Every class has a vtable pointer, including one with no virtual methods

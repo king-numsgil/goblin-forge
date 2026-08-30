@@ -54,7 +54,13 @@ import {
     CONSOLE_METHODS,
     CSTRING,
     CSTRING_FREE,
+    EQUALS_METHOD,
+    EQUALS_OF,
     FIXED_ARRAY,
+    FNV_OFFSET_BASIS,
+    FNV_PRIME,
+    HASH_METHOD,
+    HASH_OF,
     MIR_OPS,
     MOVE,
     NATIVE_ALIGN_OF,
@@ -70,7 +76,7 @@ import {
     STRING_FROM_CSTRING,
     TRY_CAST,
 } from "./tables.ts";
-import { type FnRecord, ISIZE, STRING, type Typed, typed, USIZE, VOID } from "./types.ts";
+import { BOOL, type FnRecord, ISIZE, STRING, type Typed, typed, U64, USIZE, VOID } from "./types.ts";
 import { type Binding, bindingPlace, isCapture, type LoopFrame, type Scope, Scopes } from "./scopes.ts";
 import {
     behindOneIndirection,
@@ -3036,6 +3042,32 @@ export class BodyLowerer extends BoundaryLowerer {
             }
         }
 
+        // `xs.capacity` — a runtime call where `length` is a `Len`.
+        //
+        // The asymmetry is the MIR's rather than a preference: `Len` reads the
+        // first word of the handle's header and there is no node that reads the
+        // second. Adding one would buy a load in place of a call at the one site
+        // that asks, which is next to a `reserve` that is about to allocate.
+        if (expression.name.text === "capacity") {
+            const array = this.asArray(expression, subject);
+            if (array !== undefined) {
+                return this.callRuntime(
+                    expression,
+                    RUNTIME.arrayCapacity,
+                    [
+                        {
+                            operand: {kind: "Copy", value: array.place},
+                            // The handle's own type: `asArray` has already seen
+                            // through a `Reference<T[]>`, so what is being copied
+                            // is one machine word either way.
+                            type: {kind: "array", element: array.element},
+                        },
+                    ],
+                    USIZE,
+                );
+            }
+        }
+
         this.outer.unsupported(expression, "this property access");
         return undefined;
     }
@@ -3518,6 +3550,12 @@ export class BodyLowerer extends BoundaryLowerer {
         if (name === NATIVE_ZEROED) {
             return this.zeroed(expression, natural);
         }
+        if (name === HASH_OF) {
+            return this.#hashOf(expression);
+        }
+        if (name === EQUALS_OF) {
+            return this.#equalsOf(expression);
+        }
 
         // Resolved through tsc's symbol, not by name: an imported function is the
         // same symbol as its declaration however it is spelled at the call site,
@@ -3944,6 +3982,513 @@ export class BodyLowerer extends BoundaryLowerer {
         );
     }
 
+    /**
+     * `hashOf<T>(v)` — the hash of a value, resolved from its type.
+     *
+     * One call into the runtime for the mixing, and everything above it is
+     * emitted here: a struct is folded to a single `u64` field by field, and only
+     * the fold is mixed. That is why a six-field POD costs one call rather than
+     * seven — and why the padding between those fields is never read, which is
+     * the objection `GF0002` raises against comparing a struct's bytes and which
+     * applies just as much to hashing them.
+     */
+    #hashOf(expression: ts.CallExpression): Typed | undefined {
+        const argument = expression.arguments[0];
+        if (expression.arguments.length !== 1 || argument === undefined) {
+            this.outer.error(expression, "GF0002", `\`${HASH_OF}\` takes exactly one value.`);
+            return undefined;
+        }
+        const value = this.#keyOperand(expression, argument);
+        if (value === undefined) {
+            return undefined;
+        }
+        return this.#hashValue(argument, value);
+    }
+
+    /**
+     * An argument to `hashOf` or `equalsOf`, with the written type argument
+     * supplying its width.
+     *
+     * `hashOf<i32>(1)` has to work: the literal has no width of its own, and the
+     * angle brackets are the only thing in the expression that says what it is.
+     * Without this the complaint is `GF0161` about a literal, pointing at a
+     * program whose author *did* say — one call further out than the caret.
+     *
+     * When the type argument is absent the argument's own width is the answer,
+     * which is what makes `hashOf(cell)` read as well as the explicit spelling.
+     */
+    #keyOperand(
+        expression: ts.CallExpression,
+        argument: ts.Expression,
+    ): Typed | undefined {
+        const written = expression.typeArguments?.[0];
+        if (written === undefined) {
+            return this.value(argument, undefined);
+        }
+        const type = this.erase(written, this.outer.checker.getTypeAtLocation(written));
+        return type === undefined ? undefined : this.expressionTyped(argument, type);
+    }
+
+    /**
+     * The finished hash of one value.
+     *
+     * A type that answers for itself answers *completely* — its `hash()` is the
+     * result, not an ingredient — because the whole point of the hook is that the
+     * type knows something the compiler does not. Everything else is folded and
+     * then mixed exactly once.
+     */
+    #hashValue(at: ts.Node, value: Typed): Typed | undefined {
+        const borrowed = this.#throughReference(at, value);
+        if (borrowed === "reported") {
+            return undefined;
+        }
+        if (borrowed !== undefined) {
+            return this.#hashValue(at, borrowed);
+        }
+        const own = this.#ownHash(at, value);
+        if (own !== undefined) {
+            return own === "reported" ? undefined : own;
+        }
+        const bits = this.#hashBits(at, value);
+        if (bits === undefined) {
+            return undefined;
+        }
+        return this.callRuntime(at as ts.Expression, RUNTIME.hashU64, [bits], U64);
+    }
+
+    /**
+     * `v.hash()`, when the type declares one.
+     *
+     * `undefined` means "no such method, carry on"; `"reported"` means the method
+     * was there and something else went wrong, which must not be retried as a
+     * structural hash.
+     */
+    #ownHash(at: ts.Node, value: Typed): Typed | undefined | "reported" {
+        const asClass = this.asClass(value);
+        if (asClass === undefined || !asClass.info.methods.has(HASH_METHOD)) {
+            return undefined;
+        }
+        const called = this.#callKeyMethod(at, asClass, HASH_METHOD, []);
+        if (called === undefined) {
+            return "reported";
+        }
+        if (called.type.kind !== "scalar" || called.type.name !== "u64") {
+            this.outer.error(
+                at,
+                "GF0405",
+                `\`${asClass.info.name}.${HASH_METHOD}()\` returns ` +
+                `\`${renderType(called.type)}\`, and a hash is a \`u64\`. Write ` +
+                `\`${HASH_METHOD}(): u64\`.`,
+            );
+            return "reported";
+        }
+        return called;
+    }
+
+    /**
+     * The value behind a `Reference<T>`, or `undefined` when there is no
+     * reference to see through.
+     *
+     * Both intrinsics answer about the **referent**, so that `hashOf(r)` and
+     * `hashOf(*r)` are the same number and a borrowed key finds the entry an
+     * owned one inserted. Reading the reference itself instead would hash the
+     * *address*, which is the answer C would give and is useless here: a
+     * container's key is a value, and two equal values at two addresses have to
+     * agree.
+     *
+     * It matters because a reference is how a key reaches a generic without
+     * being copied, and because `Reference<T>` is one machine word — so the
+     * wrong answer is a plausible number rather than anything that fails.
+     */
+    #throughReference(at: ts.Node, value: Typed): Typed | undefined | "reported" {
+        if (value.type.kind !== "reference") {
+            return undefined;
+        }
+        const place = this.placeOfSubject(at, value);
+        if (place === undefined) {
+            return "reported";
+        }
+        const referent = value.type.referent;
+        return {
+            operand: {
+                kind: this.needsCallerCopy(referent) ? "Borrow" : "Copy",
+                value: {local: place.local, projection: [...place.projection, {kind: "Deref"}]},
+            },
+            type: referent,
+        };
+    }
+
+    /**
+     * A value folded down to the `u64` that gets mixed — not itself a hash.
+     *
+     * The fold is FNV-1a over 64-bit words rather than over bytes: each leaf
+     * contributes its bits, and one `gf_hash_u64` at the top does the avalanche.
+     * Doing it the other way — mixing every leaf and combining the results —
+     * costs a call per field and buys nothing, because the combining step is
+     * where the entropy has to end up anyway.
+     */
+    #hashBits(at: ts.Node, value: Typed): Typed | undefined {
+        const type = value.type;
+
+        if (isFloatType(type)) {
+            this.outer.error(
+                at,
+                "GF0407",
+                `\`${renderType(type)}\` has no hash: \`0.0 === -0.0\` is true and their ` +
+                "bits differ, so two equal keys would land in different buckets, and " +
+                "`NaN` is not equal to itself, so such a key could never be found " +
+                "again. Quantise to an integer and hash that.",
+            );
+            return undefined;
+        }
+
+        // The bits, widened. Every one of these is a single machine word, and
+        // `gf_hash_u64` is what makes the low bits of a small one usable — an
+        // `i32` key cast straight to `u64` would put consecutive ids in
+        // consecutive buckets.
+        if (isIntegerType(type)) {
+            return this.#widenToU64(at, value);
+        }
+        if (type.kind === "bool") {
+            const widened = this.temporaryTyped(at, U64, {
+                kind: "Cast",
+                op: "BoolToInt",
+                operand: this.forRead(value),
+                to: this.outer.tyOf(U64, at),
+            });
+            return widened;
+        }
+        // An address, hashed as one. A `Reference<T>` is deliberately *not* here:
+        // it is a borrow of a value rather than an identity, and `#hashValue` has
+        // already replaced it with the value it borrows.
+        if (type.kind === "pointer" || type.kind === "fnptr" || type.kind === "cstring") {
+            const address = this.temporaryTyped(at, USIZE, {
+                kind: "Cast",
+                op: "PtrToInt",
+                operand: this.forRead(value),
+                to: this.outer.tyOf(USIZE, at),
+            });
+            return this.#widenToU64(at, address);
+        }
+
+        if (type.kind === "string") {
+            return this.callRuntime(at as ts.Expression, RUNTIME.stringHash, [value], U64);
+        }
+
+        if (type.kind === "struct") {
+            const place = this.placeOfSubject(at, value);
+            if (place === undefined) {
+                return undefined;
+            }
+            let accumulator = this.#u64Const(at, FNV_OFFSET_BASIS);
+            for (const [index, field] of type.fields.entries()) {
+                const read: Typed = {
+                    operand: {
+                        kind: this.needsCallerCopy(field.type) ? "Borrow" : "Copy",
+                        value: {
+                            local: place.local,
+                            projection: [...place.projection, {kind: "Field", value: FieldId(index)}],
+                        },
+                    },
+                    type: field.type,
+                };
+                // Each field's *own* hash, not its raw bits, so a nested struct
+                // and a `string` both arrive already finished and the fold below
+                // is the only thing that has to know how to combine.
+                const part = this.#hashValue(at, read);
+                if (part === undefined) {
+                    return undefined;
+                }
+                accumulator = this.#foldHash(at, accumulator, part);
+            }
+            return accumulator;
+        }
+
+        if (type.kind === "fixedArray") {
+            const place = this.placeOfSubject(at, value);
+            if (place === undefined) {
+                return undefined;
+            }
+            let accumulator = this.#u64Const(at, FNV_OFFSET_BASIS);
+            for (let i = 0; i < type.length; i += 1) {
+                const index = this.temporaryTyped(at, USIZE, {
+                    kind: "Use",
+                    value: {
+                        kind: "Const",
+                        value: {kind: "Int", bits: BigInt(i), ty: this.outer.tyOf(USIZE, at)},
+                    },
+                });
+                const read: Typed = {
+                    operand: {
+                        kind: this.needsCallerCopy(type.element) ? "Borrow" : "Copy",
+                        value: {
+                            local: place.local,
+                            projection: [
+                                ...place.projection,
+                                {kind: "Index", value: index.temporary ?? LocalId(0)},
+                            ],
+                        },
+                    },
+                    type: type.element,
+                };
+                const part = this.#hashValue(at, read);
+                if (part === undefined) {
+                    return undefined;
+                }
+                accumulator = this.#foldHash(at, accumulator, part);
+            }
+            return accumulator;
+        }
+
+        this.outer.error(
+            at,
+            "GF0405",
+            `there is no hash for a \`${renderType(type)}\`. ` +
+            (type.kind === "class"
+                ? `Declare \`${HASH_METHOD}(): u64\` and ` +
+                `\`${EQUALS_METHOD}(other: Reference<${renderType(type)}>): boolean\` on ` +
+                "it — a class has a vtable and slices when it is copied, so what its " +
+                "identity is has to be said rather than guessed."
+                : type.kind === "array"
+                    ? "Hashing one needs a loop over a length known only at run time, " +
+                    "which every other case here avoids. Hash something derived from it."
+                    : "The types that have one are the scalars, `boolean`, enums, " +
+                    "pointers, `CString`, `string`, and structs and fixed arrays of " +
+                    "those."),
+        );
+        return undefined;
+    }
+
+    /** `acc = (acc ^ part) * prime` — FNV-1a, a 64-bit word at a time. */
+    #foldHash(at: ts.Node, accumulator: Typed, part: Typed): Typed {
+        const mixed = this.temporaryTyped(at, U64, {
+            kind: "Binary",
+            op: "BitXor",
+            lhs: this.forRead(accumulator),
+            rhs: this.forRead(part),
+        });
+        return this.temporaryTyped(at, U64, {
+            kind: "Binary",
+            op: "Mul",
+            lhs: this.forRead(mixed),
+            rhs: this.forRead(this.#u64Const(at, FNV_PRIME)),
+        });
+    }
+
+    #u64Const(at: ts.Node, bits: bigint): Typed {
+        return {
+            operand: {kind: "Const", value: {kind: "Int", bits, ty: this.outer.tyOf(U64, at)}},
+            type: U64,
+        };
+    }
+
+    /** An integer of any width, as the `u64` the mixer takes. */
+    #widenToU64(at: ts.Node, value: Typed): Typed {
+        if (value.type.kind === "scalar" && value.type.name === "u64") {
+            return value;
+        }
+        return this.temporaryTyped(at, U64, {
+            kind: "Cast",
+            op: "IntToInt",
+            operand: this.forRead(value),
+            to: this.outer.tyOf(U64, at),
+        });
+    }
+
+    /**
+     * `equalsOf<T>(a, b)` — whether two values of one type are equal.
+     *
+     * Everything `===` does, plus the two things it refuses: a struct, field by
+     * field, and a class that says how. Where `===` works this emits exactly what
+     * `===` emits, including the `gf_string_eq` the backend puts behind an `Eq`
+     * on two strings.
+     */
+    #equalsOf(expression: ts.CallExpression): Typed | undefined {
+        const [left, right] = expression.arguments;
+        if (expression.arguments.length !== 2 || left === undefined || right === undefined) {
+            this.outer.error(expression, "GF0002", `\`${EQUALS_OF}\` takes exactly two values.`);
+            return undefined;
+        }
+        const a = this.#keyOperand(expression, left);
+        if (a === undefined) {
+            return undefined;
+        }
+        // The second operand takes the first's type rather than the written one,
+        // so a literal on either side lands at the same width and there is one
+        // answer to "what is being compared" rather than two.
+        const b = this.expressionTyped(right, a.type);
+        if (b === undefined) {
+            return undefined;
+        }
+        return this.#equalValues(expression, a, b);
+    }
+
+    #equalValues(at: ts.Node, a: Typed, b: Typed): Typed | undefined {
+        const left = this.#throughReference(at, a);
+        const right = this.#throughReference(at, b);
+        if (left === "reported" || right === "reported") {
+            return undefined;
+        }
+        if (left !== undefined || right !== undefined) {
+            return this.#equalValues(at, left ?? a, right ?? b);
+        }
+
+        const type = a.type;
+
+        const asClass = this.asClass(a);
+        if (asClass !== undefined && asClass.info.methods.has(EQUALS_METHOD)) {
+            const other = this.placeOfSubject(at, b);
+            if (other === undefined) {
+                return undefined;
+            }
+            return this.#callKeyMethod(at, asClass, EQUALS_METHOD, [
+                this.refTo(at, other, {kind: "class", name: asClass.info.name}),
+            ]);
+        }
+
+        // Everything the hardware compares in one instruction, plus `string`,
+        // which the backend turns into a `gf_string_eq` behind this same `Eq`.
+        if (isMachineComparable(type) || type.kind === "string") {
+            return this.temporaryTyped(at, BOOL, {
+                kind: "Binary",
+                op: "Eq",
+                lhs: this.forRead(a),
+                rhs: this.forRead(b),
+            });
+        }
+
+        if (type.kind === "struct" || type.kind === "fixedArray") {
+            const left = this.placeOfSubject(at, a);
+            const right = this.placeOfSubject(at, b);
+            if (left === undefined || right === undefined) {
+                return undefined;
+            }
+            const parts: { type: MachineType; index: number }[] =
+                type.kind === "struct"
+                    ? type.fields.map((field, index) => ({type: field.type, index}))
+                    : Array.from({length: type.length}, (_, index) => ({
+                        type: type.element,
+                        index,
+                    }));
+
+            let answer: Typed = {
+                operand: {kind: "Const", value: this.boolConst(true)},
+                type: BOOL,
+            };
+            for (const part of parts) {
+                const step = this.#equalValues(
+                    at,
+                    this.#partOf(at, left, type, part.type, part.index),
+                    this.#partOf(at, right, type, part.type, part.index),
+                );
+                if (step === undefined) {
+                    return undefined;
+                }
+                // `Select` rather than a short-circuit branch: reading a field has
+                // no side effect to skip, and this stays one basic block, which
+                // keeps a six-field comparison out of the CFG entirely.
+                answer = this.temporaryTyped(at, BOOL, {
+                    kind: "Select",
+                    cond: this.forRead(answer),
+                    ifTrue: this.forRead(step),
+                    ifFalse: {kind: "Const", value: this.boolConst(false)},
+                });
+            }
+            return answer;
+        }
+
+        this.outer.error(
+            at,
+            "GF0406",
+            `there is no equality for a \`${renderType(type)}\`. ` +
+            (type.kind === "class"
+                ? `Declare \`${EQUALS_METHOD}(other: Reference<${renderType(type)}>): ` +
+                `boolean\` on it, and \`${HASH_METHOD}(): u64\` beside it.`
+                : "The types that have one are the scalars, `boolean`, enums, " +
+                "pointers, `CString`, `string`, and structs and fixed arrays of those."),
+        );
+        return undefined;
+    }
+
+    /** One field of a struct, or one element of a fixed array, as a value. */
+    #partOf(
+        at: ts.Node,
+        place: Place,
+        whole: MachineType,
+        part: MachineType,
+        index: number,
+    ): Typed {
+        const projection =
+            whole.kind === "struct"
+                ? [...place.projection, {kind: "Field" as const, value: FieldId(index)}]
+                : [
+                    ...place.projection,
+                    {
+                        kind: "Index" as const,
+                        value:
+                            this.temporaryTyped(at, USIZE, {
+                                kind: "Use",
+                                value: {
+                                    kind: "Const",
+                                    value: {
+                                        kind: "Int",
+                                        bits: BigInt(index),
+                                        ty: this.outer.tyOf(USIZE, at),
+                                    },
+                                },
+                            }).temporary ?? LocalId(0),
+                    },
+                ];
+        return {
+            operand: {
+                kind: this.needsCallerCopy(part) ? "Borrow" : "Copy",
+                value: {local: place.local, projection},
+            },
+            type: part,
+        };
+    }
+
+    /**
+     * `v.hash()` or `a.equals(b)`, dispatched through the vtable like any method.
+     *
+     * Virtual rather than direct, because a derived class that overrides either
+     * one must be the answer for a value of that dynamic type — the same reason
+     * every other method call here goes through a slot.
+     */
+    #callKeyMethod(
+        at: ts.Node,
+        asClass: { info: ClassInfo; place: Place },
+        name: string,
+        extra: Operand[],
+    ): Typed | undefined {
+        const method = asClass.info.methods.get(name);
+        if (method === undefined) {
+            return undefined;
+        }
+        const record = this.outer.fn(method.symbol);
+        if (record === undefined || record.kind !== "defined") {
+            this.outer.unsupported(at, `a call to \`${method.symbol}\``);
+            return undefined;
+        }
+        if (record.signature.params.length !== extra.length + 1) {
+            this.outer.error(
+                at,
+                name === HASH_METHOD ? "GF0405" : "GF0406",
+                `\`${asClass.info.name}.${name}\` takes ` +
+                `${record.signature.params.length - 1} argument(s), and ` +
+                `\`${name === HASH_METHOD ? HASH_OF : EQUALS_OF}\` calls it with ` +
+                `${extra.length}.`,
+            );
+            return undefined;
+        }
+        return this.emitCall(
+            at,
+            {kind: "Virtual", slot: method.slot, sig: record.sig},
+            [this.refTo(at, asClass.place, {kind: "class", name: asClass.info.name}), ...extra],
+            record.signature.returns,
+        );
+    }
+
     #methodCall(
         expression: ts.CallExpression,
         access: ts.PropertyAccessExpression,
@@ -3995,6 +4540,8 @@ export class BodyLowerer extends BoundaryLowerer {
                     return this.arrayPop(expression, array, element);
                 case "forEach":
                     return this.arrayForEach(expression, array, element);
+                case "reserve":
+                    return this.arrayReserve(expression, array, element);
                 default:
                     this.outer.unsupported(expression, `\`${access.name.text}\` on an array`);
                     return undefined;

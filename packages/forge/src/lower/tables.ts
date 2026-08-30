@@ -38,6 +38,35 @@ export const STRING_FROM_CSTRING = "stringFromCString";
 /** `stringFromBytes(p, n)` — the same copy, with the length already known. */
 export const STRING_FROM_BYTES = "stringFromBytes";
 
+/** `hashOf<T>(v)` and `equalsOf<T>(a, b)` — what a keyed container asks of a key. */
+export const HASH_OF = "hashOf";
+export const EQUALS_OF = "equalsOf";
+
+/**
+ * The methods a type declares to answer {@link HASH_OF} and {@link EQUALS_OF}
+ * for itself.
+ *
+ * This pair is the whole of the extension mechanism, and it is deliberately a
+ * *name* rather than a contract to implement. A contract would be dispatched
+ * dynamically and would have to be declared on the type; a name is resolved at
+ * the instantiation, where the concrete type is known — which is the same place
+ * C++ resolves a `std::hash<T>` specialisation, and it costs no vtable slot.
+ */
+export const HASH_METHOD = "hash";
+export const EQUALS_METHOD = "equals";
+
+/**
+ * FNV-1a's two constants, used a 64-bit *word* at a time rather than a byte.
+ *
+ * The same pair the runtime's `gf_string_hash` uses over bytes. Combining
+ * already-mixed parts needs far less of a mixer than raw bytes do — every leaf
+ * that reaches this fold has been through `gf_hash_u64` or `gf_string_hash`
+ * already, and the whole fold goes through one more — so what this has to
+ * provide is order-dependence, which xor-then-multiply gives.
+ */
+export const FNV_OFFSET_BASIS = 0xcbf2_9ce4_8422_2325n;
+export const FNV_PRIME = 0x0000_0100_0000_01b3n;
+
 /** `p.address` — the pointer's bits, as a `usize`. */
 export const POINTER_ADDRESS = "address";
 
@@ -192,6 +221,34 @@ export const RUNTIME = {
      * a stride nor an alignment, so the frontend can name it directly.
      */
     arrayPop: "gf_array_pop",
+    /**
+     * `gf_array_capacity(a)` — room, as opposed to `length`, which is a `Len`.
+     *
+     * A call rather than a load because the capacity lives in the *second* word
+     * of the header and nothing else in the MIR addresses that word. `Len`
+     * exists because the length is asked for constantly, in loops the backend
+     * wants to see through; capacity is asked once beside a `reserve`.
+     */
+    arrayCapacity: "gf_array_capacity",
+    /**
+     * `gf_hash_u64(bits)` and `gf_string_hash(s)` — what `hashOf<T>()` ends with.
+     *
+     * Two, because there are two shapes of input: a machine word and a run of
+     * bytes. Everything else `hashOf` accepts is folded down to one of them by
+     * the frontend, so a struct of six fields is still one call.
+     */
+    hashU64: "gf_hash_u64",
+    stringHash: "gf_string_hash",
+    /**
+     * `gf_array_reserve(&a, capacity, stride, align)` — room for `capacity`.
+     *
+     * Takes the *address* of the handle, for `ArrayPushSlot`'s reason: growing
+     * can move the buffer and the caller's variable has to be reseated. The
+     * stride and alignment are `SizeOf`/`AlignOf` of the element, which is why
+     * this needs no MIR node of its own where `push` did — `push` had to be told
+     * where to *put* something, and this only has to be told how big one is.
+     */
+    arrayReserve: "gf_array_reserve",
     /**
      * `gf_alloc(size, align)` and `gf_free(p)` — raw storage.
      *

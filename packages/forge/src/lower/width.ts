@@ -38,7 +38,9 @@ import {
     CONSOLE_METHODS,
     CSTRING,
     CSTRING_FREE,
+    EQUALS_OF,
     FIXED_ARRAY,
+    HASH_OF,
     MOVE,
     NATIVE_ALIGN_OF,
     NATIVE_CAST,
@@ -51,7 +53,20 @@ import {
     STRING_FROM_CSTRING,
     TRY_CAST,
 } from "./tables.ts";
-import { CSTRING_TYPE, ERROR, ISIZE, POLY, STRING, type Typed, typed, USIZE, VOID, type Width } from "./types.ts";
+import {
+    BOOL,
+    CSTRING_TYPE,
+    ERROR,
+    ISIZE,
+    POLY,
+    STRING,
+    type Typed,
+    typed,
+    U64,
+    USIZE,
+    VOID,
+    type Width,
+} from "./types.ts";
 import { behindOneIndirection, describe, elementTypeOf, isStaticMember } from "./util.ts";
 import { Emitter } from "./emit.ts";
 
@@ -239,10 +254,8 @@ export abstract class WidthPass extends Emitter {
             // class has none (DECISIONS §22).
             const linalg = linalgNamedBy(this.outer.checker, expression.expression);
             if (linalg !== undefined) {
-                for (const argument of expression.arguments ?? []) {
-                    if (this.width(argument).kind === "error") {
-                        return ERROR;
-                    }
+                if (!this.argumentWidths(expression.arguments ?? [])) {
+                    return ERROR;
                 }
                 return typed(linalgStruct(linalg));
             }
@@ -434,6 +447,12 @@ export abstract class WidthPass extends Emitter {
             subject.type.kind === "reference" ? subject.type.referent : subject.type;
         if (array.kind === "array" || array.kind === "fixedArray") {
             if (expression.name.text === "length") {
+                return typed(USIZE);
+            }
+            // `capacity` is a `T[]`'s and not a `FixedArray`'s: a fixed array has
+            // no buffer to have room in, and its length *is* its capacity, so the
+            // question is one nobody has a reason to ask there.
+            if (expression.name.text === "capacity" && array.kind === "array") {
                 return typed(USIZE);
             }
             this.outer.unsupported(expression, `\`${expression.name.text}\` on an array`);
@@ -743,6 +762,38 @@ export abstract class WidthPass extends Emitter {
         };
     }
 
+    /**
+     * Walk a call's arguments for their own widths, and say whether all of them
+     * had one. Skips the lambdas.
+     *
+     * **A lambda is skipped because it has no width to ask for.** Its type comes
+     * from the parameter it is being passed to — that is what `LocalFn<F>` is —
+     * so this pass reaching one reports `GF0239` about the single position where
+     * something *does* say what it should be, which is the wrong complaint about
+     * a correct program.
+     *
+     * `xs.forEach(f)` avoided that by answering before its loop, and every other
+     * call taking a callback went through a loop that did not. So `LocalFn`
+     * worked on a plain function — whose width path never walks its arguments at
+     * all — and was refused on a method, a static, and a contract's method, with
+     * a message pointing at the lambda.
+     *
+     * Nothing is lost by skipping: a lambda written where a `LocalFn` is *not*
+     * expected is still refused, by `#closure`, which is the pass that knows what
+     * was expected and can say so.
+     */
+    protected argumentWidths(args: readonly ts.Expression[]): boolean {
+        for (const argument of args) {
+            if (ts.isArrowFunction(argument) || ts.isFunctionExpression(argument)) {
+                continue;
+            }
+            if (this.width(argument).kind === "error") {
+                return false;
+            }
+        }
+        return true;
+    }
+
     #callWidth(expression: ts.CallExpression): Width {
         // A constructor returns nothing; `super(…)` is a statement.
         if (expression.expression.kind === ts.SyntaxKind.SuperKeyword) {
@@ -760,10 +811,8 @@ export abstract class WidthPass extends Emitter {
             this.outer.functionValueAt(callee) === undefined &&
             !(ts.isPropertyAccessExpression(callee) && this.#namesAMethod(callee))
         ) {
-            for (const argument of expression.arguments) {
-                if (this.width(argument).kind === "error") {
-                    return ERROR;
-                }
+            if (!this.argumentWidths(expression.arguments)) {
+                return ERROR;
             }
             return typed(callable.returns);
         }
@@ -798,10 +847,8 @@ export abstract class WidthPass extends Emitter {
         // `allocArray<T>(n)` — separately, because its *first* argument is the
         // count rather than a class name to be skipped.
         if (expression.expression.text === ALLOC_ARRAY) {
-            for (const argument of expression.arguments) {
-                if (this.width(argument).kind === "error") {
-                    return ERROR;
-                }
+            if (!this.argumentWidths(expression.arguments)) {
+                return ERROR;
             }
             return this.#erasedWidth(expression);
         }
@@ -812,12 +859,23 @@ export abstract class WidthPass extends Emitter {
             expression.expression.text === NATIVE_ALIGN_OF ||
             expression.expression.text === NATIVE_ZEROED
         ) {
-            for (const argument of expression.arguments.slice(1)) {
-                if (this.width(argument).kind === "error") {
-                    return ERROR;
-                }
+            if (!this.argumentWidths(expression.arguments.slice(1))) {
+                return ERROR;
             }
             return this.#erasedWidth(expression);
+        }
+
+        // `hashOf<T>(v)` and `equalsOf<T>(a, b)` — the answer is the *query's*
+        // type and never the argument's, so the arguments are walked for their
+        // own sake and the result is a `u64` or a `boolean` whatever they were.
+        if (
+            expression.expression.text === HASH_OF ||
+            expression.expression.text === EQUALS_OF
+        ) {
+            if (!this.argumentWidths(expression.arguments)) {
+                return ERROR;
+            }
+            return typed(expression.expression.text === HASH_OF ? U64 : BOOL);
         }
 
         if (expression.expression.text === NATIVE_CAST) {
@@ -876,10 +934,8 @@ export abstract class WidthPass extends Emitter {
             expression.expression.text === STRING_FROM_CSTRING ||
             expression.expression.text === STRING_FROM_BYTES
         ) {
-            for (const argument of expression.arguments) {
-                if (this.width(argument).kind === "error") {
-                    return ERROR;
-                }
+            if (!this.argumentWidths(expression.arguments)) {
+                return ERROR;
             }
             return typed(STRING);
         }
@@ -914,10 +970,8 @@ export abstract class WidthPass extends Emitter {
                 width.kind === "typed" &&
                 (width.type.kind === "fnptr" || width.type.kind === "localfn")
             ) {
-                for (const argument of expression.arguments) {
-                    if (this.width(argument).kind === "error") {
-                        return ERROR;
-                    }
+                if (!this.argumentWidths(expression.arguments)) {
+                    return ERROR;
                 }
                 return typed(width.type.returns);
             }
@@ -946,13 +1000,13 @@ export abstract class WidthPass extends Emitter {
             if (access.name.text === "forEach") {
                 return typed(VOID);
             }
-            for (const argument of expression.arguments) {
-                if (this.width(argument).kind === "error") {
-                    return ERROR;
-                }
+            if (!this.argumentWidths(expression.arguments)) {
+                return ERROR;
             }
             switch (access.name.text) {
                 case "push":
+                    return typed(VOID);
+                case "reserve":
                     return typed(VOID);
                 case "pop":
                     return typed(element);
@@ -971,10 +1025,8 @@ export abstract class WidthPass extends Emitter {
         // that turns out not to be a string would complain about the wrong
         // thing.
         if (this.tryErase(access.expression)?.kind === "string") {
-            for (const argument of expression.arguments) {
-                if (this.width(argument).kind === "error") {
-                    return ERROR;
-                }
+            if (!this.argumentWidths(expression.arguments)) {
+                return ERROR;
             }
             switch (access.name.text) {
                 case "substring":
@@ -1003,10 +1055,8 @@ export abstract class WidthPass extends Emitter {
         const linalgType =
             linalgStatic ?? linalgFromMachine(this.tryErase(access.expression));
         if (linalgType !== undefined) {
-            for (const argument of expression.arguments) {
-                if (this.width(argument).kind === "error") {
-                    return ERROR;
-                }
+            if (!this.argumentWidths(expression.arguments)) {
+                return ERROR;
             }
             return this.#linalgWidth(access, linalgType, linalgStatic !== undefined);
         }
@@ -1017,10 +1067,8 @@ export abstract class WidthPass extends Emitter {
         if (POINTER_METHODS.has(access.name.text)) {
             const pointer = this.tryErase(access.expression);
             if (pointer?.kind === "pointer") {
-                for (const argument of expression.arguments) {
-                    if (this.width(argument).kind === "error") {
-                        return ERROR;
-                    }
+                if (!this.argumentWidths(expression.arguments)) {
+                    return ERROR;
                 }
                 return this.#pointerMethodWidth(expression, access, pointer);
             }
@@ -1030,10 +1078,8 @@ export abstract class WidthPass extends Emitter {
         // so this is resolved before anything tries to give `C` a type.
         const staticMethod = this.staticAt(access);
         if (staticMethod !== undefined) {
-            for (const argument of expression.arguments) {
-                if (this.width(argument).kind === "error") {
-                    return ERROR;
-                }
+            if (!this.argumentWidths(expression.arguments)) {
+                return ERROR;
             }
             const record = this.outer.fn(staticMethod.symbol);
             if (record === undefined) {
@@ -1050,10 +1096,8 @@ export abstract class WidthPass extends Emitter {
                 this.outer.unsupported(expression, `\`${contract.name}.${access.name.text}()\``);
                 return ERROR;
             }
-            for (const argument of expression.arguments) {
-                if (this.width(argument).kind === "error") {
-                    return ERROR;
-                }
+            if (!this.argumentWidths(expression.arguments)) {
+                return ERROR;
             }
             return typed(method.returns);
         }
@@ -1084,10 +1128,8 @@ export abstract class WidthPass extends Emitter {
         // so the width of the call is the width of *this* copy's return.
         const template = info.methodTemplates.get(access.name.text);
         if (template !== undefined) {
-            for (const argument of expression.arguments) {
-                if (this.width(argument).kind === "error") {
-                    return ERROR;
-                }
+            if (!this.argumentWidths(expression.arguments)) {
+                return ERROR;
             }
             const instance = this.outer.instantiateMethod(
                 info,
@@ -1110,10 +1152,8 @@ export abstract class WidthPass extends Emitter {
         if (record === undefined) {
             return ERROR;
         }
-        for (const argument of expression.arguments) {
-            if (this.width(argument).kind === "error") {
-                return ERROR;
-            }
+        if (!this.argumentWidths(expression.arguments)) {
+            return ERROR;
         }
         return typed(record.signature.returns);
     }

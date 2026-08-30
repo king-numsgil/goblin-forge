@@ -338,7 +338,7 @@ exports[`golden MIR a class: construction, virtual dispatch, and the generated d
 "extern fn gf_runtime_init: extern "C" () -> void  // ext0
 extern fn gf_print: extern "C" (string) -> void  // ext1
 
-fn Base$drop: (Reference<Base>) -> void {
+fn Base$~drop: (Reference<Base>) -> void {
   let _0: void  [Owned/Trivial]
   let _1: Reference<Base>  [Owned/Borrow]
 
@@ -370,13 +370,13 @@ fn Base$describe: (Reference<Base>) -> string {
   }
 }
 
-fn Derived$drop: (Reference<Derived>) -> void {
+fn Derived$~drop: (Reference<Derived>) -> void {
   let _0: void  [Owned/Trivial]
   let _1: Reference<Derived>  [Owned/Borrow]
 
   bb0: {
     drop((*_1).1);
-    _0 = Base$drop(borrow _1) -> [return: bb1];
+    _0 = Base$~drop(borrow _1) -> [return: bb1];
   }
 
   bb1: {
@@ -476,7 +476,7 @@ exports[`golden MIR a contract: the conversion and the itab dispatch 1`] = `
 "extern fn gf_print: extern "C" (string) -> void  // ext0
 extern fn gf_runtime_init: extern "C" () -> void  // ext1
 
-fn Cat$drop: (Reference<Cat>) -> void {
+fn Cat$~drop: (Reference<Cat>) -> void {
   let _0: void  [Owned/Trivial]
   let _1: Reference<Cat>  [Owned/Borrow]
 

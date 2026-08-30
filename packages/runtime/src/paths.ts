@@ -29,6 +29,21 @@ export interface RuntimeFiles {
     readonly tsconfigBase: string;
     /** A directory holding the runtime crate: `Cargo.toml` and `src/`. */
     readonly runtimeCrate: string;
+    /**
+     * A directory holding the std modules that are real Goblin source.
+     *
+     * `std/collection.ts` and whatever joins it. Unlike the three above, nothing
+     * *reads* this to compile — tsc finds these files through the `paths` entry
+     * in the tsconfig base, which is the same route the user's editor takes, and
+     * that is the point (see `checkPreludeIsVisibleToEditors`).
+     *
+     * It is here because the lowerer has to *recognise* the directory. A symbol
+     * for something internal to a module is tagged with the module's path
+     * relative to the project root, and these files are not under it — so
+     * without this they would be tagged with an absolute path and the same
+     * sources would produce different symbols in two checkouts.
+     */
+    readonly stdLibrary: string;
 }
 
 let override: RuntimeFiles | undefined;
@@ -67,4 +82,14 @@ export function tsconfigBase(): string {
  */
 export function runtimeCrate(): string {
     return override?.runtimeCrate ?? join(packageRoot, "native");
+}
+
+/**
+ * The std modules that are real Goblin source, rather than ambient declarations.
+ *
+ * See {@link RuntimeFiles.stdLibrary} for why the compiler needs to know where
+ * they are when it is not the thing that opens them.
+ */
+export function stdLibrary(): string {
+    return override?.stdLibrary ?? join(packageRoot, "std");
 }

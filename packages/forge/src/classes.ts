@@ -201,7 +201,7 @@ export interface ClassInfo {
      * order, which is the order C++ runs them in.
      */
     readonly initialisedFields: readonly ClassField[];
-    /** `Class$drop`, the compiler-generated destructor. */
+    /** `Class$~drop`, the compiler-generated destructor. */
     readonly destructorSymbol: string;
     /** `Class$new`, or `undefined` when there is no construction to do. */
     readonly constructorSymbol: string | undefined;
@@ -378,7 +378,7 @@ export function collectClasses(
  *
  * `name` is what the class is *called here*, which for an instantiation of a
  * generic is `Box<i32>` rather than `Box` — every symbol it owns is built from
- * it (`Box<i32>$drop`, `Box<i32>$get`), so it is what keeps two instantiations
+ * it (`Box<i32>$~drop`, `Box<i32>$get`), so it is what keeps two instantiations
  * from colliding. `<` and `,` are unforgeable in a TypeScript identifier, and
  * the backend quotes a symbol that is not plain, so `@"Box<i32>$get"` is legal
  * LLVM and legible in a disassembly.
@@ -537,7 +537,18 @@ export function buildClass(
     // Slot 0 is always the destructor. Everything else is inherited in the base's
     // order, then extended: an override writes over the slot it inherited, a new
     // method appends one.
-    const destructorSymbol = `${name}$drop`;
+    // **`~` is unforgeable**, and that is the whole reason it is there. A method
+    // is emitted as `Class$name`, so a class with a method called `drop` used to
+    // produce a second definition of `Class$drop` — the destructor's symbol —
+    // and the failure was clang refusing the IR: `GF9003`, the compiler calling
+    // itself broken, about a program whose only fault was a common method name.
+    //
+    // The fix is the one this compiler already uses for every name it makes up:
+    // spell it with a character a TypeScript identifier cannot hold, the way
+    // `linalg.dvec3` uses `.` and `Pair<i32>` uses `<`. Taking `drop` away from
+    // the user instead would have been the smaller change and the wrong one — it
+    // is the compiler's name that should get out of the way.
+    const destructorSymbol = `${name}$~drop`;
     const slots: string[] = base ? [...base.slots] : [destructorSymbol];
     slots[0] = destructorSymbol;
 

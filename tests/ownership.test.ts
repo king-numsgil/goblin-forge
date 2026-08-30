@@ -663,4 +663,70 @@ describe("the moved-from check", () => {
             "GF0001",
         );
     });
+
+    test("a move under an `if` lowers the drop flag, so the value is not destroyed twice", async () => {
+        // A local that is moved on *some* paths gets a drop flag, and the flag
+        // has to come back down where the move happens. It did not: it was raised
+        // where the local was written and lowered only at its `StorageLive` and
+        // `StorageDead`, so the conditional path moved the value into the array
+        // **and** destroyed it. A double free, and one that showed up only for a
+        // conditional move — an unconditional one leaves the local uninitialised
+        // on every path, so it gets no flag and no second drop.
+        //
+        // The count is what catches it: two of the four iterations move, so a
+        // flag that never comes down is two extra frees.
+        const result = await run(
+            "own-conditional-move",
+            `interface E { key: string }
+
+       export function main(): i32 {
+         const xs: E[] = [{key: "a"}, {key: "b"}];
+         for (let i: i32 = 0; i < 4; i = i + 1) {
+           const e: E = {key: \`value \${i}\`};
+           if (i % 2 === 0) { xs[0] = move(e); }
+         }
+         console.log(\`\${xs[0].key} \${xs[1].key}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("value 2 b\n");
+        expect(result.leaked).toBe(0);
+    });
+
+    test("the same, moved into a call rather than into an element", async () => {
+        const result = await run(
+            "own-conditional-move-call",
+            `function take(s: string): void { console.log(s); }
+
+       export function main(): i32 {
+         for (let i: i32 = 0; i < 4; i = i + 1) {
+           const s = \`value \${i}\`;
+           if (i % 2 === 0) { take(move(s)); }
+         }
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("value 0\nvalue 2\n");
+        expect(result.leaked).toBe(0);
+    });
+
+    test("a move on one arm and none on the other, with the value read after", async () => {
+        // The shape a swap-remove has: the move happens only when there is
+        // somewhere to move to, and the local is live either way.
+        const result = await run(
+            "own-conditional-move-arms",
+            `export function main(): i32 {
+         const xs: string[] = ["a", "b", "c"];
+         let kept = "";
+         for (let i: i32 = 0; i < 3; i = i + 1) {
+           const taken = xs.pop();
+           if (i === 1) { xs[0] = move(taken); } else { kept = kept + "."; }
+         }
+         console.log(\`\${xs.length} \${kept}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("0 ..\n");
+        expect(result.leaked).toBe(0);
+    });
 });

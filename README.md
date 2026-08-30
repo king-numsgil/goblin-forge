@@ -367,9 +367,14 @@ those two levels are broken outside MSVC is untested;
 
 `"std/alloc"` is an **ambient module**: it resolves to no file and there is
 nothing to install, because the declaration in the prelude is the whole of it.
-The standard library arrives this way, and it is the only part of the language
-that is imported rather than global — everything else, the widths and `console`
-and `alloc<T>()`, is simply in scope.
+`std/io` and `std/math` arrive the same way. The standard library is the only
+part of the language that is imported rather than global — everything else, the
+widths and `console` and `alloc<T>()`, is simply in scope.
+
+`std/collection` is the one that is not ambient: it is real Goblin source,
+shipped with the compiler and compiled into your program. Which one a module is
+follows from what it exports — a function that lowers to a call can be a
+declaration, and a *value* with a destructor has to be source.
 
 [`LINKING.md`](LINKING.md) has the rules that come with that.
 
@@ -643,6 +648,125 @@ by value, so a `string[]` copies each string into the call; take a
 
 `map`, `filter` and `reduce` are not there yet.
 
+**Growth is yours to steer.** `push` doubles the buffer, which is the right
+default and allocates a second buffer beside the first at every step — a 400 MB
+array of bodies transiently wants 1.2 GB. `reserve` asks for room without adding
+an element, and growing an existing buffer goes through the allocator's
+`realloc`, so it can extend the block in place:
+
+```ts
+const bodies: Body[] = [];
+bodies.reserve(50000);           // one allocation, up front
+
+// or a fixed step rather than a doubling
+const step: usize = 4096;
+if (bodies.length === bodies.capacity) {
+    bodies.reserve(bodies.capacity + step);
+}
+bodies.push(b);
+```
+
+`capacity` is what the buffer holds before it must grow again; `length` is what
+is in it. `reserve` never shrinks — that would be a reallocation invalidating
+every pointer into the array, asked for by a smaller number — and it is not a
+promise that the buffer stays put: mimalloc extends in place when it can and
+moves the block when it cannot, so a `Pointer<T>` into the array is dangling
+after any growth, exactly as it is after a `push`.
+
+### Maps, sets, queues
+
+```ts
+import { BinaryHeap, HashMap, HashSet, RingBuffer } from "std/collection";
+
+const orbits = new HashMap<string, f64>();
+orbits.set("earth", 1.0);
+orbits.set("mars", 1.524);
+orbits.getOr("mars", 0.0);        // 1.524
+orbits.has("venus");              // false
+
+const seen = new HashSet<u64>();
+if (seen.add(body.id)) { … }      // true the first time
+
+// The order is a function you pass: `before(a, b)` is "a comes out first".
+function sooner(a: Event, b: Event): boolean { return a.time < b.time; }
+const queue = new BinaryHeap<Event>(sooner);
+
+const recent = new RingBuffer<Sample>(256);   // fixed capacity, FIFO
+```
+
+A `RingBuffer` never grows: `push` returns `false` when it is full rather than
+reallocating or overwriting the oldest, because which of those you want is a
+policy it cannot pick for you. Its `T` may not be a class — every slot holds a
+real value at all times and the free ones hold `zeroed<T>()`, which refuses a
+class. A struct with the same fields, or a `Pointer<C>`, fits in one.
+
+A named function rather than a lambda, because a lambda is a `LocalFn` and may
+only be written where one is expected — a comparison stored in a heap outlives
+the call it was written at.
+
+These are **not** builtins. `std/collection` is ordinary Goblin source shipped
+with the compiler and compiled into your program, the way a C++ template in a
+header is — everything in it is something you could have written yourself. It is
+the one std module that is not an ambient declaration, because a container is a
+*value*: binding one copies it, and the binding's scope releases it and
+everything in it.
+
+A **key** is anything the compiler can hash and compare: the scalars, `boolean`,
+enums, pointers, `CString`, `string`, and structs and fixed arrays of those.
+That covers what a key usually is, and the two questions have names of their
+own:
+
+```ts
+hashOf<T>(value): u64
+equalsOf<T>(a, b): boolean
+```
+
+`equalsOf` is everything `===` accepts plus a struct, compared field by field —
+never by its bytes, since the padding between fields holds nothing in
+particular, which is why `===` on a struct is refused outright.
+
+A **class** answers for itself, and that is the extension point. It has a vtable
+and slices when copied, so there is no structural answer that is right for one:
+
+```ts
+class Cell {
+    x: i32;
+    y: i32;
+    hash(): u64 { return hashOf<i32>(this.x) ^ hashOf<i32>(this.y); }
+    equals(other: Reference<Cell>): boolean {
+        return this.x === other.x && this.y === other.y;
+    }
+}
+
+const grid = new HashMap<Cell, Body>();   // works, because Cell said how
+```
+
+The compiler resolves those by name at the instantiation — the same place and
+the same job as a `std::hash<T>` specialisation in C++, without the vtable slot.
+
+**A float is not a key.** `0.0 === -0.0` is true and their bits differ, so equal
+keys would land in different buckets, and `NaN !== NaN`, so such a key could
+never be found again. Quantise to an integer and hash that. Rust refuses `Hash`
+for `f64` for the same reason.
+
+The hash is **deterministic**: the same value gives the same number in every run
+on every platform, which is what a simulation that has to replay wants and the
+opposite of what a server exposed to hostile keys wants.
+
+A `HashMap` iterates by index, in insertion order — until the first `remove`,
+which swaps the last entry into the hole to keep removal O(1):
+
+```ts
+for (let i: usize = 0; i < orbits.size; i = i + 1) {
+    console.log(`${orbits.keyAt(i)} ${orbits.valueAt(i)}`);
+}
+orbits.forEach((name, au) => { … });
+```
+
+One cost worth knowing: **taking a value out of a container copies it**, because
+moving out of an array element is not supported yet. For a scalar or a plain
+struct that is a `memcpy`; for a `string` it allocates.
+
 ### Functions are values, if they capture nothing
 
 ```ts
@@ -805,7 +929,9 @@ DECISIONS §25 is what the boundary turned out to be.
 
 Exceptions (`try`/`catch` and `throw`), escaping closures (`HeapFn`), static
 fields, top-level statements and top-level `const`. On arrays, everything past
-`push`/`pop`/`forEach`: `map`, `filter`, `reduce` and the rest.
+`push`/`pop`/`forEach`/`reserve`: `map`, `filter`, `reduce` and the rest — and
+**moving out of an element**, `move(xs[i])`, which is why taking a value out of
+a container copies it.
 
 All of them are declared or valid TypeScript, and all of them produce a
 `GF0001` diagnostic naming the construct and pointing at it.

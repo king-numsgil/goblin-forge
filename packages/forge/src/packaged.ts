@@ -31,6 +31,10 @@ useRuntimeFiles({
     globalDeclarations: join(here, "global.d.ts"),
     tsconfigBase: join(here, "tsconfig.base.json"),
     runtimeCrate: join(here, "native"),
+    // Beside the tsconfig base, because that is what the `paths` entry in it
+    // says: `"std/collection": ["./std/collection.ts"]` is relative to the
+    // config, so the two have to move together or tsc resolves nothing.
+    stdLibrary: join(here, "std"),
 });
 
 export * from "./index.ts";
