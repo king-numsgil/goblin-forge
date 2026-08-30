@@ -326,6 +326,26 @@ Nobody writes a destructor; there is no syntax for one. A value is released
 because its *type* says it owns something. Every test in the suite asserts the
 live allocation count is zero when the program exits, automatically.
 
+**`move` empties a name. `take` empties a place.**
+
+```ts
+const s = take(xs[0]);        // xs[0] is now "" — a real value, and still there
+const held = take(this.pending);
+```
+
+They are two operations rather than one, because they promise different things
+about what is left behind and only one of those promises is checkable. `move`
+says the source cannot be read afterwards, and `GF0235` enforces it by following
+the *name*. There is no name behind `xs[i]` — a computed index is not something
+an analysis can follow — so `take` promises something else instead: the place
+holds the **default**, which you may read, and which the container's destructor
+destroys harmlessly. Rust splits these the same way, and for the same reason.
+
+`take` is exactly a read for a type that owns nothing, which matters inside a
+generic where `T` may be either. It refuses a class — what it would leave behind
+is an object whose constructor never ran — and refuses a by-value parameter,
+which the caller is going to release.
+
 Four methods, and `length` is the one that is not a call:
 
 ```ts
@@ -763,9 +783,10 @@ for (let i: usize = 0; i < orbits.size; i = i + 1) {
 orbits.forEach((name, au) => { … });
 ```
 
-One cost worth knowing: **taking a value out of a container copies it**, because
-moving out of an array element is not supported yet. For a scalar or a plain
-struct that is a `memcpy`; for a `string` it allocates.
+One cost worth knowing: **reading a value out of a container copies it** — the
+container keeps its own, so there are two afterwards. For a scalar or a plain
+struct that is a `memcpy`; for a `string` it allocates. Where a value genuinely
+leaves, nothing is copied: `RingBuffer.pop` and `HashMap.remove` move it out.
 
 ### Functions are values, if they capture nothing
 
@@ -929,9 +950,7 @@ DECISIONS §25 is what the boundary turned out to be.
 
 Exceptions (`try`/`catch` and `throw`), escaping closures (`HeapFn`), static
 fields, top-level statements and top-level `const`. On arrays, everything past
-`push`/`pop`/`forEach`/`reserve`: `map`, `filter`, `reduce` and the rest — and
-**moving out of an element**, `move(xs[i])`, which is why taking a value out of
-a container copies it.
+`push`/`pop`/`forEach`/`reserve`: `map`, `filter`, `reduce` and the rest.
 
 All of them are declared or valid TypeScript, and all of them produce a
 `GF0001` diagnostic naming the construct and pointing at it.

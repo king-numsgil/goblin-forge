@@ -2767,6 +2767,123 @@ enumerates the directory rather than listing it, which closes the worst half.
 
 ---
 
+## §27 — `take`, and why it is not `move(xs[i])` *(settled and built, 2026-08-30)*
+
+§26 left "moving out of an array element" as the gap under `std/collection`:
+taking a value out of a container copies it, because `move(xs[i])` is refused.
+The capability was worth having. The **spelling** was not, and the reason is
+worth writing down because the obvious answer is wrong in a way that is quiet.
+
+### `move` promises something an element cannot keep
+
+What `move` gives you is not "the bytes are transferred" — that is the cheap
+half. It is that **the source cannot be read afterwards**, and `GF0235` says so
+at the site that tries. That promise is kept by tracking the *binding*, which is
+a name the compiler can follow.
+
+`xs[i]` is not a name. With a computed `i` there is no analysis that can say
+which slot is hollow, and there never will be. So `move(xs[i])` would compile to
+a transfer with **no** guarantee attached: `move(xs[0])` followed by
+`console.log(xs[0])` would print an empty string, silently, with nothing to
+report. DECISIONS §24 already recorded the project's view of that shape — "both
+produced a wrong answer rather than an error, which is the worse failure".
+
+Rust reaches the same conclusion and refuses `cannot move out of index`,
+offering `mem::take` and `mem::replace` instead. C++ allows `std::move(v[i])`
+and leaves a "valid but unspecified" value, which is a footgun with a long
+bibliography.
+
+### So the operation keeps a different promise, and keeps it dynamically
+
+`take(p)` hands back the value and **puts the default in its place**. Reading
+the slot afterwards is not undefined and not unguarded — it is *specified*: an
+empty `string`, a zeroed struct, an empty array. There is no moved-from state to
+track because nothing is moved-from; the place holds a real value, and the
+container's destructor destroys it harmlessly.
+
+| | source afterwards | kept by |
+|---|---|---|
+| `move(x)` | unreadable (`GF0235`) | static tracking — a binding only |
+| `take(p)` | the default, readable | the write-back — any place |
+
+Two operations rather than one word with two meanings. `move` out of an element
+or a field is now `GF0002` naming `take`, where it used to be `GF0001` implying
+a gap.
+
+### The write-back is the entire feature
+
+A MIR `Move` transfers bytes and nothing else. The backend nulls a **one-word
+handle** as insurance — so `move` out of a `string` element would have been
+accidentally safe — but an aggregate's "value" is its address and there is no
+word to null, so a struct's bytes stay exactly where they were. For a local that
+is safe because drop elaboration removes the drop; for an element of an array
+that is still going to be destroyed in full, it is a double free.
+
+`Init(place, Default)` after the read is what makes the slot destroyable again.
+`Init` rather than `Assign`, because there is nothing left in the place to
+destroy. Drop elaboration needed **no change**: the `Move` carries a projection
+so `applyOperand` leaves the array initialised, and the `Init` carries one so
+nothing is marked. That the pass needed nothing is the strongest evidence the
+shape is right.
+
+`pop` is the existing operation that moves out of an element, and it is safe for
+a different reason — it *shortens* the array, so the hollowed slot is outside it.
+
+### What it refuses, and why each one
+
+- **A class.** What would be left is an object whose constructor never ran, which
+  is exactly what `zeroed<T>()` refuses to produce. Keeping that rule true in
+  both places is worth more than the copies it costs — and it is why
+  `BinaryHeap`'s sift still copies rather than being rewritten with `take`:
+  trading `BinaryHeap<C>` away for a `memcpy` on the element types least likely
+  to be in a heap is the wrong way round.
+- **A by-value parameter**, `GF0236`, for `move`'s reason exactly: the caller
+  releases the argument, so emptying the callee's separate handle frees one
+  buffer twice.
+- **A temporary.** There is nowhere to put the default back into, and the value
+  is already the statement's own.
+
+A **trivial** type is allowed and is exactly a read — nothing owns anything, so
+there is nothing to take and nothing to put back. That matters inside a generic,
+where `T` may be either and the call site should not have to know which.
+
+### Two defects it turned up
+
+**A null array handle was not an empty array.** Zeroed bytes are a `T[]` the
+language can already hand you — `zeroed<S>()` over a struct with an array field,
+the storage between `Default` and a constructor's field initialiser — and they
+are null rather than the shared static empty array. `gf_array_len`,
+`gf_array_capacity` and `gf_array_free` each null-checked *on their own*, which
+made null look supported: it reported length zero, iterated zero times and freed
+cleanly. `push` and `reserve` did not, and computed a header sixteen bytes below
+null. So `zeroed<S>(); s.xs.push(1)` was an access violation, reachable with no
+`take` anywhere near it. `array_bounds` is the one rule now, and it also avoids
+forming `null - 16` at all, which is undefined in Rust whether or not it is
+dereferenced.
+
+**A program's own name did not win over the prelude's.** The globals are matched
+by *text* — `if (name === MOVE)` — which is unremarkable for `nativeCast` and
+stops being so the moment one of them is an ordinary English word. A program
+with `function take(s: string)` had every call to it intercepted, and the
+complaint was about a place to put a default back into: a sentence about a
+feature the author had never used. `shadowsPrelude` asks tsc which declaration
+the name resolves to, which is exact rather than heuristic — a user file is a
+module, so its `function take` shadows the global rather than colliding with it.
+This was latent for every intrinsic and is fixed for all of them, which is the
+same argument `STD_MODULES` makes for being keyed by specifier before name,
+arriving for the globals.
+
+### Still open
+
+`take` on a class stays refused, and if that is ever relaxed it should relax
+together with `zeroed<C>()` — they are one rule, not two.
+
+`BinaryHeap`'s sift still copies. A `swap` written with three `take`s costs no
+allocation at all, and the only thing standing in the way is the class rule
+above.
+
+---
+
 ## Class decisions *(2026-08-12, milestone 8)*
 
 ### Every class has a vtable pointer, including one with no virtual methods

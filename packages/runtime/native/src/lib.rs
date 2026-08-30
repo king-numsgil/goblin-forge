@@ -852,6 +852,36 @@ unsafe fn array_header(a: GfArray) -> *mut ArrayHeader {
     unsafe { a.sub(ARRAY_HEADER) as *mut ArrayHeader }
 }
 
+/// **A null handle is an empty array**, and every entry point here has to agree
+/// about that.
+///
+/// Zeroed bytes are a `T[]` that the language can produce in more than one way:
+/// `zeroed<S>()` over a struct with an array field, the storage `alloc<S>()`
+/// hands back, the husk `take` leaves behind, and every object between `Default`
+/// and the field initialiser that runs in its constructor. None of those go
+/// through `gf_array_empty`, so none of them hold the shared static header —
+/// they hold null.
+///
+/// `gf_array_len`, `gf_array_capacity` and `gf_array_free` each null-checked on
+/// their own, which made null *look* supported: an empty array reported length
+/// zero, iterated zero times and freed cleanly. `push` and `reserve` did not,
+/// and computed a header address sixteen bytes below null. So
+/// `zeroed<S>(); s.xs.push(1)` was an access violation, with nothing about it
+/// visible from the source.
+///
+/// Reading the two words through this is what makes the rule one rule rather
+/// than a null check per function — and it avoids forming `null - 16` at all,
+/// which is undefined behaviour in Rust whether or not it is dereferenced.
+unsafe fn array_bounds(a: GfArray) -> (u64, u64) {
+    if a.is_null() {
+        return (0, 0);
+    }
+    unsafe {
+        let header = array_header(a);
+        ((*header).len, (*header).cap)
+    }
+}
+
 /// The bytes a buffer of `cap` elements occupies, header included.
 ///
 /// The header is a fixed two words and does *not* grow with the element's
@@ -973,9 +1003,7 @@ pub unsafe extern "C" fn gf_array_reserve(
 ) {
     unsafe {
         let current = *slot;
-        let header = array_header(current);
-        let len = (*header).len;
-        let cap = (*header).cap;
+        let (len, cap) = array_bounds(current);
         if capacity <= cap {
             return;
         }
@@ -984,10 +1012,11 @@ pub unsafe extern "C" fn gf_array_reserve(
         let align = (align as usize).max(1);
         let bytes = array_bytes(capacity, stride);
 
-        // `cap == 0` is the shared static empty array, which is not the
-        // allocator's — handing it to `realloc` would be handing back a pointer
-        // mimalloc never gave out. It also has no elements to carry over, so
-        // there is nothing to relocate.
+        // `cap == 0` is the shared static empty array — or a null handle, which
+        // means the same thing. Neither is the allocator's, so handing one to
+        // `realloc` would be handing back a pointer mimalloc never gave out.
+        // Neither has elements to carry over either, so there is nothing to
+        // relocate.
         let raw = if cap == 0 {
             let fresh = raw_alloc_at(bytes, align, ARRAY_HEADER);
             if fresh.is_null() {
@@ -997,7 +1026,8 @@ pub unsafe extern "C" fn gf_array_reserve(
             trace("alloc");
             fresh
         } else {
-            let grown = raw_realloc_at(header as *mut u8, bytes, align, ARRAY_HEADER);
+            let grown =
+                raw_realloc_at(array_header(current) as *mut u8, bytes, align, ARRAY_HEADER);
             if grown.is_null() {
                 // The original block is still live, exactly as it is in C. It is
                 // also unreachable from here on, so there is nothing to do with
@@ -1027,9 +1057,7 @@ pub unsafe extern "C" fn gf_array_push_slot(
 ) -> *mut u8 {
     unsafe {
         let current = *slot;
-        let header = array_header(current);
-        let len = (*header).len;
-        let cap = (*header).cap;
+        let (len, cap) = array_bounds(current);
 
         if len == cap {
             // Doubling, from a floor of four. Amortised constant, and the same
@@ -1048,12 +1076,20 @@ pub unsafe extern "C" fn gf_array_push_slot(
             // *relocated*, not duplicated. Each one keeps whatever it owns and
             // there is exactly one of it afterwards, so no copy operation runs
             // and nothing is freed twice.
-            core::ptr::copy_nonoverlapping(current, elements, (len * stride) as usize);
+            //
+            // Guarded on the length rather than on the pointer, which covers
+            // both empty cases at once: `copy_nonoverlapping` from a null source
+            // is undefined in Rust even for a count of zero.
+            if len != 0 {
+                core::ptr::copy_nonoverlapping(current, elements, (len * stride) as usize);
+            }
             LIVE.fetch_add(1, Ordering::SeqCst);
             trace("alloc");
+            // `cap == 0` is the shared static empty array or a null handle, and
+            // neither is the allocator's to take back.
             if cap != 0 {
                 LIVE.fetch_sub(1, Ordering::SeqCst);
-                raw_free(header as *mut u8);
+                raw_free(array_header(current) as *mut u8);
                 trace("free");
             }
             *slot = elements;
@@ -1070,6 +1106,13 @@ pub unsafe extern "C" fn gf_array_push_slot(
 /// The buffer is kept, exactly as `std::vector::pop_back` keeps its capacity.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gf_array_pop(a: GfArray) {
+    // A null handle is an empty array and there is nothing to shorten. Popping
+    // an empty array is unchecked either way — the *element* has already been
+    // read by the time this runs — but a null dereference here would be a fault
+    // rather than the garbage the rest of the language's unchecked reads give.
+    if a.is_null() {
+        return;
+    }
     unsafe {
         let header = array_header(a);
         if (*header).len != 0 {
@@ -2218,6 +2261,43 @@ mod tests {
             "a smaller reserve shrank the buffer"
         );
         unsafe { gf_array_free(a) };
+    }
+
+    /// A null handle is an empty array everywhere, not just where somebody
+    /// remembered to check.
+    ///
+    /// Zeroed bytes are a `T[]` the language can produce — `zeroed<S>()` over a
+    /// struct with an array field, the husk `take` leaves, the storage between
+    /// `Default` and a constructor's field initialiser. `len`, `capacity` and
+    /// `free` each null-checked on their own, which made null *look* supported;
+    /// `push` and `reserve` computed a header sixteen bytes below null, so
+    /// `zeroed<S>(); s.xs.push(1)` was an access violation.
+    #[test]
+    fn a_null_handle_is_an_empty_array() {
+        let empty: GfArray = core::ptr::null_mut();
+        assert_eq!(unsafe { gf_array_len(empty) }, 0);
+        assert_eq!(unsafe { gf_array_capacity(empty) }, 0);
+        // Both no-ops rather than faults.
+        unsafe { gf_array_free(empty) };
+        unsafe { gf_array_pop(empty) };
+
+        // Pushing onto one allocates a buffer and reseats the handle, exactly as
+        // pushing onto the shared static empty array does.
+        let mut a: GfArray = core::ptr::null_mut();
+        let slot = unsafe { gf_array_push_slot(&mut a, 8, 8) };
+        unsafe { (slot as *mut u64).write(0x1234) };
+        assert!(!a.is_null());
+        assert_eq!(unsafe { gf_array_len(a) }, 1);
+        assert_eq!(unsafe { (a as *mut u64).read() }, 0x1234);
+        unsafe { gf_array_free(a) };
+
+        // And so does reserving on one.
+        let mut b: GfArray = core::ptr::null_mut();
+        unsafe { gf_array_reserve(&mut b, 32, 8, 8) };
+        assert!(!b.is_null());
+        assert_eq!(unsafe { gf_array_len(b) }, 0);
+        assert!(unsafe { gf_array_capacity(b) } >= 32);
+        unsafe { gf_array_free(b) };
     }
 
     /// The property a hash table takes the *low* bits of a hash depends on: two

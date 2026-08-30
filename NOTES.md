@@ -118,9 +118,9 @@ Functions (`export` → C ABI, plain → internal, no body → `extern "C"` impo
 the twelve widths, `boolean`, `string`, structs from `interface`/type literals,
 `FixedArray<T, N>`, `Pointer<T>`, `if`/`while`/`for`/`break`/`continue`/`return`,
 blocks and scoping, arithmetic with the full width rules, `nativeCast`, `move`,
-template literals, `console.*`, object literals, field and element access and
-assignment, `.length`, `hashOf<T>()` / `equalsOf<T>()`, and **classes**: fields,
-a constructor, methods,
+`take`, template literals, `console.*`, object literals, field and element access
+and assignment, `.length`, `hashOf<T>()` / `equalsOf<T>()`, and **classes**:
+fields, a constructor, methods,
 `super(…)` and `super.m(…)`, single inheritance, virtual dispatch through a
 vtable, slicing on copy, and a generated destructor that chains to the base's.
 Accessibility modifiers (`public`/`private`/`protected`) are accepted and
@@ -184,6 +184,20 @@ in fixed steps comes from: `reserve` goes through mimalloc's `realloc` and can
 extend a block in place, where `push` doubles and allocates a second buffer
 beside the first.
 
+**`take(p)`** is `move` for a place that is not a local — an element, a field,
+anything assignable. They are two operations because they promise different
+things about the source: `move` leaves nothing and `GF0235` enforces it by
+tracking the binding, and `take` leaves the **default**, which is a real value
+you may read. Only one of those is keepable for `xs[i]`, since a computed index
+is not something an analysis follows. DECISIONS §27; Rust draws the same line
+with `mem::take`.
+
+**A prelude global is only the prelude's when the program has not declared that
+name itself.** The intrinsics are matched by text, so `shadowsPrelude`
+(`lower/module.ts`) asks tsc which declaration a name resolves to before any of
+them claims it — otherwise a program's own `function take` is intercepted by the
+intrinsic that shares the spelling.
+
 ## What it does not have yet
 
 Grep for these markers — each is a `GF0001` with a file and a line, never a
@@ -204,7 +218,7 @@ backend failure:
 | a **`static` on a generic class** — `Box.zero()` | `lower/width.ts`, the identifier path. The name stands for every instantiation and TypeScript has no syntax for choosing — it never needed one, because a `static` may not use `T`. Implementable as one copy emitted under the bare name, since a static that cannot mention `T` is the same body for all of them | later |
 | a **conditional type** whose condition mentions a type parameter | `checker/src/types.ts`, `erase`. A real limit rather than a gap: the substitution replaces `T` at the *leaf* with a machine type, and re-evaluating a conditional needs the `ts.Type`s put back and the whole thing instantiated, which tsc exports no way to do | not without tsc |
 | `p.deref()` on a `Pointer<T>` whose `T` is a scalar | `checker/src/types.ts` — a `Reference<T>` is only written for a class or a contract, which is the row above and not a generics question. **The rest of `Pointer<T>` inside a generic works**: `p[i]` both ways, `offset`, `address`, `erase`/`reify`, `free`/`freeArray`. This row used to claim all of it was broken by `Pointer`'s conditional type; measured against the tree at 2026-08-29, it is not — the conditional's default constraint is a union of two shapes that both contain `CorePointer<T>`, so every member of that interface resolves through it | later |
-| **moving out of an array element** — `move(xs[i])` | `lower/body.ts`, `#move` — `GF0001`, moving out of anything but a local. The consequence is in `std/collection`: taking a value out of a container copies it, so `BinaryHeap`'s sift copies rather than swaps. The semantics are already right — a moved-from value here is *empty* rather than invalid, so the element would be left destructible — and what is missing is the tracking, which is per-binding and has nothing to say about `xs[i]` | later |
+| `take` on a **class** | `lower/body.ts`, `#take` — `GF0002`. What it would leave behind is an object whose constructor never ran, which is what `zeroed<T>()` refuses to produce; the two are one rule and should relax together. It is why `BinaryHeap`'s sift still copies rather than being written with three `take`s | — |
 | `Reference<string>` | `checker/src/types.ts`, `eraseReferent`. Copying a `string` clones its buffer, so borrowing one is worth doing; nothing reads one back through a reference yet | later |
 | two classes with the same name in two modules | `classes.ts`, `collectClasses` — a stated restriction, see DECISIONS §11.8 | later |
 | a consumer linking archive *vN* while importing its generic source at *vN+1* | nothing detects it, and the layouts would disagree silently. Needs the archive to carry a stamp the consumer reads at compile time — a publishing format DECISIONS §11.8 deliberately did not build. A packaging question for as long as the consumer imports the library's own source. DECISIONS §25 | later |

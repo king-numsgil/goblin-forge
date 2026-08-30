@@ -787,6 +787,54 @@ declare function alloc<T>(init: DeepPartial<T>): Pointer<T>;
 declare function move<T>(value: T): T;
 
 /**
+ * Take the value out of a place, leaving the default one there.
+ *
+ *     const oldest = take(slots[head]);   // slots[head] is now empty
+ *     const buffer = take(this.pending);  // the field is now an empty array
+ *
+ * This is `move` for somewhere that is not a local — an array element, a field,
+ * anything you can assign to — and it is a *different operation* rather than the
+ * same one in a new position, because what it leaves behind is different.
+ *
+ * **`move` leaves nothing; `take` leaves the default.** After `move(s)` the
+ * binding may not be read and `GF0235` says so. After `take(xs[i])` the element
+ * holds an empty `string`, a zeroed struct, an empty array — a real value, which
+ * you may read, and which the container's destructor will destroy harmlessly.
+ *
+ * The reason for the split is that only one of those promises can be kept. A
+ * binding is a name and the compiler can follow it; `xs[i]` with a computed `i`
+ * is not something any analysis can track, so a `move` there would leave a
+ * hollow slot nothing could warn you about — reading it would be a wrong answer
+ * with no diagnostic. Rust refuses to move out of an index for exactly this
+ * reason and offers `mem::take` instead; C++ allows it and leaves a
+ * "valid but unspecified" value, which is the footgun this avoids by specifying
+ * it.
+ *
+ * ```ts
+ * const first = take(xs[0]);
+ * console.log(xs[0]);        // "" — defined, not undefined behaviour
+ * console.log(xs.length);    // unchanged: taking is not removing
+ * ```
+ *
+ * **For a type that owns nothing this is exactly a read**, and costs exactly a
+ * read: there is nothing to take and nothing to put back, so `take(counts[i])`
+ * on an `i32[]` is `counts[i]`. That matters inside a generic, where `T` may
+ * turn out to be either.
+ *
+ * Three things it will not do:
+ *
+ *   * **A class** is refused. What would be left behind is an object whose
+ *     constructor never ran, which is the same thing `zeroed<T>()` refuses to
+ *     produce and refuses for the same reason.
+ *   * **A by-value parameter** is `GF0236`, exactly as `move` is: the caller
+ *     releases the argument when the call ends, so emptying the callee's copy
+ *     would free the same buffer twice.
+ *   * **A temporary** — `take(f())` — is refused, because there is no place to
+ *     put anything back into. Bind it and take from the binding, or just use it.
+ */
+declare function take<T>(value: T): T;
+
+/**
  * A checked downcast: `Reference<T>` if the value really is a `T`, `null` if not.
  *
  * ```ts

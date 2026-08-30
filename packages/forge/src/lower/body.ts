@@ -74,6 +74,7 @@ import {
     RUNTIME,
     STRING_FROM_BYTES,
     STRING_FROM_CSTRING,
+    TAKE,
     TRY_CAST,
 } from "./tables.ts";
 import { BOOL, type FnRecord, ISIZE, STRING, type Typed, typed, U64, USIZE, VOID } from "./types.ts";
@@ -3512,13 +3513,24 @@ export class BodyLowerer extends BoundaryLowerer {
         if (!ts.isIdentifier(expression.expression)) {
             return undefined;
         }
-        const name = expression.expression.text;
+        // **The program's own name wins over the prelude's.** These are matched
+        // by text, so a program declaring `function take(…)` would otherwise have
+        // every call to it intercepted by the intrinsic that shares the spelling.
+        // The empty string matches no intrinsic, which is the whole of the
+        // arrangement; the chain then falls through to `resolveCallee` and calls
+        // what the author actually wrote.
+        const name = this.outer.shadowsPrelude(expression.expression)
+            ? ""
+            : expression.expression.text;
 
         if (name === NATIVE_CAST) {
             return this.cast(expression, natural);
         }
         if (name === MOVE) {
             return this.#move(expression);
+        }
+        if (name === TAKE) {
+            return this.#take(expression);
         }
         if (name === FIXED_ARRAY) {
             return this.fixedArray(expression, natural);
@@ -5141,10 +5153,18 @@ export class BodyLowerer extends BoundaryLowerer {
     /**
      * `move(x)` — hand ownership somewhere else instead of copying.
      *
-     * Only a named local can be moved from: moving out of a temporary is what
-     * already happens, and moving out of a field would leave a hole in something
-     * still alive, which needs the partial-initialisation tracking that arrives
-     * with aggregates.
+     * **Only a named local**, and that is a rule rather than a gap: what `move`
+     * promises is that the source is not readable afterwards (`GF0235`), and
+     * that promise is kept by tracking the *binding*. There is no binding to
+     * track for `xs[i]`, and none there could be — a computed index is not
+     * something an analysis follows — so a `move` there would leave a hollow
+     * slot that nothing could warn about, and reading it would be a wrong answer
+     * with no diagnostic.
+     *
+     * {@link #take} is the operation for a place, and it keeps a different
+     * promise: it puts the default back, so the source holds a real value rather
+     * than nothing. Rust draws the same line — `mem::take` exists because moving
+     * out of an index does not.
      */
     #move(expression: ts.CallExpression): Typed | undefined {
         const argument = expression.arguments[0];
@@ -5153,7 +5173,15 @@ export class BodyLowerer extends BoundaryLowerer {
         }
 
         if (!ts.isIdentifier(argument)) {
-            this.outer.unsupported(argument, "moving out of anything but a local");
+            this.outer.error(
+                argument,
+                "GF0002",
+                "`move` empties a *name*, and what makes that safe is that the name " +
+                "cannot be read afterwards — which is checkable for a binding and is " +
+                `not for an element or a field. \`${TAKE}\` is the one for a place: it ` +
+                "hands back the value and leaves the default behind, so what stays " +
+                "there is a real value rather than a hole.",
+            );
             return undefined;
         }
         const binding = this.scopes.lookup(argument.text);
@@ -5208,6 +5236,123 @@ export class BodyLowerer extends BoundaryLowerer {
 
         this.#moved.set(binding.local, argument.text);
         return {operand: {kind: "Move", value: bindingPlace(binding)}, type: binding.type};
+    }
+
+    /**
+     * `take(p)` — the value out of a place, and the default put back in it.
+     *
+     * Two statements: read the bytes out with a `Move`, then `Init` the place
+     * with `Default`. `Init` rather than `Assign` because there is nothing left
+     * in the place to destroy — the value has just left — and an `Assign` would
+     * run a destructor over bytes that are no longer anybody's.
+     *
+     * **The write-back is the whole feature.** A `Move` is a transfer of bytes
+     * and nothing more: the backend nulls a one-word handle as insurance, but an
+     * aggregate's "value" is its address and there is no word to null, so the
+     * source is left byte-identical. For a *local* that is safe because drop
+     * elaboration stops the drop; for an element of an array that is still going
+     * to be destroyed in full, it is a double free. Putting a default back is
+     * what makes the slot destroyable again, and it is why this is `take` rather
+     * than `move` — see the prelude for the naming.
+     *
+     * Nothing is added to `#moved`. The place holds a value afterwards, so
+     * reading it is correct rather than something to diagnose.
+     */
+    #take(expression: ts.CallExpression): Typed | undefined {
+        const argument = expression.arguments[0];
+        if (expression.arguments.length !== 1 || argument === undefined) {
+            this.outer.error(expression, "GF0002", `\`${TAKE}\` takes exactly one place.`);
+            return undefined;
+        }
+
+        // A place, and not merely a value. `take(f())` has nothing to put the
+        // default back into — the result is already this statement's own, and
+        // taking from it would be a no-op dressed as an operation.
+        if (
+            !ts.isIdentifier(argument) &&
+            !ts.isElementAccessExpression(argument) &&
+            !ts.isPropertyAccessExpression(argument)
+        ) {
+            this.outer.error(
+                argument,
+                "GF0002",
+                `\`${TAKE}\` needs somewhere to put the default back — a name, an element ` +
+                "or a field. This expression is a value rather than a place, and it is " +
+                "already yours: use it directly.",
+            );
+            return undefined;
+        }
+
+        if (ts.isIdentifier(argument)) {
+            const binding = this.scopes.lookup(argument.text);
+            if (binding === undefined) {
+                this.outer.unsupported(argument, `the name \`${argument.text}\``);
+                return undefined;
+            }
+            if (this.#readMoved(argument, binding.local, argument.text)) {
+                return undefined;
+            }
+            // The same double free `move` is refused for, and for the same
+            // reason (REWRITE-PLAN §11.4): the callee's handle is a *different*
+            // local from the caller's temporary, so emptying this one leaves the
+            // caller to release a buffer this call gave away.
+            if (this.#isOwningParameter(binding)) {
+                this.outer.error(
+                    argument,
+                    "GF0236",
+                    `\`${argument.text}\` is a by-value parameter, and the caller releases ` +
+                    `it when the call ends — so \`${TAKE}\` here would free the same buffer ` +
+                    "twice. Copy it instead (assigning it is a copy), or take a " +
+                    `\`Reference<${renderType(binding.type)}>\` if the caller should keep ` +
+                    "ownership and this should not.",
+                );
+                return undefined;
+            }
+        }
+
+        const value = this.value(argument, undefined);
+        if (value === undefined) {
+            return undefined;
+        }
+        const place = this.placeOfSubject(argument, value);
+        if (place === undefined) {
+            return undefined;
+        }
+        const type = value.type;
+
+        // Nothing owns anything, so there is nothing to take and nothing to put
+        // back: this is a read, and costs a read. Worth having rather than
+        // refusing, because inside a generic `T` may be either and the call site
+        // should not have to know which.
+        if (!this.#owns(type)) {
+            return {operand: {kind: "Copy", value: place}, type};
+        }
+
+        // What would be left behind is a `C` whose constructor never ran, which
+        // is precisely what `zeroed<C>()` refuses to produce. Refusing here keeps
+        // that rule true everywhere rather than in one of the two places it could
+        // be broken — and if it is ever relaxed, both should relax together.
+        if (type.kind === "class") {
+            this.outer.error(
+                argument,
+                "GF0002",
+                `\`${TAKE}\` would leave a \`${renderType(type)}\` whose constructor never ` +
+                `ran, and no such object exists in this language — \`${NATIVE_ZEROED}\` ` +
+                "refuses to make one for the same reason. Take a field of it, hold it " +
+                `behind a \`Pointer<${renderType(type)}>\`, or copy it.`,
+            );
+            return undefined;
+        }
+
+        const taken = this.temporaryTyped(argument, type, {
+            kind: "Use",
+            value: {kind: "Move", value: place},
+        });
+        // After the read and never before: the default has to land on storage
+        // whose value has already left, or it destroys nothing and overwrites
+        // something.
+        this.push({kind: "Init", place, rvalue: {kind: "Default"}});
+        return taken;
     }
 
     /**

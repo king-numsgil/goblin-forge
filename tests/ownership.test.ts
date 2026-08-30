@@ -649,8 +649,11 @@ describe("the moved-from check", () => {
         expect(result.leaked).toBe(0);
     });
 
-    test("moving out of a field is GF0001, not a silent partial move", async () => {
-        await expectRejected(
+    test("moving out of a field is refused, and points at `take`", async () => {
+        // A rule rather than a gap, and the message has to say which: what `move`
+        // promises is that the source cannot be read afterwards, and that is
+        // checkable for a binding and not for a field.
+        const diagnostic = await expectRejected(
             "own-move-field",
             `interface S { s: string; }
 
@@ -660,7 +663,21 @@ describe("the moved-from check", () => {
          console.log(t);
          return 0;
        }\n`,
-            "GF0001",
+            "GF0002",
+        );
+        expect(diagnostic.message).toContain("take");
+    });
+
+    test("moving out of an element is refused the same way", async () => {
+        await expectRejected(
+            "own-move-element",
+            `export function main(): i32 {
+         const xs: string[] = ["a"];
+         const s: string = move(xs[0]);
+         console.log(s);
+         return 0;
+       }\n`,
+            "GF0002",
         );
     });
 
@@ -728,5 +745,374 @@ describe("the moved-from check", () => {
         );
         expect(result.stdout).toBe("0 ..\n");
         expect(result.leaked).toBe(0);
+    });
+});
+
+/**
+ * `take(p)` — the value out of a place, and the default left in it.
+ *
+ * The operation `move` is not, and the split is the point. `move` promises the
+ * source cannot be read afterwards, which is kept by tracking the *binding* —
+ * there is no binding behind `xs[i]`, and a computed index is not something an
+ * analysis follows, so a `move` there would leave a hollow slot nothing could
+ * warn about. `take` promises something else and keeps it dynamically: what is
+ * left behind is the default, which is a real value.
+ *
+ * Rust draws the same line — `mem::take` exists because moving out of an index
+ * does not — and C++ draws it in the other place, leaving a "valid but
+ * unspecified" value that nothing specifies.
+ *
+ * Every test here is leak-checked automatically, which is the assertion that
+ * matters: the whole hazard is a value being released twice or not at all.
+ */
+describe("take", () => {
+    test("out of an array element, which the array survives", async () => {
+        const result = await run(
+            "take-element",
+            `export function main(): i32 {
+         const xs: string[] = ["a", "b", "c"];
+         const first = take(xs[0]);
+         // The length does not change — taking is not removing — and the slot
+         // holds an empty string rather than nothing.
+         console.log(\`[\${first}] [\${xs[0]}] \${xs[1]} \${xs.length}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("[a] [] b 3\n");
+        expect(result.leaked).toBe(0);
+    });
+
+    test("out of a struct element, where the source is not one word", async () => {
+        // The case a `move` alone cannot make safe. A one-word handle is nulled
+        // by the backend as insurance; an aggregate's value *is* its address, so
+        // there is nothing to null and the bytes stay exactly where they were.
+        // The write-back is the only thing standing between this and a double
+        // free.
+        const result = await run(
+            "take-struct-element",
+            `interface E { key: string; n: i32 }
+
+       export function main(): i32 {
+         const xs: E[] = [{key: "a", n: 1}, {key: "b", n: 2}];
+         const taken = take(xs[0]);
+         console.log(\`\${taken.key} \${taken.n} [\${xs[0].key}] \${xs[0].n} \${xs.length}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("a 1 [] 0 2\n");
+        expect(result.leaked).toBe(0);
+    });
+
+    test("out of an element that owns a buffer of its own", async () => {
+        const result = await run(
+            "take-nested",
+            `export function main(): i32 {
+         const xs: string[][] = [];
+         const inner: string[] = ["p", "q"];
+         xs.push(inner);
+         const got = take(xs[0]);
+         console.log(\`\${got.length} \${got[0]} \${xs[0].length} \${xs.length}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("2 p 0 1\n");
+        expect(result.leaked).toBe(0);
+    });
+
+    test("out of a field, and out of a field through `this`", async () => {
+        const result = await run(
+            "take-field",
+            `interface S { s: string }
+
+       class Holder {
+         private held: string[] = [];
+         add(s: string): void { this.held.push(s); }
+         drain(): string[] { return take(this.held); }
+         get size(): usize { return this.held.length; }
+       }
+
+       export function main(): i32 {
+         const a: S = { s: "x" + "y" };
+         console.log(\`[\${take(a.s)}] [\${a.s}]\`);
+
+         const h = new Holder();
+         h.add("a");
+         h.add("b");
+         const out = h.drain();
+         console.log(\`\${out.length} \${out[0]} \${h.size}\`);
+         // And the drained field is a usable empty array, not a hole.
+         h.add("c");
+         console.log(\`\${h.size}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("[xy] []\n2 a 0\n1\n");
+        expect(result.leaked).toBe(0);
+    });
+
+    test("out of a local, which stays readable — unlike after a `move`", async () => {
+        const result = await run(
+            "take-local",
+            `export function main(): i32 {
+         let s = "a" + "b";
+         const t = take(s);
+         console.log(\`[\${t}] [\${s}]\`);
+         s = "again";
+         console.log(s);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("[ab] []\nagain\n");
+        expect(result.leaked).toBe(0);
+    });
+
+    test("on a type that owns nothing, it is exactly a read", async () => {
+        // Worth having rather than refusing: inside a generic `T` may be either,
+        // and the call site should not have to know which.
+        const result = await run(
+            "take-trivial",
+            `export function main(): i32 {
+         const xs: i32[] = [1, 2, 3];
+         const n = take(xs[0]);
+         console.log(\`\${n} \${xs[0]} \${xs.length}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("1 1 3\n");
+    });
+
+    test("under a substitution, at an owning `T` and a trivial one", async () => {
+        const result = await run(
+            "take-generic",
+            `class Slots<T> {
+         private items: T[] = [];
+         add(v: T): void { this.items.push(v); }
+         steal(i: usize): T { return take(this.items[i]); }
+         get size(): usize { return this.items.length; }
+       }
+
+       export function main(): i32 {
+         const s = new Slots<string>();
+         s.add("a");
+         s.add("b");
+         console.log(\`\${s.steal(0)} \${s.size}\`);
+
+         const n = new Slots<i32>();
+         n.add(7);
+         console.log(\`\${n.steal(0)} \${n.size}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("a 2\n7 1\n");
+        expect(result.leaked).toBe(0);
+    });
+
+    test("taking every element of a long array, in a loop", async () => {
+        const result = await run(
+            "take-loop",
+            `export function main(): i32 {
+         const xs: string[] = [];
+         for (let i: i32 = 0; i < 200; i = i + 1) { xs.push(\`item \${i}\`); }
+         let total: usize = 0;
+         for (let i: usize = 0; i < xs.length; i = i + 1) {
+           const s = take(xs[i]);
+           total = total + s.length;
+         }
+         console.log(\`\${total} \${xs.length} [\${xs[0]}]\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("1490 200 []\n");
+        expect(result.leaked).toBe(0);
+    });
+
+    test("taking twice from one place hands back the default the second time", async () => {
+        const result = await run(
+            "take-twice",
+            `export function main(): i32 {
+         const xs: string[] = ["a"];
+         const one = take(xs[0]);
+         const two = take(xs[0]);
+         console.log(\`[\${one}] [\${two}] \${xs.length}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("[a] [] 1\n");
+        expect(result.leaked).toBe(0);
+    });
+
+    test("a swap, written with takes and no copy at all", async () => {
+        const result = await run(
+            "take-swap",
+            `export function main(): i32 {
+         const xs: string[] = ["a", "b"];
+         const held = take(xs[0]);
+         xs[0] = take(xs[1]);
+         xs[1] = move(held);
+         console.log(\`\${xs[0]} \${xs[1]} \${xs.length}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("b a 2\n");
+        expect(result.leaked).toBe(0);
+    });
+
+    test("through a `Reference`, into the caller's value", async () => {
+        const result = await run(
+            "take-reference",
+            `interface S { s: string }
+
+       function steal(v: Reference<S>): string { return take(v.s); }
+       function drain(xs: Reference<string[]>): string { return take(xs[0]); }
+
+       export function main(): i32 {
+         const a: S = { s: "x" + "y" };
+         console.log(\`[\${steal(a)}] [\${a.s}]\`);
+
+         const xs: string[] = ["p", "q"];
+         console.log(\`\${drain(xs)} [\${xs[0]}] \${xs.length}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("[xy] []\np [] 2\n");
+        expect(result.leaked).toBe(0);
+    });
+
+    test("out of a capture, which writes through to the frame that owns it", async () => {
+        // A capture is a borrow, so `move` is `GF0238` — there is nothing there to
+        // empty. `take` writes a default through the borrow instead, which is
+        // defined, and is what makes the second call see the empty value rather
+        // than a hole.
+        const result = await run(
+            "take-capture",
+            `function apply(f: LocalFn<() => void>): void { f(); f(); }
+
+       export function main(): i32 {
+         let s = "a" + "b";
+         let seen = "";
+         apply(() => { seen = seen + "[" + take(s) + "]"; });
+         console.log(\`\${seen} [\${s}]\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("[ab][] []\n");
+        expect(result.leaked).toBe(0);
+    });
+
+    test("a `FixedArray` element", async () => {
+        const result = await run(
+            "take-fixed",
+            `export function main(): i32 {
+         const buf: FixedArray<string, 3> = fixedArray(3, "z");
+         const got = take(buf[1]);
+         console.log(\`[\${got}] [\${buf[1]}] \${buf[0]}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("[z] [] z\n");
+        expect(result.leaked).toBe(0);
+    });
+
+    test("a class is refused, for `zeroed`'s reason", async () => {
+        const diagnostic = await expectRejected(
+            "take-class",
+            `class C { s: string; constructor(s: string) { this.s = s; } }
+
+       export function main(): i32 {
+         const xs: C[] = [];
+         xs.push(new C("a"));
+         const c = take(xs[0]);
+         return 0;
+       }\n`,
+            "GF0002",
+        );
+        expect(diagnostic.message).toContain("constructor never ran");
+    });
+
+    test("a by-value parameter is refused, exactly as it is for `move`", async () => {
+        await expectRejected(
+            "take-parameter",
+            `function f(s: string): string { return take(s); }
+
+       export function main(): i32 {
+         console.log(f("a" + "b"));
+         return 0;
+       }\n`,
+            "GF0236",
+        );
+    });
+
+    test("a temporary is refused, because there is nowhere to put the default", async () => {
+        const diagnostic = await expectRejected(
+            "take-temporary",
+            `function make(): string { return "a" + "b"; }
+
+       export function main(): i32 {
+         const s = take(make());
+         console.log(s);
+         return 0;
+       }\n`,
+            "GF0002",
+        );
+        expect(diagnostic.message).toContain("place");
+    });
+
+    test("a program's own `take` wins over the prelude's", async () => {
+        // The prelude's globals are matched by *text*, which is fine for
+        // `nativeCast` and stops being fine when one of them is an ordinary
+        // English word. Without this, a program with its own `take` would have
+        // every call to it intercepted, and the complaint would be about a place
+        // to put a default back into — a sentence about a feature the author
+        // never used.
+        //
+        // tsc has already decided: a user file is a module, so a `function take`
+        // in it shadows the global rather than colliding with it.
+        const result = await run(
+            "take-shadowed",
+            `function take(s: string): string { return "took " + s; }
+       function move(n: i32): i32 { return n * 2; }
+
+       export function main(): i32 {
+         console.log(take("it"));
+         console.log(\`\${move(21)}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("took it\n42\n");
+        expect(result.leaked).toBe(0);
+    });
+
+    test("an imported `take` wins too, since the shadow travels with the name", async () => {
+        const result = await run(
+            "take-shadowed-import",
+            `import { take } from "./mine.ts";
+
+       export function main(): i32 {
+         console.log(take("it"));
+         return 0;
+       }\n`,
+            {
+                files: {
+                    "mine.ts": `export function take(s: string): string { return "mine " + s; }\n`,
+                },
+            },
+        );
+        expect(result.stdout).toBe("mine it\n");
+    });
+
+    test("taking from a moved-from local is still `GF0235`", async () => {
+        await expectRejected(
+            "take-moved",
+            `function sink(s: string): void { console.log(s); }
+
+       export function main(): i32 {
+         let s = "a" + "b";
+         sink(move(s));
+         const t = take(s);
+         console.log(t);
+         return 0;
+       }\n`,
+            "GF0235",
+        );
     });
 });

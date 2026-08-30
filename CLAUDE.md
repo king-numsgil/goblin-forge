@@ -220,8 +220,11 @@ directory, and it is a `RuntimeFiles` member for that reason alone: nothing
 - A key answers `hashOf` and `equalsOf`. A class answers by declaring
   `hash(): u64` and `equals(other: Reference<K>): boolean`; that hook is the
   extension point, resolved by name at the instantiation.
-- **Taking a value out copies it**, because `move(xs[i])` is `GF0001`. `pop` is
-  the exception and is why `HashMap.remove` is written the way it is.
+- **`take(p)` is how a value leaves a slot without being copied** — it hands the
+  value back and puts the default in its place (DECISIONS §27). It refuses a
+  class, for `zeroed`'s reason, which is why `BinaryHeap`'s sift still copies.
+  Reading without emptying — `valueAt`, `peek`, `at` — still copies, and should:
+  that is a read, not a take.
 - A top-level `const` still does not lower, so a constant inside one of these is
   a local or an argument.
 

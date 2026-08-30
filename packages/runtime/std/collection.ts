@@ -45,13 +45,17 @@
  * and `equals(other: Reference<K>): boolean`, which is the extension point and
  * is the same job a `std::hash<T>` specialisation does in C++.
  *
- * **Taking a value out copies it.** `move(xs[i])` is not available today
- * (`GF0001`: moving out of anything but a local), so `valueAt` hands back a copy
- * and `BinaryHeap`'s sift copies rather than swaps. For a scalar or a POD struct
- * — which is what a simulation's maps and queues hold — a copy is a `memcpy` and
- * this costs nothing. For a `string` or an owning struct it is a real
- * allocation, and it is the one place these containers are worse than
- * `std::unordered_map`. It is written down at each site.
+ * **Reading a value out copies it; emptying a slot does not.** `valueAt`,
+ * `peek` and `at` hand back a copy, and should — the container keeps its value,
+ * so there are two of it afterwards. Where a value genuinely *leaves*, `take`
+ * moves it and puts the default in the slot, which is what `RingBuffer.pop`
+ * does and what `HashMap.remove` gets from `pop` plus a `move`.
+ *
+ * `BinaryHeap`'s sift is the one place that copies where it could take, and
+ * deliberately: `take` refuses a class — it would leave one whose constructor
+ * never ran — so writing the sift with it would stop `BinaryHeap<C>` existing
+ * for any class `C`. For a scalar or a POD struct, which is what a simulation's
+ * maps and queues hold, a copy is a `memcpy` either way.
  */
 
 /**
@@ -635,6 +639,15 @@ export class BinaryHeap<T> {
      * Three copies where a `std::swap` would be three moves, for the reason the
      * class comment gives. The `move` on the way back is the one of the three
      * that can be a move, because `held` is a local.
+     *
+     * **`take` would remove the other two** — `take(items[a])`, then
+     * `items[a] = take(items[b])`, then `items[b] = move(held)` — and it is
+     * deliberately not used, because `take` refuses a class (it would leave one
+     * whose constructor never ran) and that would stop `BinaryHeap<C>` existing
+     * for any class `C`. Trading a capability for a copy on the element types
+     * least likely to be in a heap is the wrong way round; a heap of scalars or
+     * POD structs, which is what an event queue is, copies by `memcpy` either
+     * way.
      */
     private swap(a: usize, b: usize): void {
         const held = this.items[a];
@@ -712,13 +725,14 @@ export class RingBuffer<T> {
     /**
      * Take the oldest element off the front. Unchecked when empty.
      *
-     * A copy out, then the slot is zeroed — which is what destroys the original,
-     * so the element is not released twice and the slot stays valid for the
-     * destructor that runs when the ring itself goes away.
+     * `take` is exactly this operation and does it in one step: the value comes
+     * out and the default goes in, so the slot stays a real value for the
+     * destructor that runs when the ring itself goes away, and nothing is
+     * copied on the way. Written by hand it was a copy out and then a
+     * `zeroed<T>()` back — correct, and an allocation per pop for an owning `T`.
      */
     pop(): T {
-        const out = this.slots[this.first];
-        this.slots[this.first] = zeroed<T>();
+        const out = take(this.slots[this.first]);
         this.first = this.wrap(1);
         this.count = this.count - 1;
         return out;

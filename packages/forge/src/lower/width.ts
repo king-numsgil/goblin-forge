@@ -51,6 +51,7 @@ import {
     POINTER_METHODS,
     STRING_FROM_BYTES,
     STRING_FROM_CSTRING,
+    TAKE,
     TRY_CAST,
 } from "./tables.ts";
 import {
@@ -842,11 +843,18 @@ export abstract class WidthPass extends Emitter {
             this.outer.unsupported(expression.expression, "this call target");
             return ERROR;
         }
+        // The program's own name wins over the prelude's; see the same guard in
+        // `BodyLowerer.#call`. The two passes have to agree about which calls are
+        // intrinsics, or one of them answers about a function the other never
+        // saw.
+        const name = this.outer.shadowsPrelude(expression.expression)
+            ? ""
+            : expression.expression.text;
         // `alloc(C, …)`, `sizeOf<T>()`, `alignOf<T>()` — the type is
         // the call's own, which tsc has already worked out.
         // `allocArray<T>(n)` — separately, because its *first* argument is the
         // count rather than a class name to be skipped.
-        if (expression.expression.text === ALLOC_ARRAY) {
+        if (name === ALLOC_ARRAY) {
             if (!this.argumentWidths(expression.arguments)) {
                 return ERROR;
             }
@@ -854,10 +862,10 @@ export abstract class WidthPass extends Emitter {
         }
 
         if (
-            expression.expression.text === ALLOC ||
-            expression.expression.text === NATIVE_SIZE_OF ||
-            expression.expression.text === NATIVE_ALIGN_OF ||
-            expression.expression.text === NATIVE_ZEROED
+            name === ALLOC ||
+            name === NATIVE_SIZE_OF ||
+            name === NATIVE_ALIGN_OF ||
+            name === NATIVE_ZEROED
         ) {
             if (!this.argumentWidths(expression.arguments.slice(1))) {
                 return ERROR;
@@ -869,16 +877,16 @@ export abstract class WidthPass extends Emitter {
         // type and never the argument's, so the arguments are walked for their
         // own sake and the result is a `u64` or a `boolean` whatever they were.
         if (
-            expression.expression.text === HASH_OF ||
-            expression.expression.text === EQUALS_OF
+            name === HASH_OF ||
+            name === EQUALS_OF
         ) {
             if (!this.argumentWidths(expression.arguments)) {
                 return ERROR;
             }
-            return typed(expression.expression.text === HASH_OF ? U64 : BOOL);
+            return typed(name === HASH_OF ? U64 : BOOL);
         }
 
-        if (expression.expression.text === NATIVE_CAST) {
+        if (name === NATIVE_CAST) {
             // The target width is the call's own type, which tsc has already
             // resolved from the type argument. Reading it from there rather than
             // from `typeArguments` means an aliased or inferred `T` still works.
@@ -889,7 +897,7 @@ export abstract class WidthPass extends Emitter {
             return target === undefined ? ERROR : typed(target);
         }
 
-        if (expression.expression.text === FIXED_ARRAY) {
+        if (name === FIXED_ARRAY) {
             // The *contextual* type first. `fixedArray(4, 0)` infers `T` from the
             // literal `0`, which is a plain `number` and has no width — the
             // annotation on the binding is what says `i32`, and it is the answer that
@@ -905,13 +913,13 @@ export abstract class WidthPass extends Emitter {
         // `tryCast<T>(x)` is a `Reference<T>`, nullable. The nullability is tsc's
         // business and never reaches the machine type: the pair is the same
         // sixteen bytes either way, with a zero itab meaning "no".
-        if (expression.expression.text === TRY_CAST) {
+        if (name === TRY_CAST) {
             const type = this.tryCastTarget(expression);
             return type === undefined ? ERROR : typed(type);
         }
 
         // `cstring(s)` is a `CString` whatever it was handed.
-        if (expression.expression.text === CSTRING) {
+        if (name === CSTRING) {
             const argument = expression.arguments[0];
             if (argument !== undefined && this.width(argument).kind === "error") {
                 return ERROR;
@@ -919,7 +927,7 @@ export abstract class WidthPass extends Emitter {
             return typed(CSTRING_TYPE);
         }
 
-        if (expression.expression.text === CSTRING_FREE) {
+        if (name === CSTRING_FREE) {
             const argument = expression.arguments[0];
             if (argument !== undefined && this.width(argument).kind === "error") {
                 return ERROR;
@@ -931,8 +939,8 @@ export abstract class WidthPass extends Emitter {
         // owned one — the copy that turns bytes nobody tracks into bytes a scope
         // releases.
         if (
-            expression.expression.text === STRING_FROM_CSTRING ||
-            expression.expression.text === STRING_FROM_BYTES
+            name === STRING_FROM_CSTRING ||
+            name === STRING_FROM_BYTES
         ) {
             if (!this.argumentWidths(expression.arguments)) {
                 return ERROR;
@@ -941,10 +949,21 @@ export abstract class WidthPass extends Emitter {
         }
 
         // `move(x)` has whatever type `x` has; it changes ownership, not type.
-        if (expression.expression.text === MOVE) {
+        if (name === MOVE) {
             const argument = expression.arguments[0];
             if (expression.arguments.length !== 1 || argument === undefined) {
                 this.outer.error(expression, "GF0235", "`move` takes exactly one value.");
+                return ERROR;
+            }
+            return this.width(argument);
+        }
+
+        // `take(p)` likewise: it is the value that comes out of the place, and
+        // what is left behind is the same type again.
+        if (name === TAKE) {
+            const argument = expression.arguments[0];
+            if (expression.arguments.length !== 1 || argument === undefined) {
+                this.outer.error(expression, "GF0002", "`take` takes exactly one place.");
                 return ERROR;
             }
             return this.width(argument);

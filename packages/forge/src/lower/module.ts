@@ -37,7 +37,7 @@ import {
     renderType,
     type Substitution,
 } from "@goblin-forge/checker";
-import { stdLibrary } from "@goblin-forge/runtime/paths";
+import { globalDeclarations, stdLibrary } from "@goblin-forge/runtime/paths";
 import ts from "typescript";
 import {
     buildClass,
@@ -87,6 +87,17 @@ import { capturedNames, thisParameterOf, usesThis } from "./closures.ts";
  * nothing about which program did it.
  */
 const MAX_INSTANTIATION_DEPTH = 64;
+
+/**
+ * A path in the one shape two of them can be compared in.
+ *
+ * Separators because Windows accepts both and tsc hands back a mixture; case
+ * because the same file reaches the compiler as `C:\…` from a config and
+ * `c:/…` from a resolution, and on Windows those are one file.
+ */
+function normalisePath(path: string): string {
+    return path.replaceAll("\\", "/").toLowerCase();
+}
 
 export class Lowerer {
     readonly #program: ts.Program;
@@ -746,6 +757,48 @@ export class Lowerer {
             symbol = this.#checker.getAliasedSymbol(symbol);
         }
         return symbol.declarations?.some(ts.isFunctionDeclaration) ?? false;
+    }
+
+    /**
+     * Whether a name that *spells* a prelude intrinsic was declared by the
+     * program instead.
+     *
+     * The globals are matched by **text** — `if (name === MOVE)` — which is fine
+     * for `sizeOf` and `nativeCast` and stops being fine the moment one of them
+     * is an ordinary English word. A program with its own
+     * `function take(s: string)` would have every call to it intercepted by the
+     * intrinsic, and the complaint would be about a place to put a default back
+     * into, which is a sentence about a feature the author never used.
+     *
+     * tsc has already answered this: a user file is a module, so a `function
+     * take` in it *shadows* the global rather than colliding with it, and the
+     * symbol at the call site is the program's. So the question is only whether
+     * the symbol's declarations are the prelude's, and the answer is exact
+     * rather than heuristic.
+     *
+     * This is the same argument `STD_MODULES` makes for being keyed by specifier
+     * before name — a flat table of names matches any declaration that happens to
+     * share one — arriving for the globals.
+     */
+    shadowsPrelude(expression: ts.Expression): boolean {
+        if (!ts.isIdentifier(expression)) {
+            return false;
+        }
+        let symbol = this.#checker.getSymbolAtLocation(expression);
+        if (symbol === undefined) {
+            return false;
+        }
+        if ((symbol.flags & ts.SymbolFlags.Alias) !== 0) {
+            symbol = this.#checker.getAliasedSymbol(symbol);
+        }
+        const declarations = symbol.declarations ?? [];
+        if (declarations.length === 0) {
+            return false;
+        }
+        const prelude = normalisePath(globalDeclarations());
+        return declarations.every(
+            (declaration) => normalisePath(declaration.getSourceFile().fileName) !== prelude,
+        );
     }
 
     functionValueAt(expression: ts.Expression): FnRecord | undefined {

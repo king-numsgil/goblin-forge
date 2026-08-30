@@ -436,6 +436,34 @@ describe("capacity and reserve", () => {
         expect(result.stdout).toBe("1 256 7\n");
     });
 
+    test("a zeroed array handle is a usable empty array", async () => {
+        // Zeroed bytes are a `T[]` the language can hand you — here through
+        // `zeroed<S>()` — and they are *not* the shared static empty array: they
+        // are null. `length`, `capacity` and iteration null-checked already,
+        // which made null look supported; `push` and `reserve` computed a header
+        // sixteen bytes below null and faulted.
+        //
+        // Nothing about this needs `take`, which is how it went unnoticed: it is
+        // reachable from `zeroed` alone.
+        const result = await run(
+            "vec-zeroed-handle",
+            `interface S { xs: i32[]; ys: string[] }
+
+       export function main(): i32 {
+         const s = zeroed<S>();
+         console.log(\`\${s.xs.length} \${s.xs.capacity}\`);
+         s.xs.push(1);
+         s.xs.push(2);
+         s.ys.reserve(8);
+         s.ys.push("a");
+         console.log(\`\${s.xs.length} \${s.xs[0]} \${s.xs[1]} \${s.ys.length} \${s.ys[0]}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("0 0\n2 1 2 1 a\n");
+        expect(result.leaked).toBe(0);
+    });
+
     test("`capacity` and `reserve` are a `T[]`'s, not a `FixedArray`'s", async () => {
         // A fixed array has no buffer to have room in and its length *is* its
         // capacity, so neither question means anything there. tsc is what says

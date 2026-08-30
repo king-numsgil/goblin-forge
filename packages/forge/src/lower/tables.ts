@@ -17,6 +17,17 @@ export const NO_UNWIND: UnwindAction = {kind: "Unreachable"};
 export const NATIVE_CAST = "cast";
 /** The intrinsic that spells "hand this value's ownership somewhere else". */
 export const MOVE = "move";
+/**
+ * `take(p)` — the value out of a place, and the default left in it.
+ *
+ * The half of `move` that works somewhere other than a local. They are two
+ * operations rather than one spelling because they promise different things
+ * about what is left behind, and only one of those promises is checkable: a
+ * moved-from *binding* is unreadable and `GF0235` says so, and a moved-from
+ * *element* could never be, because `xs[i]` with a computed `i` is not a thing
+ * an analysis can track. So this one leaves something real instead.
+ */
+export const TAKE = "take";
 /** The intrinsic that builds a `FixedArray<T, N>`. */
 export const FIXED_ARRAY = "fixedArray";
 /** `tryCast<T>(value)` — a checked downcast, `null` when the answer is no. */
