@@ -107,6 +107,17 @@ quo rather than a new class of dependency.
 `GOBLIN_CLANG` names a specific one. `llvm-objdump` is wanted only by tests, and
 they fall back to GNU `objdump`.
 
+**On an MSVC target, clang builds the runtime's C dependencies too**, as
+`clang-cl` — `cToolchain` in `packages/runtime/src/build.ts` sets `CC`/`CXX` for
+the target triple. MSVC 14.43.34808 miscompiles mimalloc at `/O1`, which
+`optLevel` reaches at `O1`, `Os` and `Oz`, into an allocator that hands out
+overlapping blocks; `cl` at `/O2` and 14.38.33130 at `/O1` are both fine, which
+is what makes it a compiler defect rather than a property of the level.
+DECISIONS §28 is the reasoning and the measurement. There used to be an
+`opt-level = 2` pin on `libmimalloc-sys` instead; it is gone, and reaching for
+one again would cover a single named package rather than whatever C arrives
+next.
+
 **They are checked before the type-check, not when they are first run.**
 `packages/forge/src/toolchain.ts` looks for clang, cargo and the linker — `ar`
 instead, for a `static-lib`, since an archive is not a link — and a build that

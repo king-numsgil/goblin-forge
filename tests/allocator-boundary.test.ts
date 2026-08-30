@@ -18,10 +18,14 @@
  *   from a caller that is not us, before it fails — so no amount of testing
  *   the language would have found it.
  *
- * The cause was `libmimalloc-sys` inheriting the user's optimisation level:
- * `cc` turns levels 1, s and z into MSVC's `/O1`, and mimalloc built that way
- * faults. The runtime's `Cargo.toml` pins that one package now, and the
- * comment there is the reasoning.
+ * The cause was **MSVC 14.43.34808 miscompiling mimalloc at `/O1`**, which
+ * levels 1, s and z all reach through `cc`. It was read at first as mimalloc
+ * being broken at `/O1` and answered with a pin to `-O2`; holding the source
+ * and flags fixed and moving one thing at a time said otherwise — C against
+ * C++ made no difference, mimalloc 3.3.2 against 3.5.0 made no difference, and
+ * 14.38.33130 against 14.43.34808 made all of it. The pin is gone and C
+ * dependencies are built with clang on MSVC instead, so these six levels now
+ * genuinely reach the allocator. DECISIONS §28.
  *
  * So the assertion that matters is not "it compiles" — it is that a real C
  * caller can allocate through our allocator, *touch what it gets back*, and

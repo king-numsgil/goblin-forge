@@ -3538,3 +3538,89 @@ honest:
 - a test that encodes in TypeScript, decodes in Rust, re-encodes in Rust, and
   requires byte equality — because "it decoded without error" is not evidence of
   anything.
+
+---
+
+## §28 — C dependencies are built with clang on MSVC *(settled and built, 2026-08-30)*
+
+§15 vendors mimalloc's C source and lets `cc` build it, at whatever level the
+program asked for. That produced an allocator which faulted at `O1`, `Os` and
+`Oz`, and the answer at the time was to pin `libmimalloc-sys` to `-O2` on the
+reading that **mimalloc is broken at `/O1`**.
+
+That reading was wrong, and it is worth recording how it was wrong, because it
+was a plausible conclusion from a real experiment. The original measurement —
+pin the package to 2 and it works, pin it to 1 and it breaks, with the rest of
+the crate at the other level — correctly proved that *this dependency's C build*
+was the variable. It did not prove which property of that build, and "the
+optimisation level" was the one thing visibly being changed.
+
+### What was actually varying
+
+Holding mimalloc's source and every flag fixed and moving one thing at a time:
+
+| moved | result |
+|---|---|
+| C against C++ (`build.cpp(true)` on MSVC) | no difference — both fault |
+| mimalloc 3.3.2 against 3.5.0 | no difference — both fault, in different functions |
+| MSVC 14.38.33130 against 14.43.34808 at `/O1` | **14.38 clean, 14.43 faults** |
+| either toolset at `/O2` | clean |
+| clang-cl at every level | clean |
+
+So it is a code-generation defect in one MSVC version, not a property of `/O1`
+and not anything about mimalloc. Linux never reproduced it at any level, which
+the pin had left recorded as an open question rather than an answer.
+
+The failure is unambiguous corruption rather than anything subtle. In a working
+build four allocations of four different sizes come back in four pages; in the
+broken one they come back at `…30000008`, `…30000040`, `…30000200` and
+`…30000000` — overlapping each other, on top of the arena's own metadata — and
+the access violation arrives a few allocations later inside mimalloc's own
+bitmap search, which is the first code to read a structure that has been
+overwritten.
+
+Two details made this expensive to find, and both are worth knowing. `vcvars64.bat`
+falls back to an *older* toolset when it cannot find `vswhere.exe`, so a
+hand-built repro can silently use a different compiler than `cc` does and
+exonerate it. And nothing in `libmimalloc-sys` declares `rerun-if-changed` for
+its C sources, so editing them does not rebuild.
+
+### The fix is the compiler, not the level
+
+`packages/runtime/src/build.ts` names `clang-cl` as `CC`/`CXX` for MSVC targets,
+and the pin is gone: `optLevel` now reaches the allocator honestly, which is
+what it always claimed to do.
+
+clang is the right thing to reach for rather than a lateral move. It is already
+required on every machine that builds anything here — the backend emits text IR
+and hands it to clang (§17), and `packages/forge/src/toolchain.ts` checks for it
+before the type-check — and `clang-cl` is that same binary under the name `cc`
+looks for, so this adds no dependency. The alternative of staying on `cl` and
+keeping a version-conditional pin means encoding a defect in one vendor's
+compiler into the build, and re-testing it at every toolset bump.
+
+Three details of how it is wired, each of which could reasonably have gone the
+other way:
+
+- **Keyed on the target triple, not on `process.platform`.** The question is not
+  "is this Windows" — MinGW is `windows` too and wants the GNU driver. Setting
+  `CC_<triple>` lets `cc` decide whether the override applies by asking the
+  question it was going to ask anyway.
+- **`clang-cl`, not `clang --driver-mode=cl`.** `cc` picks the command-line
+  dialect from the *name* of the program it was handed, so the second spelling
+  is given `-o` and `-c` in gcc's spelling and fails with a page of "unknown
+  argument".
+- **`-EHsc` is added.** mimalloc's C++ path has a `try` in `alloc.c`; clang
+  refuses one with exceptions disabled. `cl` accepts it, with warning C4530 and
+  unspecified behaviour if it ever throws — so that library had been built
+  without `/EHsc` for as long as it has been vendored, which nothing noticed.
+
+An override already in the environment is left alone. `CC_<triple>` is the
+documented way to name a C compiler, and a build that was told which one to use
+should not be argued with.
+
+### What still has no test
+
+That a *future* C dependency is covered. The wiring is per-target rather than
+per-package, so it applies to whatever `cc` builds — but `tests/allocator-boundary.test.ts`
+exercises the allocator, and the allocator is the only C there is today.

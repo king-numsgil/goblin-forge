@@ -494,24 +494,33 @@ Five things to know:
   and that is fine. The machinery for taking over unqualified `malloc()` calls
   is deliberately not enabled.
 
-#### The allocator is not built at your optimisation level
+#### The allocator is built at your optimisation level, by clang
 
-`optLevel` is a claim about *your* code. The runtime is built at the same level
-— it is compiled for your target, so it has to be built somewhere — but
-**mimalloc is pinned**, in `packages/runtime/native/Cargo.toml`, and that is
-not tidiness.
+The runtime is compiled for your target, so it has to be built somewhere, and it
+is built at the level you asked for — mimalloc included. What is *not* taken
+from your build is the C compiler: on an MSVC target, C dependencies are built
+with `clang-cl` rather than `cl`.
 
 `cc` turns cargo's `OPT_LEVEL` into a flag for mimalloc's C, and on MSVC levels
-`1`, `s` and `z` all become `/O1`. mimalloc built that way returns blocks that
-fault when they are touched: a C library given these callbacks died on its third
-allocation at those three levels and was clean at `0`, `2` and `3`.
+`1`, `s` and `z` all become `/O1`. **MSVC 14.43.34808 miscompiles mimalloc
+there**: it returns overlapping blocks — four allocations of four different
+sizes come back inside one page, on top of the arena's own metadata — and the
+access violation arrives a moment later inside mimalloc's bitmap search. A C
+library given these callbacks died on its third allocation at those three levels
+and was clean at `0`, `2` and `3`.
+
+The first answer was to pin mimalloc to `-O2`, on the reading that `/O1` broke
+it. That reading was wrong, and the measurement that corrected it held the
+source and every flag fixed while moving one thing at a time: C against C++,
+no difference; mimalloc 3.3.2 against 3.5.0, no difference; MSVC 14.38.33130
+against 14.43.34808, the whole difference. clang is clean at every level, and
+Linux never reproduced any of it. DECISIONS §28.
 
 It was invisible from inside the language, which is why it lasted. A Goblin
 program that allocates heavily is fine at every level — the allocations have to
 arrive through the exported `gf_mi_*` trampolines, *from a caller that is not
 us*, before anything goes wrong. `tests/allocator-boundary.test.ts` is a real C
-library doing exactly that at all six levels, and it fails at three of them if
-the pin is removed.
+library doing exactly that at all six levels.
 
 ### Two Goblin artefacts in one process: `runtime: "shared"`
 

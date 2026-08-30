@@ -369,21 +369,22 @@ import { mi_calloc, mi_free, mi_malloc, mi_realloc } from "std/alloc";
 SDL_SetMemoryFunctions(mi_malloc, mi_calloc, mi_realloc, mi_free);
 ```
 
-**mimalloc is always built at `-O2`, whatever `optLevel` says.** That option is
-a claim about your code; the allocator is a vendored C library and its build is
-the compiler's business. The reason is not tidiness: `cc` maps optimisation
-levels onto MSVC flags as `{1, s, z}` → `/O1` and `{2, 3}` → `/O2`, and mimalloc
-built with `/O1` hands back blocks that fault when they are touched. A C library
-given the callbacks above died on its third allocation at `O1`, `Os` and `Oz`,
-and was clean at `O0`, `O2` and `O3`.
+mimalloc is built at your `optLevel` like everything else, and on Windows it is
+built by **clang rather than MSVC**. That is not a preference. MSVC 14.43.34808
+miscompiles mimalloc at `/O1` — which `optLevel` reaches at `O1`, `Os` and `Oz`
+— into an allocator that hands out overlapping blocks: a C library given the
+callbacks above died on its third allocation at exactly those three levels and
+was clean at `O0`, `O2` and `O3`. MSVC 14.38.33130 is fine at `/O1`, both are
+fine at `/O2`, and clang is fine everywhere, so the compiler is the variable and
+the compiler is what changed. clang is already required to build anything here,
+and `clang-cl` is the same binary under the name `cc` looks for.
 
-What that costs is worth knowing rather than discovering. On Windows, nothing:
-`O2` and `O3` already produced `/O2`, so only the three broken levels move. On
-Linux and macOS the level is passed straight through, so an `O0` or `O1` build
-gains an optimised allocator — and an **`Os` or `Oz` build gets a larger one
-than it asked for**, since mimalloc no longer shrinks with the rest. Whether
-those two levels are broken outside MSVC is untested;
-`tests/allocator-boundary.test.ts` covers all six and would say so.
+This applies to the C in the runtime's dependencies, on MSVC targets only. MinGW
+is `windows` too and keeps the GNU driver; Linux and macOS were never affected,
+and a run there with the old `-O2` pin removed found nothing. If you have named
+a compiler yourself with `CC_<triple>`, that is left alone.
+`tests/allocator-boundary.test.ts` is a real C library allocating through this
+boundary at all six levels.
 
 `"std/alloc"` is an **ambient module**: it resolves to no file and there is
 nothing to install, because the declaration in the prelude is the whole of it.

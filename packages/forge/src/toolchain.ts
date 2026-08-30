@@ -2,9 +2,11 @@
  * What a build needs on the machine, checked before it needs it.
  *
  * This compiler produces native code by driving native tools: clang turns the
- * IR the backend emits into an object, cargo builds the runtime for the target,
- * and the platform's own linker or archiver assembles the result. None of them
- * are optional and none of them ship inside this compiler.
+ * IR the backend emits into an object, cargo builds the runtime for the target
+ * — with clang again, under its `clang-cl` name, for the C that runtime
+ * depends on when the target is MSVC — and the platform's own linker or
+ * archiver assembles the result. None of them are optional and none of them
+ * ship inside this compiler.
  *
  * Without this, a machine with no clang type-checks the whole program, lowers
  * it, and then fails inside the backend with an `InternalError` — a `GF90xx`,
@@ -27,6 +29,7 @@
 
 import { locateLinker } from "@goblin-forge/backend";
 import type { Diagnostic } from "@goblin-forge/checker";
+import { msvcClang } from "@goblin-forge/runtime/build";
 import { accessSync, constants, statSync } from "node:fs";
 import { delimiter, isAbsolute, join, sep } from "node:path";
 
@@ -56,14 +59,28 @@ interface Tool {
  * also roughly the order somebody would install them in.
  */
 function required(kind: OutputKind): readonly Tool[] {
+    // One probe, asked once and passed on. It answers two questions — where
+    // the linker is, and whether this is an MSVC toolchain at all — and asking
+    // twice would be two chances to get a different answer.
+    const probe = locateLinker(kind);
+
     return [
         onPath(
             process.env["GOBLIN_CLANG"] ?? "clang",
             "compiles the LLVM IR the backend emits",
             "GOBLIN_CLANG",
         ),
+        // The same clang under the name `cc` wants, and only where it is used:
+        // C dependencies of the runtime are built with it on MSVC, because
+        // `cl` miscompiles mimalloc at `/O1` (DECISIONS §28). Usually free —
+        // `clang-cl` is `clang` with a different name on it — but a machine
+        // that has one without the other should be told here rather than
+        // inside cargo, which reports it as a `cc` error about a build script.
+        ...(probe.probed
+            ? [onPath(msvcClang(), "compiles the C in the runtime's dependencies")]
+            : []),
         onPath("cargo", "builds the Goblin runtime for your target"),
-        linker(kind),
+        linker(kind, probe),
     ];
 }
 
@@ -93,10 +110,9 @@ function onPath(name: string, what: string, override?: string): Tool {
  * a `static-lib` wants `ar` (or `lib.exe`) and a machine with no linker can
  * still build one.
  */
-function linker(kind: OutputKind): Tool {
+function linker(kind: OutputKind, probe: ReturnType<typeof locateLinker>): Tool {
     const archiving = kind === "static-lib";
     const what = archiving ? "bundles the objects into an archive" : "links the artefact";
-    const probe = locateLinker(kind);
 
     if (!probe.probed) {
         return archiving

@@ -45,28 +45,20 @@ opt-level = 3
 lto = true
 panic = "abort"
 
-# **The allocator is not built at the user's optimisation level.**
+# The allocator *is* built at the user's optimisation level, and used not to be.
 #
-# `packages/runtime/src/build.ts` builds this crate at whatever level the
-# program asked for, by overriding `CARGO_PROFILE_RELEASE_OPT_LEVEL`. That
-# reaches build scripts as `OPT_LEVEL`, and `cc` turns it into a flag for
-# mimalloc's C: on MSVC, levels `1`, `s` and `z` all become `/O1` and `2` and
-# `3` become `/O2`.
+# `libmimalloc-sys` was pinned here to `opt-level = 2`, because mimalloc built
+# through `cc` at `/O1` hands out overlapping blocks and then faults. That was
+# read as "mimalloc is broken at `/O1`" and it is not: MSVC 14.43.34808
+# miscompiles it there, 14.38.33130 does not, and clang is clean at every level.
+# So the fix is the compiler rather than the level —
+# `packages/runtime/src/build.ts` builds C dependencies with clang on MSVC
+# targets, and the comment there is the reasoning (DECISIONS §28).
 #
-# mimalloc built with `/O1` produces an allocator that faults. Measured on this
-# machine: a C program that calls `gf_mi_malloc` and touches what it gets back
-# dies on its third allocation with an access violation, at levels 1, s and z,
-# and is clean at 0, 2 and 3. Pinning *this one package* to 2 fixes it with the
-# rest of the crate still at the user's level, and pinning it to 1 breaks it
-# again with the rest at 2 — so it is this dependency and nothing else.
-#
-# The level was never a claim about the allocator anyway. It is what the user
-# wants for *their* code, and mimalloc is a vendored C library whose build is
-# our business rather than theirs.
-[profile.release.package.libmimalloc-sys]
-opt-level = 2
+# Worth keeping in mind if a pin is ever reached for again: it would silently
+# apply to one named package, and the next C dependency would not be covered.
 
-# The same, for a debug build nobody ships but everybody types.
+# `panic = "abort"`, for a debug build nobody ships but everybody types.
 #
 # The crate is `no_std`, so it cannot unwind at all — and `panic` defaults to
 # `"unwind"` per profile, not per crate. Without this, `cargo build` here fails
