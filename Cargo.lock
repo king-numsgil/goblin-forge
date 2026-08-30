@@ -183,7 +183,7 @@ dependencies = [
 
 [[package]]
 name = "goblin-backend-node"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "goblin-codegen",
  "goblin-mir",
@@ -197,7 +197,7 @@ dependencies = [
 
 [[package]]
 name = "goblin-codegen"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "cc",
@@ -208,7 +208,7 @@ dependencies = [
 
 [[package]]
 name = "goblin-mir"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "postcard",

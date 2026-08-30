@@ -44,7 +44,7 @@ import { pathToFileURL } from "node:url";
 
 import { materialise } from "./assets.ts";
 
-const VERSION = "0.2.0";
+const VERSION = "0.2.1";
 
 /**
  * What a build script exports.
