@@ -2763,12 +2763,13 @@ export class BodyLowerer extends BoundaryLowerer {
 
         const argument = expression.argumentExpression;
         // A literal subscript folds into the projection, so a constant index costs
-        // no arithmetic at all.
+        // no arithmetic at all. `literalDigits` because `1_000` is a valid
+        // subscript and `BigInt` throws on the underscore.
         if (ts.isNumericLiteral(argument) && !/[.eE]/.test(argument.getText())) {
             return {
                 place: {
                     local: base.local,
-                    projection: [...base.projection, {kind: "ConstIndex", value: BigInt(argument.getText())}],
+                    projection: [...base.projection, {kind: "ConstIndex", value: BigInt(literalDigits(argument.getText()))}],
                 },
                 element,
             };

@@ -634,12 +634,56 @@ describe("generics", () => {
        class Derived extends Base {}
 
        export function main(): i32 {
-         const d = new Derived();
-         const n: i32 = 8;
-         return d.echo<i32>(n);
-       }\n`,
+          const d = new Derived();
+          const n: i32 = 8;
+          return d.echo<i32>(n);
+        }\n`,
             );
             expect(result.exitCode).toBe(8);
+        });
+
+        test("a generic method may not override a non-generic one", async () => {
+            // tsc accepts the pair — it compares erased signatures, so
+            // `f<T>(x: T): T` overrides `f(x: i32): i32` as far as it is
+            // concerned, and `noImplicitOverride` even insists on the word. But
+            // a template has no slot, so the base's body would keep the one it
+            // inherited: a call through a base reference would run one body and
+            // a direct call the other. Refused at the declaration, where the
+            // name is.
+            const diagnostic = await expectRejected(
+                "generic-method-override",
+                `class Base { f(x: i32): i32 { return x; } }
+       class Derived extends Base {
+         override f<T>(x: T): T { return x; }
+       }
+
+       export function main(): i32 { return new Derived().f<i32>(3); }\n`,
+                "GF0002",
+            );
+            expect(diagnostic.message).toContain("`Derived.f` is generic");
+        });
+
+        test("a non-generic method may not override a generic one", async () => {
+            // The same disagreement from the other direction. The override
+            // takes a *new* slot — a template never had one to inherit — while
+            // the base's copy keeps resolving statically, which is the same two
+            // bodies for one call site arrived at by the other route.
+            //
+            // `T` is unused in the base's signature on purpose: tsc's own
+            // override check (TS2416) rejects a non-generic body whose
+            // parameters mention the base's `T`, so this is the shape that
+            // reaches the compiler at all.
+            const diagnostic = await expectRejected(
+                "generic-method-override-reverse",
+                `class Base { f<T>(x: i32): i32 { return x; } }
+       class Derived extends Base {
+         override f(x: i32): i32 { return x + 1; }
+       }
+
+       export function main(): i32 { return new Derived().f(3); }\n`,
+                "GF0002",
+            );
+            expect(diagnostic.message).toContain("`Derived.f` is not generic");
         });
 
         test("and an ordinary method is still virtual", async () => {

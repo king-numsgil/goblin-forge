@@ -38,6 +38,24 @@ describe("fixed arrays", () => {
         expect(result.stdout).toBe("10 20 30 0\n");
     });
 
+    test("a subscript may carry digit separators", async () => {
+        // `1_0` is ordinary TypeScript, and the fold that turns a literal
+        // subscript into a constant index once handed its raw text to `BigInt`,
+        // which throws on the underscore — a stack trace where a compile
+        // belonged. `literalDigits` cleans it, the same as every other site
+        // that asks a literal's value.
+        const result = await run(
+            "array-index-separators",
+            `export function main(): i32 {
+          const buf: FixedArray<i32, 11> = fixedArray(11, 7);
+          buf[1_0] = 42;
+          console.log(\`\${buf[9]} \${buf[1_0]}\`);
+          return 0;
+        }\n`,
+        );
+        expect(result.stdout).toBe("7 42\n");
+    });
+
     test("`length` is a constant, not a load", async () => {
         // The length is in the type, which is the whole difference between this and
         // the `T[]` that will one day be the `std::vector` equivalent.

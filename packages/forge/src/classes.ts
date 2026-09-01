@@ -616,6 +616,30 @@ export function buildClass(
         // copy per set of type arguments made at the call. See
         // {@link MethodTemplate}.
         if (member.typeParameters !== undefined && member.typeParameters.length > 0) {
+            // tsc accepts a generic method where the base's method of that name
+            // is not one — it compares erased signatures, so `f<T>(x: T): T`
+            // overrides `f(x: i32): i32` as far as it is concerned, and
+            // `noImplicitOverride` even insists on the word. The vtable cannot
+            // honour that: a template has no slot, so the base's body would
+            // keep the inherited one and dispatch would choose a body by the
+            // static type of the receiver — one call site, two answers.
+            // Refused here rather than left to do that. Statics are exempt:
+            // they never dispatch, so a `static` template and an instance
+            // method of the same name are in separate namespaces and both
+            // resolve statically.
+            if (!isStatic(member) && methods.has(member.name.text)) {
+                report.refuse(
+                    member,
+                    `\`${name}.${member.name.text}\` is generic, and the base's ` +
+                    "method of that name is not. A generic method has no vtable slot — " +
+                    "it is compiled once per set of type arguments — so this cannot take " +
+                    "over the slot it would inherit, and a call through a base reference " +
+                    "would run the base's body while a call on this class ran this one. " +
+                    "A generic method neither overrides nor is overridden: drop the type " +
+                    "parameters, or give them to the base's method too.",
+                );
+                return undefined;
+            }
             const parameters = typeParametersOf(member, checker);
             if (parameters === undefined) {
                 report.unsupported(member, "a method whose type parameters tsc could not resolve");
@@ -646,6 +670,26 @@ export function buildClass(
         }
 
         const methodName = member.name.text;
+        // The mirror of the refusal above, arrived at from the other direction:
+        // tsc accepts a non-generic method overriding the base's generic one,
+        // and the result is the same two answers — this takes a *new* slot,
+        // because a template never had one to inherit, while the base's copy
+        // keeps resolving statically. Only instance templates conflict: a
+        // `static` template is in a separate namespace, like the static above.
+        const inheritedTemplate = methodTemplates.get(methodName);
+        if (inheritedTemplate !== undefined && !inheritedTemplate.isStatic) {
+            report.refuse(
+                member,
+                `\`${name}.${methodName}\` is not generic, and the base's method ` +
+                "of that name is. A generic method has no vtable slot — it is compiled " +
+                "once per set of type arguments — so there is no slot for this to take " +
+                "over, and a call through a base reference would resolve the base's copy " +
+                "statically while a call on this class dispatched here. A generic method " +
+                "neither overrides nor is overridden: give this one the base's type " +
+                "parameters, or rename it.",
+            );
+            return undefined;
+        }
         const symbol = `${name}$${methodName}`;
         const inherited = methods.get(methodName);
         // An override keeps the slot it inherited, which is exactly what makes a

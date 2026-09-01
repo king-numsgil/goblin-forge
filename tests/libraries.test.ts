@@ -238,6 +238,43 @@ int main(void) {
         expect(stdout).toBe("42\n");
     }, CMAKE_TIMEOUT);
 
+    test("a struct of callbacks crosses the boundary", async () => {
+        // The mirror of the shape above: the *struct* holds the callback, so
+        // its definition is spelled with the callback's typedef name. The
+        // typedefs have to be emitted before the struct definitions for that
+        // to be C at all — this consumer is what proves they were.
+        const lib = await library(
+            "lib-callback-struct-field",
+            `interface Handler { speak: (a: i32) => i32; }
+
+       export function callHandler(h: Handler, x: i32): i32 { return h.speak(x); }
+
+       export function makeHandler(): Handler { return { speak: double }; }
+
+       function double(a: i32): i32 { return a * 2; }\n`,
+        );
+
+        const stdout = buildConsumer({
+            ...lib,
+            main: `#include <stdio.h>
+#include "main.h"
+
+static int32_t add_one(int32_t a) { return a + 1; }
+
+int main(void) {
+  /* C's callback, held in the struct this compiler laid out. */
+  Handler mine = { add_one };
+  printf("%d\\n", callHandler(mine, 41));
+
+  /* Goblin's struct, callback and all, handed back to C. */
+  printf("%d\\n", callHandler(makeHandler(), 21));
+  return 0;
+}
+`,
+        });
+        expect(stdout).toBe("42\n42\n");
+    }, CMAKE_TIMEOUT);
+
     test("a `static` method crosses as an ordinary function pointer", async () => {
         const lib = await library(
             "lib-callback-static",

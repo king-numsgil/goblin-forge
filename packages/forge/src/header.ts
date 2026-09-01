@@ -348,15 +348,67 @@ function emitStructs(module: Module): string[] {
         named.set(name, id);
     }
 
+    // Which structs need their name before their definition: the recursive
+    // ones, and every struct a callback's signature names. The callbacks'
+    // typedefs are emitted before the struct definitions — a struct field of
+    // callback type is spelled with one of those names — so any struct those
+    // typedefs mention has to be forward-declared first. A forward
+    // declaration is enough for the mention: C allows an incomplete parameter
+    // type in a declarator that is not a definition, and a typedef never is.
+    const forward = new Set<number>(recursive);
+    const nameThrough = (ty: number): void => {
+        const kind = module.types[ty]?.kind;
+        if (kind === undefined) {
+            return;
+        }
+        if (kind.kind === "Struct") {
+            forward.add(kind.value);
+            return;
+        }
+        if (kind.kind === "Pointer" || kind.kind === "Reference" || kind.kind === "Array") {
+            nameThrough(kind.value);
+            return;
+        }
+        if (kind.kind === "FixedArray") {
+            nameThrough(kind.element);
+            return;
+        }
+        // Through a nested callback too: its typedef is emitted in the same
+        // block, ahead of every struct definition, so the structs it names
+        // need the forward declaration as much as the outer one's do.
+        if (kind.kind === "FnPtr") {
+            const signature = module.sigs[kind.value];
+            for (const param of signature?.params ?? []) {
+                nameThrough(param.ty);
+            }
+            if (signature !== undefined) {
+                nameThrough(signature.ret);
+            }
+        }
+    };
+    for (const sig of fnPtrs) {
+        const signature = module.sigs[sig];
+        for (const param of signature?.params ?? []) {
+            nameThrough(param.ty);
+        }
+        if (signature !== undefined) {
+            nameThrough(signature.ret);
+        }
+    }
+
     const out: string[] = [];
     // A struct that appears inside its own definition needs its name declared
     // first, because a `typedef` name is not in scope until its own declarator
     // is finished — `typedef struct Node { Node *next; } Node;` does not
     // compile. So the name comes first and the definition is written as a plain
     // `struct Node { … };`, which is the idiom C headers have always used for
-    // this shape. Every other struct keeps the one-declaration form.
+    // this shape. The same form serves every struct the callback typedefs
+    // below name, whose forward declaration is already in: re-typedefing the
+    // name at the definition would be a redeclaration, which C89 and C99
+    // refuse even where C11 allows it. Every other struct keeps the
+    // one-declaration form.
     for (const id of order) {
-        if (!recursive.has(id)) {
+        if (!forward.has(id)) {
             continue;
         }
         const name = identifier(sym(module, module.structs[id]?.name ?? 0));
@@ -366,23 +418,27 @@ function emitStructs(module: Module): string[] {
         out.push("");
     }
 
-    // Before the structs would be wrong — a callback may take one — and after
-    // them is right for the same reason.
+    // Before the structs, because a struct *field* of callback type is spelled
+    // with one of these names — after them is invalid C for the struct of
+    // callbacks, which is a shape this language means to support. Ascending by
+    // signature id, which is a valid order for nesting: a signature that
+    // mentions another callback can only name one interned before it, so the
+    // inner typedef is always emitted first.
+    for (const sig of [...fnPtrs].sort((a, b) => a - b)) {
+        out.push(`typedef ${functionPointer(module, sig, fnPtrName(sig))};`);
+        out.push("");
+    }
     for (const id of order) {
         const def = module.structs[id];
         if (def === undefined) {
             continue;
         }
         const name = identifier(sym(module, def.name));
-        out.push(recursive.has(id) ? `struct ${name} {` : `typedef struct ${name} {`);
+        out.push(forward.has(id) ? `struct ${name} {` : `typedef struct ${name} {`);
         for (const field of def.fields) {
             out.push(`    ${member(module, field.ty, identifier(sym(module, field.name)))};`);
         }
-        out.push(recursive.has(id) ? "};" : `} ${name};`);
-        out.push("");
-    }
-    for (const sig of [...fnPtrs].sort((a, b) => a - b)) {
-        out.push(`typedef ${functionPointer(module, sig, fnPtrName(sig))};`);
+        out.push(forward.has(id) ? "};" : `} ${name};`);
         out.push("");
     }
     if (out.length > 0) {

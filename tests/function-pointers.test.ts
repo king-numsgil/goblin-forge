@@ -457,9 +457,15 @@ describe("the C boundary", () => {
         );
         expect(result.ok).toBe(true);
         const header = await Bun.file(result.headerPath!).text();
-        expect(header).toContain("} Point;");
-        // And before the typedef that mentions it.
-        expect(header.indexOf("} Point;")).toBeLessThan(header.indexOf("typedef int32_t (*GfFn"));
+        // Declared as a forward declaration, and defined after the callback —
+        // the callback's typedef comes before the struct definitions, because
+        // a struct field of callback type needs the name. A forward
+        // declaration is all the typedef's mention needs: C allows an
+        // incomplete parameter type in a declarator that is not a definition.
+        expect(header).toContain("struct Point {\n    int32_t x;\n    int32_t y;\n};");
+        expect(header.indexOf("typedef struct Point Point;")).toBeLessThan(
+            header.indexOf("typedef int32_t (*GfFn"),
+        );
     });
 
     test("a callback whose signature cannot cross is refused", async () => {
