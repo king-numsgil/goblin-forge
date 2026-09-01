@@ -31,13 +31,17 @@ describe("the intrinsics that are implemented", () => {
     });
 
     test("`move` hands ownership on", async () => {
+        // Into a binding rather than straight into `console.log`, which only
+        // *reads* its argument: a `move` there is discarded by the read and
+        // refused for it.
         const result = await run(
             "intr-move",
             `export function main(): i32 {
-         const a: string = "a" + "b";
-         console.log(move(a));
-         return 0;
-       }\n`,
+          const a: string = "a" + "b";
+          const b: string = move(a);
+          console.log(b);
+          return 0;
+        }\n`,
         );
         expect(result.stdout).toBe("ab\n");
         expect(result.leaked).toBe(0);

@@ -5236,7 +5236,11 @@ export class BodyLowerer extends BoundaryLowerer {
         }
 
         this.#moved.set(binding.local, argument.text);
-        return {operand: {kind: "Move", value: bindingPlace(binding)}, type: binding.type};
+        return {
+            operand: {kind: "Move", value: bindingPlace(binding)},
+            type: binding.type,
+            moveAt: expression,
+        };
     }
 
     /**

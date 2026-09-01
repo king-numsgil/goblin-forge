@@ -10,10 +10,10 @@
 // module, which is the failure mode this whole arrangement exists to remove.
 
 /** Fingerprint of the wire format these bindings were generated from. */
-export const SCHEMA_FINGERPRINT = 0x68e525a01305da29n;
+export const SCHEMA_FINGERPRINT = 0xfb0eb16471f939bbn;
 
 /** The same value as hex, for comparing against the addon's report. */
-export const SCHEMA_FINGERPRINT_HEX = "68e525a01305da29";
+export const SCHEMA_FINGERPRINT_HEX = "fb0eb16471f939bb";
 
 // ---------------------------------------------------------------------------
 // postcard writer
@@ -259,6 +259,7 @@ export interface InterfaceMethod {
 
 export interface InterfaceDef {
   name: SymId;
+  key: bigint;
   methods: InterfaceMethod[];
   span: Span;
 }
@@ -724,6 +725,7 @@ export function writeInterfaceMethod(w: Writer, v: InterfaceMethod): void {
 
 export function writeInterfaceDef(w: Writer, v: InterfaceDef): void {
   writeSymId(w, v.name);
+  w.varintBig(v.key);
   w.varint(v.methods.length); for (const item of v.methods) { writeInterfaceMethod(w, item); }
   writeSpan(w, v.span);
 }

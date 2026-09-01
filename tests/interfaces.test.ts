@@ -326,6 +326,36 @@ describe("tryCast", () => {
         expect(result.stdout).toBe("base/middle/middle\n");
     });
 
+    test("two same-named contracts are two contracts", async () => {
+        // The itab *symbols* were always told apart, by interface id — but the
+        // descriptor's lookup key was once a hash of the name alone, so a class
+        // implementing one `Speaker` answered a `tryCast` to the other: the
+        // wrong itab, the wrong slot order, a call landing wherever the two
+        // method lists happened to point. The key is the contract's structural
+        // identity now, so the shapes disagreeing is enough to keep them apart.
+        const result = await run(
+            "trycast-same-name",
+            `import type { Speaker as Voice } from "./voice.ts";
+       import type { Speaker as Noise } from "./noise.ts";
+
+       class Dog implements Voice { speak(): string { return "woof"; } }
+
+       export function main(): i32 {
+          const voice = tryCast<Voice>(new Dog());
+          const noise = tryCast<Noise>(new Dog());
+          console.log(\`\${voice !== null} \${noise !== null}\`);
+          return 0;
+        }\n`,
+            {
+                files: {
+                    "voice.ts": `export interface Speaker { speak(): string; }\n`,
+                    "noise.ts": `export interface Speaker { talk(): i32; }\n`,
+                },
+            },
+        );
+        expect(result.stdout).toBe("true false\n");
+    });
+
     test("`null ===` on the left is the same question", async () => {
         const result = await run(
             "trycast-null-left",

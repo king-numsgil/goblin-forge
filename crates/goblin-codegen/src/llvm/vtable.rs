@@ -31,19 +31,20 @@ pub const fn vtable_bias(target: TargetInfo) -> i64 {
     target.pointer_bytes as i64
 }
 
-/// A stable key for an interface, from its **name**.
+/// 64-bit FNV-1a, for the symbols that intern a string.
 ///
-/// FNV-1a, 64-bit. Deliberately not the `InterfaceId`: ids are numbered per
-/// compilation, so two modules would disagree about them the moment a library
-/// boundary exists — which is precisely the closed-world mistake REWRITE-PLAN
-/// §3 says to design out rather than fix later.
-///
-/// A collision would make a dynamic cast answer yes to the wrong interface. Two
-/// names colliding in 64 bits is not something to plan around, but it is
-/// something to *notice* if a cast ever comes back inexplicably true.
-pub fn interface_key(name: &str) -> u64 {
+/// The interface *key* this crate once derived here from a name is gone: a
+/// name is not an identity for a contract, because two files may each declare
+/// an `interface Speaker` with different methods, and hashing the name made a
+/// descriptor answer the other one's dynamic casts. The key a descriptor
+/// stores — and a `tryCast` asks for — is [`InterfaceDef::key`], computed by
+/// the frontend from the contract's shape. A hash *collision* between two
+/// different shapes remains possible in the way any 64-bit hash is; it is
+/// something to notice if a cast ever comes back inexplicably true, not
+/// something to plan around.
+pub fn fnv1a64(text: &str) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in name.as_bytes() {
+    for byte in text.as_bytes() {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
@@ -120,9 +121,11 @@ pub fn emit(
         //
         //   +0 name   +1 base   +2 count   +3 [ { key, itab } ; count ]
         //
-        // `key` is a hash of the *interface's name*, never its `InterfaceId`:
-        // ids are numbered per compilation and two modules would disagree the
-        // moment `static-lib` exists.
+        // `key` is the interface's structural key, arrived through the MIR —
+        // never its `InterfaceId` (ids are numbered per compilation, so two
+        // modules would disagree the moment `static-lib` exists) and never a
+        // hash of its name alone (two files may declare the same name with
+        // different methods, and those are two contracts).
         let name_symbol = format!("__gf_name${name}");
         let mut bytes = name.as_bytes().to_vec();
         // Nul-terminated, so a descriptor's name can be handed straight to C.
@@ -150,7 +153,6 @@ pub fn emit(
         for implemented in &sorted {
             let interface = module
                 .interface(implemented.interface)
-                .and_then(|def| module.sym(def.name))
                 .ok_or_else(|| {
                     InternalError::new(format!("interface {} is missing", implemented.interface.0))
                 })?;
@@ -160,7 +162,7 @@ pub fn emit(
                     implemented.interface.0,
                 ))
             })?;
-            words.push(Word::Int(interface_key(interface)));
+            words.push(Word::Int(interface.key));
             // Biased past the itab's own descriptor word, so what a dynamic
             // cast hands back is what a static conversion would have built.
             words.push(Word::Addr {

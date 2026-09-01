@@ -64,6 +64,29 @@ export interface SharedRuntime {
 const cache = new Map<string, RuntimeBuild>();
 
 /**
+ * The arguments cargo is given, quoted for the shell Windows runs them under.
+ *
+ * `shell: true` is needed for cargo on Windows — some installs arrive as a
+ * shim rather than a `.exe` — and Node implements it by joining the command
+ * and its arguments with spaces and **no quoting**. Any argument with a space
+ * in it is then split in two, and the callee sees half of it plus a stray
+ * positional. The packaged CLI caches the runtime crate under
+ * `%LOCALAPPDATA%`, so a username with a space in it puts one in
+ * `--target-dir`'s path: every build on that machine, for every program,
+ * failed as "building the Goblin runtime failed" until the argument was
+ * quoted. `cmd`'s `/s /c` handling keeps the inner quotes intact, and a path
+ * cannot contain a quote to break them.
+ *
+ * Only applied where the shell is actually in use, which is Windows alone;
+ * elsewhere the arguments travel as an argv and quoting would *become* the
+ * bug.
+ */
+const forShell = (args: readonly string[]): string[] =>
+    process.platform === "win32"
+        ? args.map((arg) => (/\s/.test(arg) ? `"${arg}"` : arg))
+        : [...args];
+
+/**
  * The crate directory.
  *
  * A function because a single-file executable extracts its embedded copy on
@@ -118,7 +141,7 @@ export function buildRuntime(target?: string, optLevel: OptLevel = "O2"): Runtim
     // part of an ordinary build, so this is not a second compilation.
     args.push("--print", "native-static-libs");
 
-    const result = spawnSync("cargo", args, {
+    const result = spawnSync("cargo", forShell(args), {
         cwd: RUNTIME_CRATE(),
         encoding: "utf8",
         shell: process.platform === "win32",

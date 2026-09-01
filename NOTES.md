@@ -661,9 +661,13 @@ descriptor's itab table (`gf_find_itab`); `Rvalue::TryClass` walks its base chai
 comparing descriptor *addresses* (`gf_is_a`). Addresses, not names, is what makes
 §11.3 work across a library boundary.
 
-**Descriptor keys are a hash of the interface's name**, never its `InterfaceId`.
-Ids are numbered per compilation and two modules would disagree the moment
-`static-lib` exists. `vtable::interface_key`, FNV-1a.
+**Descriptor keys are a hash of the interface's shape**, never its name and
+never its `InterfaceId`. Names, because two files may each declare an
+`interface Speaker` with different methods and the descriptor must not answer
+the other one's cast; ids, because they are numbered per compilation and two
+modules would disagree the moment `static-lib` exists. The frontend hashes its
+structural key (`layoutKeyHash`, FNV-1a) into `InterfaceDef::key`, and both the
+descriptor and the `tryCast` read that.
 
 **Itab tables are flattened onto every derived class**, not inherited. A derived
 class needs its *own* itab holding its *own* final overriders — inheriting the

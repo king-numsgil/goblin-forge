@@ -122,6 +122,7 @@ export {
     isPointerType,
     isReferenceType,
     layoutKey,
+    layoutKeyHash,
     linalgStruct,
     linalgTypeOf,
     isSignedInteger,

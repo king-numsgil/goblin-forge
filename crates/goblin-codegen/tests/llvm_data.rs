@@ -21,7 +21,7 @@ use goblin_codegen::abi::Conv;
 use goblin_codegen::layout::TargetInfo;
 use goblin_codegen::link::{LinkRequest, OutputKind, link};
 use goblin_codegen::llvm::data::Globals;
-use goblin_codegen::llvm::vtable::interface_key;
+use goblin_codegen::llvm::vtable::fnv1a64;
 use goblin_codegen::llvm::{self, Literals, driver};
 use goblin_codegen::object::{CodegenOptions, OptLevel};
 use goblin_mir::{
@@ -98,6 +98,10 @@ fn zoo() -> Module {
     let speak = sym(&mut module, "speak");
     module.interfaces.push(InterfaceDef {
         name: animal,
+        // The structural key the frontend computes; any value works for these
+        // tests as long as the descriptor stores this one and nothing else
+        // answers to it, so it is spelled from the name for legibility.
+        key: fnv1a64("Animal"),
         methods: vec![InterfaceMethod {
             name: speak,
             sig: SigId(0),
@@ -163,7 +167,7 @@ fn a_descriptor_names_its_base_its_interfaces_and_their_itabs() {
             "@__gf_desc$Dog = internal constant <{{ ptr, ptr, i64, i64, ptr }}> \
              <{{ ptr @__gf_name$Dog, ptr @__gf_desc$Base, i64 1, i64 {}, \
              ptr getelementptr (i8, ptr @__gf_itab$Animal.0$Dog, i64 8) }}>, align 8",
-            interface_key("Animal")
+            fnv1a64("Animal")
         )
     );
 
@@ -228,7 +232,7 @@ fn identical_text_is_emitted_once() {
     assert_eq!(globals.lines().len(), 2, "the repeat emitted a second copy");
     // The same spelling the Cranelift path uses, so a module compiled either
     // way names its literals identically.
-    assert_eq!(first, format!("gf_str_{:016x}", interface_key("hello")));
+        assert_eq!(first, format!("gf_str_{:016x}", fnv1a64("hello")));
 }
 
 /// The bias, checked by a program that depends on it.

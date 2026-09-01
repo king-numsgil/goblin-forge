@@ -56,7 +56,7 @@ impl Literals {
         if let Some(symbol) = self.seen.get(text) {
             return symbol.clone();
         }
-        let symbol = format!("gf_str_{:016x}", crate::llvm::vtable::interface_key(text));
+        let symbol = format!("gf_str_{:016x}", crate::llvm::vtable::fnv1a64(text));
         globals.literal(&symbol, text);
         self.seen.insert(text.to_owned(), symbol.clone());
         symbol

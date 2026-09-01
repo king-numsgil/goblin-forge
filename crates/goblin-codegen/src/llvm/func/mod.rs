@@ -879,12 +879,15 @@ impl<'a, 'm> Emitter<'a, 'm> {
     /// stored either way; null-ness lives in the itab word alone, which is what
     /// keeps a failed cast branchless.
     fn try_interface(&mut self, dest: &str, interface: InterfaceId, source: &Place) -> Result<()> {
-        let name = self
+        let def = self
             .module
             .interface(interface)
-            .and_then(|def| self.module.sym(def.name))
             .ok_or_else(|| InternalError::new(format!("interface {} is missing", interface.0)))?;
-        let key = crate::llvm::vtable::interface_key(name);
+        // The structural key, not the name and not the id: two files may
+        // declare the same name with different methods, and the id is numbered
+        // per compilation. This is the same value the target class's descriptor
+        // stores, which is what makes the lookup find it.
+        let key = def.key;
 
         let object = self.address(source)?;
         let descriptor = self.descriptor_of(&object)?;

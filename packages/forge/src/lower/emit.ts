@@ -214,6 +214,7 @@ export abstract class Emitter {
      * {@link #forArgument}.
      */
     protected forRead(value: Typed): Operand {
+        this.#refuseLostMove(value);
         if (!this.needsCallerCopy(value.type)) {
             return value.operand;
         }
@@ -232,6 +233,7 @@ export abstract class Emitter {
      * once, and this is the case where it is not.
      */
     protected repeatable(value: Typed): Operand {
+        this.#refuseLostMove(value);
         if (value.temporary !== undefined) {
             return {kind: "Copy", value: placeOf(value.temporary)};
         }
@@ -239,6 +241,32 @@ export abstract class Emitter {
             return value.operand;
         }
         return {kind: "Copy", value: value.operand.value};
+    }
+
+    /**
+     * Refuse a `move()` that has arrived somewhere its move cannot happen.
+     *
+     * A read position — {@link forRead}, {@link repeatable} — converts the
+     * operand and drops the `Move` on the floor, but the binding was marked
+     * moved-from when the `move()` was lowered, so every later use of the name
+     * would report `GF0235` about a value that was never moved anywhere. The
+     * move is not lost quietly: it is refused here, where the call site is still
+     * in hand for the caret.
+     */
+    #refuseLostMove(value: Typed): void {
+        if (value.moveAt === undefined) {
+            return;
+        }
+        const name = value.moveAt.arguments[0]?.getText() ?? "…";
+        this.outer.error(
+            value.moveAt,
+            "GF0002",
+            `\`move(${name})\` is only read here, so nothing takes what the move hands ` +
+                "over — the move would be discarded, while still marking the name " +
+                "moved-from, so every later use of it would report a move that never " +
+                "happened. Drop the `move()`, or hand the value to something that keeps " +
+                "it: a binding, a call, a return.",
+        );
     }
 
     /**

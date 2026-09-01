@@ -33,7 +33,14 @@ const TIMEOUT = 300_000;
 let workspace: string;
 
 beforeAll(() => {
-    const build = spawnSync("bun", ["run", join(REPO, "packages", "cli", "build.ts")], {
+    // The script path is quoted for the Windows shell, which joins arguments
+    // with spaces and no quoting of its own — a checkout under a path with a
+    // space in it would otherwise hand build.ts to bun cut in half. See
+    // `forShell` in `packages/runtime/src/build.ts` for the same reasoning in
+    // the runtime build.
+    const script = join(REPO, "packages", "cli", "build.ts");
+    const args = process.platform === "win32" && /\s/.test(script) ? [`"${script}"`] : [script];
+    const build = spawnSync("bun", ["run", ...args], {
         cwd: REPO,
         encoding: "utf8",
         shell: process.platform === "win32",

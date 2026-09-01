@@ -30,6 +30,7 @@ import {
     Erasure,
     ErasureError,
     layoutKey,
+    layoutKeyHash,
     type MachineType,
     NO_BINDINGS,
     type Note,
@@ -3309,7 +3310,17 @@ export class Lowerer {
             return existing;
         }
 
-        const id = this.#mir.declareInterface({name: type.name, span: this.span(at)});
+        // The `key` is the contract's structural identity rather than a hash
+        // of its name, for the reason the intern above gives: two files may
+        // declare the same name with different methods, and a class's
+        // descriptor and a `tryCast` have to agree about which is which. The
+        // backend stores it beside each itab and asks for it by the same
+        // value — see `InterfaceDef::key` in the MIR.
+        const id = this.#mir.declareInterface({
+            name: type.name,
+            key: layoutKeyHash(type),
+            span: this.span(at),
+        });
         this.#interfaces.set(key, id);
         this.#interfaceInfo.set(key, type);
         const ty = this.#mir.ty({kind: "Interface", value: id});

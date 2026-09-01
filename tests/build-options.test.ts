@@ -146,14 +146,30 @@ describe("debug information", () => {
      */
     test("`debugInfo: true` puts debug information in the object, and `false` does not", async () => {
         const section = process.platform === "win32" ? ".debug$S" : ".debug_info";
+        // `llvm-objdump` first and GNU `objdump` second, which is what the
+        // toolchain notes promise. Neither being present is a *missing tool*
+        // and is reported as one: a plain ENOENT here used to surface as
+        // `present: false` on the `debugInfo: true` half — a "debug info
+        // missing" failure about a machine that only lacked a dumper.
+        const object = (project: string): string => join(project, "build", "main.o");
+        const dump = (path: string): string => {
+            for (const tool of ["llvm-objdump", "objdump"]) {
+                const dumped = spawnSync(tool, ["-h", path], {encoding: "utf8"});
+                if (dumped.error === undefined) {
+                    return dumped.stdout ?? "";
+                }
+            }
+            throw new Error(
+                "neither `llvm-objdump` nor `objdump` is on PATH, so this test cannot " +
+                    "read the object's sections. The toolchain is otherwise complete; " +
+                    "this is the one check that wants a dumper.",
+            );
+        };
         for (const debugInfo of [false, true]) {
             const {project} = await compileSource(`dbg-sections-${debugInfo}`, WORKLOAD, {
                 debugInfo,
             });
-            const dumped = spawnSync("llvm-objdump", ["-h", join(project.dir, "build", "main.o")], {
-                encoding: "utf8",
-            });
-            expect({debugInfo, present: (dumped.stdout ?? "").includes(section)}).toEqual({
+            expect({debugInfo, present: dump(object(project.dir)).includes(section)}).toEqual({
                 debugInfo,
                 present: debugInfo,
             });

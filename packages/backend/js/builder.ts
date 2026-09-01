@@ -304,10 +304,15 @@ export class ModuleBuilder {
         };
     }
 
-    declareInterface(options: { name: string; span?: Span }): InterfaceId {
+    /**
+     * The contract's structural key — see `InterfaceDef::key` in the Rust
+     * definition for why this exists and why it is not derived from the name.
+     */
+    declareInterface(options: { name: string; key: bigint; span?: Span }): InterfaceId {
         const id = InterfaceId(this.#interfaces.length);
         this.#interfaces.push({
             name: this.sym(options.name),
+            key: options.key,
             methods: [],
             span: options.span ?? SYNTHETIC,
         });

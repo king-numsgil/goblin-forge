@@ -368,6 +368,19 @@ pub struct Impl {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Schema)]
 pub struct InterfaceDef {
     pub name: SymId,
+    /// A stable identity for the runtime's itab lookup: a 64-bit FNV-1a of the
+    /// frontend's *structural* key for the contract, never of the name alone.
+    ///
+    /// Two files may each declare an `interface Speaker` with different
+    /// methods, and those are two contracts whose descriptors must not answer
+    /// each other's dynamic casts — the name cannot tell them apart, which is
+    /// why it cannot be the key. The `InterfaceId` could, but ids are numbered
+    /// per compilation, so a library and its consumer would disagree about
+    /// them the moment `static-lib` exists — the closed-world mistake
+    /// REWRITE-PLAN §3 says to design out. The structural key is a function of
+    /// the declaration's shape alone, so every compilation of the same
+    /// interface agrees and two same-named ones never collide.
+    pub key: u64,
     pub methods: Vec<InterfaceMethod>,
     pub span: Span,
 }

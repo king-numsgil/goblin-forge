@@ -1855,6 +1855,28 @@ export function layoutKey(type: MachineType): string {
     return keyOf(type, []);
 }
 
+/**
+ * A 64-bit FNV-1a of {@link layoutKey}, as a `bigint`.
+ *
+ * This is a contract's identity at run time: the lowerer puts it in the MIR,
+ * a class's type descriptor stores it beside each itab, and a dynamic cast
+ * asks for the one of the interface it names — so the same declaration has to
+ * produce the same key in every compilation that sees it, which hashing the
+ * structural key gives and hashing the *name* would not. Two files may each
+ * declare an `interface Speaker` with different methods; the names agree and
+ * the shapes do not, so the name alone cannot be the identity.
+ */
+export function layoutKeyHash(type: MachineType): bigint {
+    let hash = 0xcbf29ce484222325n;
+    for (const byte of new TextEncoder().encode(layoutKey(type))) {
+        hash ^= BigInt(byte);
+        hash &= 0xffff_ffff_ffff_ffffn;
+        hash *= 0x00000100000001b3n;
+        hash &= 0xffff_ffff_ffff_ffffn;
+    }
+    return hash;
+}
+
 function keyOf(type: MachineType, open: MachineType[]): string {
     switch (type.kind) {
         case "void":

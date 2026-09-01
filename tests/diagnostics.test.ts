@@ -14,12 +14,35 @@
  */
 
 import { CODES } from "@goblin-forge/checker";
-// noinspection ES6UnusedImports
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test as bunTest } from "bun:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { compileSource, expectRejected } from "./harness.ts";
+
+/** Codes raised by the specimens above, recorded as each one is declared. */
+const RAISED = new Set<string>();
+
+/**
+ * The suite's own `test`, which records a specimen's code from its name.
+ *
+ * The list this replaces was hand-kept beside the tests, and nothing checked
+ * it against them: delete a specimen and its code stayed listed — still
+ * "accounted for" while nothing raised it — and a rewritten one kept the code
+ * it no longer provoked. Recording here, at declaration, ties the two
+ * together — the record cannot outlive the test that made it — and each
+ * body's own `expectRejected` is what proves the code still fires.
+ *
+ * Only names that *start* with a code are specimens; the registry tests at the
+ * bottom use this same wrapper and record nothing.
+ */
+function test(name: string, body: () => void | Promise<void>, timeout?: number): void {
+    const code = /^(GF\d{4})/.exec(name)?.[1];
+    if (code !== undefined) {
+        RAISED.add(code);
+    }
+    bunTest(name, body, timeout);
+}
 
 /** Codes no program can currently reach, and why. */
 const UNREACHABLE: Partial<Record<string, string>> = {
@@ -538,48 +561,18 @@ describe("codes raised by a program", () => {
 
 describe("the registry and the suite agree", () => {
     test("every code is either raised above or listed as unreachable, with a reason", () => {
-        // The list of codes this file raises, kept as data so the two halves cannot
-        // drift: a new code with neither a test nor an entry fails here.
-        const raised = new Set([
-            "GF0001",
-            "GF0002",
-            "GF0003",
-            "GF0006",
-            "GF0004",
-            "GF0160",
-            "GF0161",
-            "GF0162",
-            "GF0164",
-            "GF0165",
-            "GF0166",
-            "GF0234",
-            "GF0235",
-            "GF0236",
-            "GF0237",
-            "GF0238",
-            "GF0239",
-            "GF0301",
-            "GF0302",
-            "GF0303",
-            "GF0304",
-            "GF0305",
-            "GF0306",
-            "GF0307",
-            "GF0308",
-            "GF0402",
-            "GF0403",
-            "GF0404",
-            "GF0405",
-            "GF0406",
-            "GF0407",
-            "GF9004",
-            "GF9005",
-        ]);
-
+        // `RAISED` is recorded by the specimen tests themselves — see its
+        // declaration — so the accounting cannot drift from what actually ran.
         const unaccounted = Object.keys(CODES).filter(
-            (code) => !raised.has(code) && UNREACHABLE[code] === undefined,
+            (code) => !RAISED.has(code) && UNREACHABLE[code] === undefined,
         );
         expect(unaccounted).toEqual([]);
+
+        // And nothing claims to raise a code the registry has never heard of:
+        // a mistyped code in a specimen's name would otherwise pass as its own
+        // account.
+        const unknown = [...RAISED].filter((code) => !(code in CODES));
+        expect(unknown).toEqual([]);
     });
 
     test("nothing is claimed unreachable that is not in the registry", () => {

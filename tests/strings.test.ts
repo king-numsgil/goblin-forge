@@ -230,12 +230,45 @@ describe("move", () => {
         await expectRejected(
             "move-twice",
             `export function main(): i32 {
-         const a: string = "a" + "b";
-         const b: string = move(a);
-         const c: string = move(a);
-         return 0;
-       }\n`,
+          const a: string = "a" + "b";
+          const b: string = move(a);
+          const c: string = move(a);
+          return 0;
+        }\n`,
             "GF0235",
+        );
+    });
+
+    test("a move that only gets read is refused, not discarded", async () => {
+        // `console.log(move(a))` used to lower the move's operand into a borrow
+        // and drop the `Move` on the floor — the value printed correctly, but
+        // the binding was marked moved-from anyway, so a later use of `a` would
+        // report a move that never happened. The read positions refuse instead:
+        // the move is either real or it is not written.
+        const diagnostic = await expectRejected(
+            "move-read-only",
+            `export function main(): i32 {
+          const a: string = "a" + "b";
+          console.log(move(a));
+          return 0;
+        }\n`,
+            "GF0002",
+        );
+        expect(diagnostic.message).toContain("only read here");
+    });
+
+    test("a move read more than once is refused for the same reason", async () => {
+        // The fill of a `fixedArray` is copied into every element, so a move
+        // there is read-as-many-times — the one shape that reaches
+        // `repeatable` from source.
+        await expectRejected(
+            "move-repeatable",
+            `export function main(): i32 {
+          const a: string = "a" + "b";
+          const both: FixedArray<string, 2> = fixedArray(2, move(a));
+          return 0;
+        }\n`,
+            "GF0002",
         );
     });
 
@@ -666,15 +699,33 @@ describe("interpolation", () => {
         const result = await run(
             "string-console-scalar",
             `export function main(): i32 {
-         const n: i32 = 42;
-         const b: boolean = true;
-         console.log(n);
-         console.log(\`\${n}\`);
-         console.log(b);
-         return 0;
-       }\n`,
+          const n: i32 = 42;
+          const b: boolean = true;
+          console.log(n);
+          console.log(\`\${n}\`);
+          console.log(b);
+          return 0;
+        }\n`,
         );
         expect(result.stdout).toBe("42\n42\ntrue\n");
+    });
+
+    test("an integral float past `i64` prints in full, as JavaScript prints it", async () => {
+        // Every integral `f64` from 2⁶³ up used to take the `as i64` fast path,
+        // which saturates — so `${1e19}` printed `9223372036854775807`. The
+        // full-decimal path below 1e21 is what JavaScript uses, so those values
+        // belong there.
+        const result = await run(
+            "string-interp-large-f64",
+            `export function main(): i32 {
+          const small: f64 = 1;
+          const large: f64 = 1e19;
+          const negative: f64 = -1e19;
+          console.log(\`\${small} \${large} \${negative}\`);
+          return 0;
+        }\n`,
+        );
+        expect(result.stdout).toBe("1 10000000000000000000 -10000000000000000000\n");
     });
 
     test("`info` and `debug` go to stdout, beside `log`", async () => {

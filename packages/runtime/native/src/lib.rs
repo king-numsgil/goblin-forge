@@ -1413,8 +1413,14 @@ pub extern "C" fn gf_string_from_f64(value: f64) -> GfStr {
         let text: &[u8] = if value > 0.0 { b"Infinity" } else { b"-Infinity" };
         return unsafe { from_bytes(text) };
     }
-    if value == unsafe { trunc(value) } && value.abs() < 1e21 {
-        // `1.0` prints as `1`, as it does in JavaScript.
+    // `1.0` prints as `1`, as it does in JavaScript. The bound that matters is
+    // not JavaScript's `1e21` but `i64`'s: every integral `f64` from 2⁶³ up
+    // saturates in `as i64`, so taking this path there printed `i64::MAX` for
+    // `1e19`. `Display for f64` writes the full shortest decimal below 1e21,
+    // which is exactly what JavaScript prints there, so those values fall
+    // through to it instead. The bound is 2⁶³ spelled exactly, which an `f64`
+    // can hold.
+    if value == unsafe { trunc(value) } && value.abs() < 9_223_372_036_854_775_808.0 {
         return from_display(value as i64);
     }
     from_display(value)
@@ -2338,6 +2344,26 @@ mod tests {
         unsafe { gf_string_free(b) };
         unsafe { gf_string_free(c) };
         unsafe { gf_string_free(empty) };
+    }
+
+    /// An integral `f64` from 2⁶³ up prints in full, the way JavaScript prints
+    /// it, rather than as the `i64` it saturates to. The fast path through
+    /// `as i64` used to claim every integral value below 1e21, and `as i64`
+    /// saturates at 2⁶³ — so `${1e19}` printed `9223372036854775807`.
+    #[test]
+    fn an_integral_float_past_i64_prints_in_full() {
+        let cases: [(f64, &str); 5] = [
+            (1.0, "1"),
+            (-1.0, "-1"),
+            (9.3e18, "9300000000000000000"),
+            (1e19, "10000000000000000000"),
+            (-1e19, "-10000000000000000000"),
+        ];
+        for (value, expected) in cases {
+            let s = gf_string_from_f64(value);
+            assert_eq!(unsafe { str_of(s) }, expected, "gf_string_from_f64({value})");
+            unsafe { gf_string_free(s) };
+        }
     }
 
     /// Freeing the shared empty array is a no-op rather than a free of static

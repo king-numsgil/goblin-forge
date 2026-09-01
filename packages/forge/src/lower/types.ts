@@ -70,6 +70,18 @@ export interface Typed {
      * distinction matters, so the flag is set here and read only there.
      */
     readonly borrowsTemporary?: true;
+    /**
+     * The `move()` call this value came from, when it did.
+     *
+     * The `Move` operand only becomes a real move once something materialises
+     * it into an rvalue — a binding, an argument, a return. A position that
+     * merely *reads* the value converts the operand to a borrow and discards
+     * the move, but the binding is marked moved-from either way, so every
+     * later use would report a move that never happened. The read positions
+     * check this flag and refuse, and the flag is how they reach the call site
+     * for the caret.
+     */
+    readonly moveAt?: ts.CallExpression;
 }
 
 export interface FnSignature {
