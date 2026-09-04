@@ -247,6 +247,65 @@ interface Array<T> {
 }
 
 /**
+ * `readonly T[]` — an array whose mutating half is not there.
+ *
+ *     function total(xs: readonly i32[]): i32 { … }
+ *
+ * `readonly T[]` and `ReadonlyArray<T>` are one type, as `T[]` and `Array<T>`
+ * are one. It is the **same value** as an {@link Array}: one machine word, the
+ * same header, the same buffer, the same `sizeOf`. Nothing about the
+ * representation changes, so nothing in the backend knows this type exists.
+ *
+ * What it removes is {@link Array.push}, {@link Array.pop},
+ * {@link Array.reserve} and the writable index signature. An `i32[]` is
+ * assignable to a `readonly i32[]` and not the other way round — structurally,
+ * rather than by a rule: the reverse fails because the mutators are not there
+ * to satisfy, which is how TypeScript's own `ReadonlyArray` does it.
+ *
+ * **`readonly` is a check at the write, not a property of the value.** It stops
+ * `xs.push(v)` and `xs[0] = v` where they are written; it does not stop the
+ * same buffer being mutated through another name that still has the mutators.
+ * That is TypeScript's `readonly` everywhere, and it is `const T&` in C++ — a
+ * statement of intent the compiler holds you to, not a guarantee about memory.
+ *
+ * Two further things it deliberately is not:
+ *
+ *   * **Not `const` propagated into the elements.** `readonly Body[]` refuses
+ *     `xs[0] = b` and says nothing at all about `xs[0].mass = 1`. Shallow, as
+ *     C++'s `const` is shallow through a pointer member.
+ *   * **Not a borrow.** A `readonly i32[]` parameter is taken *by value* and
+ *     still costs the copy — the whole content of by-value versus by-reference
+ *     is `Reference<T>` and nothing else (DECISIONS §24). `Reference<readonly
+ *     i32[]>` is how to say borrowed *and* read-only, and is the signature a
+ *     loop over somebody else's array wants.
+ *
+ * Declaring this is what makes the annotation mean anything. Under `noLib`
+ * there is no `ReadonlyArray` for the checker to find, and its fallback for a
+ * missing one is `Array` itself — so `readonly i32[]` *was* `i32[]` spelled
+ * differently, and `xs[0] = 99` through one compiled clean.
+ */
+interface ReadonlyArray<T> {
+    /** Element count. A load from the header, not a scan. */
+    readonly length: usize;
+
+    /**
+     * Elements the buffer has room for. See {@link Array.capacity}, whose
+     * `reserve` is the only reason to ask — this type cannot reserve, so this
+     * is here to be reported rather than to be acted on.
+     */
+    readonly capacity: usize;
+
+    /**
+     * Reading only. `xs[0] = v` through this type is a `TS2542`, which is the
+     * whole point of the type.
+     */
+    readonly [index: number]: T;
+
+    /** Each element in order, by value. See {@link Array.forEach}. */
+    forEach(f: LocalFn<(value: T) => void>): void;
+}
+
+/**
  * The `string` primitive: NUL-terminated UTF-8, one machine word wide.
  *
  * `length` is a byte count, not a character count, and it is O(1) — the length

@@ -706,6 +706,241 @@ describe("value semantics", () => {
     });
 });
 
+/**
+ * `readonly T[]` — the same value with its mutating half removed.
+ *
+ * The whole of it is a declaration in the prelude: `ReadonlyArray<T>` with
+ * `length`, `capacity`, a `readonly` index signature and `forEach`, and none of
+ * `push`, `pop` or `reserve`. Erasure never looks at the modifier, so the
+ * machine type is the identical `{kind: "array"}` and the backend does not know
+ * this type exists — which is the property most of these tests are really
+ * asserting: every array operation that is a *read* has to go on working
+ * unchanged, and the copy still costs what a copy costs.
+ *
+ * What made this worth doing rather than assuming: under `noLib` there was no
+ * `ReadonlyArray` for tsc to resolve, and tsc's fallback for a missing one is
+ * `globalArrayType` itself. So `readonly i32[]` **was** `i32[]`, no diagnostic
+ * anywhere, and `xs[0] = 99` through one compiled clean. An annotation that
+ * silently means nothing is worse than no annotation, because it is written by
+ * somebody who then believes it.
+ */
+describe("readonly arrays", () => {
+    test("reads all work, and the value is the same one", async () => {
+        const result = await run(
+            "vec-ro-reads",
+            `function total(xs: readonly i32[]): i32 {
+         let sum: i32 = 0;
+         for (let i: usize = 0; i < xs.length; i = i + 1) { sum = sum + xs[i]; }
+         return sum;
+       }
+
+       export function main(): i32 {
+         const xs: i32[] = [1, 2, 3];
+         const view: readonly i32[] = xs;
+         let folded: i32 = 0;
+         view.forEach((x) => { folded = folded + x; });
+         console.log(\`\${total(xs)} \${folded} \${view.length} \${view[2]}\`);
+         console.log(\`\${sizeOf<readonly i32[]>() === sizeOf<i32[]>()}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("6 6 3 3\n" + "true\n");
+        expect(result.leaked).toBe(0);
+    });
+
+    test("writing an element is tsc's to refuse", async () => {
+        const {result} = await compileSource(
+            "vec-ro-write",
+            `export function main(): i32 {
+         const xs: readonly i32[] = [1, 2];
+         xs[0] = 9;
+         return 0;
+       }\n`,
+        );
+        expect(result.ok).toBe(false);
+        // `TS2542` — "index signature only permits reading". The one the whole
+        // declaration exists to produce.
+        expect(errorCodes(result)).toContain("TS2542");
+    });
+
+    test("the mutators are not on the type at all", async () => {
+        // Absence rather than a modifier, which is what makes the assignability
+        // below go one way: `readonly T[]` has nothing to satisfy `push` with.
+        for (const call of ["push(3)", "pop()", "reserve(8)"]) {
+            const {result} = await compileSource(
+                `vec-ro-${call.slice(0, call.indexOf("("))}`,
+                `export function main(): i32 {
+           const xs: readonly i32[] = [1, 2];
+           xs.${call};
+           return 0;
+         }\n`,
+            );
+            expect({call, ok: result.ok}).toEqual({call, ok: false});
+            expect({call, codes: errorCodes(result)}).toEqual({call, codes: ["TS2339"]});
+        }
+    });
+
+    test("a `T[]` is one of these and not the other way round", async () => {
+        const {result} = await compileSource(
+            "vec-ro-launder",
+            `function launder(xs: readonly i32[]): i32 {
+         const ys: i32[] = xs;
+         ys[0] = 9;
+         return ys[0];
+       }
+
+       export function main(): i32 {
+         const xs: i32[] = [1];
+         return launder(xs);
+       }\n`,
+        );
+        expect(result.ok).toBe(false);
+        expect(errorCodes(result)).toContain("TS4104");
+    });
+
+    test("`ReadonlyArray<T>` and `readonly T[]` are one type", async () => {
+        const result = await run(
+            "vec-ro-spelling",
+            `function a(xs: readonly i32[]): usize { return xs.length; }
+       function b(xs: ReadonlyArray<i32>): usize { return a(xs); }
+
+       export function main(): i32 {
+         const xs: i32[] = [1, 2];
+         console.log(\`\${b(xs)}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("2\n");
+    });
+
+    test("it is not a borrow: a parameter still copies, and a `Reference` does not", async () => {
+        // The distinction DECISIONS §24 puts entirely in `Reference<T>`. A
+        // `readonly` parameter says what this function may *do*; it says nothing
+        // about who copies, so a `string[]` by value still clones every element.
+        const result = await run(
+            "vec-ro-borrow",
+            `function byValue(xs: readonly string[]): usize { return xs.length; }
+       function borrowed(xs: Reference<readonly string[]>): usize { return xs.length; }
+
+       export function main(): i32 {
+         const xs: string[] = ["alpha", "beta"];
+         console.log(\`\${byValue(xs)} \${borrowed(xs)} \${xs[0]}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("2 2 alpha\n");
+        // The copy `byValue` took released its own strings, and the original is
+        // still readable on the line above.
+        expect(result.leaked).toBe(0);
+    });
+
+    test("writing through a `Reference` to one is refused as well", async () => {
+        const {result} = await compileSource(
+            "vec-ro-reference-write",
+            `function f(xs: Reference<readonly i32[]>): void { xs[0] = 9; }
+
+       export function main(): i32 {
+         const xs: i32[] = [1];
+         f(xs);
+         return 0;
+       }\n`,
+        );
+        expect(result.ok).toBe(false);
+        expect(errorCodes(result)).toContain("TS2542");
+    });
+
+    test("it does not launder into a mutable `Reference`", async () => {
+        const {result} = await compileSource(
+            "vec-ro-reference-launder",
+            `function mutate(xs: Reference<i32[]>): void { xs.push(9); }
+       function f(xs: readonly i32[]): void { mutate(xs); }
+
+       export function main(): i32 {
+         const xs: i32[] = [1];
+         f(xs);
+         return 0;
+       }\n`,
+        );
+        expect(result.ok).toBe(false);
+        expect(errorCodes(result)).toContain("TS2345");
+    });
+
+    test("elements that own are copied and released like any other", async () => {
+        const result = await run(
+            "vec-ro-owning",
+            `function longest(xs: readonly string[]): string {
+         let best: string = "";
+         xs.forEach((s) => { if (s.length > best.length) { best = s; } });
+         return best;
+       }
+
+       export function main(): i32 {
+         const xs: string[] = ["a", "bbb", "cc"];
+         const view: readonly string[] = xs;
+         console.log(\`\${longest(view)} \${view.length}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("bbb 3\n");
+        expect(result.leaked).toBe(0);
+    });
+
+    test("a type parameter carries the modifier through an instantiation", async () => {
+        const result = await run(
+            "vec-ro-generic",
+            `function count<T>(xs: readonly T[]): usize { return xs.length; }
+
+       export function main(): i32 {
+         const ns: i32[] = [1, 2];
+         const ss: string[] = ["a"];
+         console.log(\`\${count(ns)} \${count(ss)}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("2 1\n");
+        expect(result.leaked).toBe(0);
+    });
+
+    test("it is shallow, exactly as TypeScript's is", async () => {
+        // Deliberate, and the same trap C++ has through a pointer member: the
+        // index signature is read-only and the element it hands back is not. A
+        // deep version would need `Readonly<T>` to survive erasure as the class
+        // it was made from, which it does not.
+        const result = await run(
+            "vec-ro-shallow",
+            `class Counter { constructor(public n: i32) {} bump(): void { this.n = this.n + 1; } }
+
+       export function main(): i32 {
+         const xs: readonly Counter[] = [new Counter(1)];
+         xs[0].n = 5;
+         xs[0].bump();
+         console.log(\`\${xs[0].n}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("6\n");
+        expect(result.leaked).toBe(0);
+    });
+
+    test("an array of them, and one in a field", async () => {
+        const result = await run(
+            "vec-ro-nested",
+            `interface Holder { rows: readonly i32[]; }
+
+       function width(rows: readonly (readonly i32[])[]): usize { return rows.length; }
+
+       export function main(): i32 {
+         const h: Holder = {rows: [1, 2, 3]};
+         const grid: i32[][] = [[1], [2]];
+         console.log(\`\${h.rows[1]} \${width(grid)}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("2 2\n");
+        expect(result.leaked).toBe(0);
+    });
+});
+
 describe("what `T[]` is not", () => {
     test("it cannot cross the C boundary", async () => {
         // It owns a heap buffer, and nothing in a C signature says who frees it.

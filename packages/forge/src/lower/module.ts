@@ -1204,6 +1204,35 @@ export class Lowerer {
         return undefined;
     }
 
+    /**
+     * Whether this expression is a `readonly T[]` — an array this code may read
+     * and may not write.
+     *
+     * Only `take` asks. Every other way of writing an element is spelled as a
+     * write and tsc refuses it on its own: `xs[0] = v` is `TS2542`, `xs.push(v)`
+     * is `TS2339` because the method is not on the type. `take(xs[0])` is the
+     * one that gets through, because it is spelled as a *read* — the default it
+     * puts back is this compiler's doing and nothing in the signature says so.
+     *
+     * The **index signature's own modifier** answers, rather than the name of
+     * the type: `Reference<readonly T[]>` is an intersection, and the array half
+     * is the half that knows.
+     */
+    readonlyArrayAt(expression: ts.Expression): boolean {
+        const type = this.#checker.getTypeAtLocation(expression);
+        const candidates = type.isIntersection() ? type.types : [type];
+        for (const part of candidates) {
+            if (!this.#checker.isArrayType(part)) {
+                continue;
+            }
+            const info = this.#checker.getIndexInfoOfType(part, ts.IndexKind.Number);
+            if (info !== undefined) {
+                return info.isReadonly;
+            }
+        }
+        return false;
+    }
+
     classNameAt(expression: ts.Expression, bindings: Substitution): string | undefined {
         // The **erasure** first, because it is the only answer that has the
         // substitution in it. Inside a generic, tsc still says `T` however the

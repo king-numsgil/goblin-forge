@@ -268,6 +268,22 @@ describe("codes raised by a program", () => {
         );
     });
 
+    test("GF0240 — writing through a `readonly` array", async () => {
+        await expectRejected(
+            "diag-0240",
+            // `take` is the only write tsc cannot see: it is declared as a read
+            // and puts the type's default back into the slot afterwards.
+            `function drain(xs: readonly string[]): string { return take(xs[0]); }
+
+       export function main(): i32 {
+         const xs: string[] = ["a"];
+         console.log(drain(xs));
+         return 0;
+       }\n`,
+            "GF0240",
+        );
+    });
+
     test("GF0301 — a type that cannot cross the C boundary", async () => {
         await expectRejected(
             "diag-0301",

@@ -669,6 +669,31 @@ by value, so a `string[]` copies each string into the call; take a
 
 `map`, `filter` and `reduce` are not there yet.
 
+**`readonly T[]` is the same array with its mutating half removed** — no `push`,
+no `pop`, no `reserve`, and an index signature that may be read and not assigned
+to:
+
+```ts
+function total(xs: readonly i32[]): i32 { … }        // I will not change this
+function total(xs: Reference<readonly i32[]>): i32   // …and I will not copy it
+```
+
+An `i32[]` is one of these; the reverse is not, because the mutators are not
+there to satisfy. It is the identical value — one machine word, the same buffer,
+the same cost to pass — so this is a statement about what the *code* may do, not
+about the array. Two things follow, and both match C++ rather than Rust:
+
+- **It is not a borrow.** A `readonly T[]` parameter is still taken by value and
+  still costs the copy; `Reference<T>` is where by-value versus by-reference is
+  written, and the second signature above is how to say both.
+- **It is shallow.** `readonly Body[]` refuses `xs[0] = b` and says nothing
+  about `xs[0].mass = 1`, exactly as `const` says nothing through a pointer
+  member.
+
+`readonly` is a check at the write, not a property of the memory: it holds you
+to what you wrote, and does not stop the same buffer being changed through
+another name that still has the mutators.
+
 **Growth is yours to steer.** `push` doubles the buffer, which is the right
 default and allocates a second buffer beside the first at every step — a 400 MB
 array of bodies transiently wants 1.2 GB. `reserve` asks for room without adding

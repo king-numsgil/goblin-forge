@@ -5288,6 +5288,27 @@ export class BodyLowerer extends BoundaryLowerer {
             return undefined;
         }
 
+        // `take(xs[0])` where `xs` is a `readonly T[]`. Every other way of
+        // emptying that slot is spelled as a write and tsc refuses it; this one
+        // is spelled as a read, and the default that lands afterwards is this
+        // compiler's doing rather than anything the signature admits to. So the
+        // check has to be here, or `readonly` stops meaning anything the moment
+        // the element owns a buffer.
+        if (
+            ts.isElementAccessExpression(argument) &&
+            this.outer.readonlyArrayAt(argument.expression)
+        ) {
+            this.outer.error(
+                argument,
+                "GF0240",
+                `\`${TAKE}\` empties the slot it reads, so it is a write — and this is a ` +
+                "`readonly` array, which this code may read and may not write. Take a " +
+                "mutable `T[]` where the array is this function's to empty, or copy the " +
+                "element, which is what assigning it does.",
+            );
+            return undefined;
+        }
+
         if (ts.isIdentifier(argument)) {
             const binding = this.scopes.lookup(argument.text);
             if (binding === undefined) {

@@ -1057,6 +1057,65 @@ describe("take", () => {
         expect(diagnostic.message).toContain("place");
     });
 
+    test("a `readonly` array is refused, because taking is a write", async () => {
+        // The one write through a `readonly T[]` that tsc cannot see. `xs[0] = v`
+        // is `TS2542` and `push` is not on the type at all, but `take` is
+        // declared `take<T>(value: T): T` — a read, as far as the type system is
+        // concerned — and the default that lands afterwards is the compiler's
+        // doing. Without `GF0240` the annotation goes on holding for an `i32[]`
+        // and quietly stops holding for a `string[]`, which is the wrong way
+        // round: the owning element is where an emptied slot is visible.
+        const diagnostic = await expectRejected(
+            "take-readonly-array",
+            `function drain(xs: readonly string[]): string { return take(xs[0]); }
+
+       export function main(): i32 {
+         const xs: string[] = ["a", "b"];
+         console.log(drain(xs));
+         return 0;
+       }\n`,
+            "GF0240",
+        );
+        expect(diagnostic.message).toContain("readonly");
+    });
+
+    test("a `readonly` array behind a `Reference` is refused too", async () => {
+        // The array half of the intersection is the half that carries the
+        // modifier, so the check reads the index signature rather than the name
+        // of the type it came from.
+        await expectRejected(
+            "take-readonly-reference",
+            `function drain(xs: Reference<readonly string[]>): string { return take(xs[0]); }
+
+       export function main(): i32 {
+         const xs: string[] = ["a", "b"];
+         console.log(drain(xs));
+         return 0;
+       }\n`,
+            "GF0240",
+        );
+    });
+
+    test("a mutable array is still takeable behind a `readonly` binding elsewhere", async () => {
+        // The guard is on the type at the *take*, not on the array's history. A
+        // `T[]` that a `readonly` view was made of is still this function's to
+        // empty through the name that has the mutators.
+        const result = await run(
+            "take-readonly-view-beside",
+            `export function main(): i32 {
+         const xs: string[] = ["a", "b"];
+         const view: readonly string[] = xs;
+         const first = take(xs[0]);
+         console.log(\`[\${first}] [\${xs[0]}] \${view[0]} \${view.length}\`);
+         return 0;
+       }\n`,
+        );
+        // `view` is a *copy*, made before the take, so it still reads "a" — the
+        // value semantics a `readonly` annotation does not change.
+        expect(result.stdout).toBe("[a] [] a 2\n");
+        expect(result.leaked).toBe(0);
+    });
+
     test("a program's own `take` wins over the prelude's", async () => {
         // The prelude's globals are matched by *text*, which is fine for
         // `nativeCast` and stops being fine when one of them is an ordinary

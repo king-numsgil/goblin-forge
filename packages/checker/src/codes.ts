@@ -299,6 +299,32 @@ export const CODES = {
             "is the one C uses.",
     },
 
+    GF0240: {
+        title: "a `readonly` array cannot be written through",
+        explanation:
+            "`readonly T[]` is a `T[]` with its mutating half removed: no `push`, no " +
+            "`pop`, no `reserve`, and an index signature that may be read and not " +
+            "assigned to. It is the same value as a `T[]` — one machine word, the " +
+            "same buffer, the same cost to pass — so this is a statement about what " +
+            "this code may do with the array, not about the array itself.\n\n" +
+            "tsc enforces the whole of that on its own, with one exception, and this " +
+            "is it. `take(xs[0])` reads a slot **and puts the type's default back " +
+            "into it**, which is what makes the value leave without a copy " +
+            "(DECISIONS §27) — but the signature is `take<T>(value: T): T`, so what " +
+            "tsc sees is a read. Nothing in the type system can refuse it, and " +
+            "without this the annotation would go on meaning something for an " +
+            "`i32[]` and quietly mean nothing for a `string[]`, which is exactly " +
+            "backwards: the owning element is the one where emptying a slot is " +
+            "visible.\n\n" +
+            "Take a `T[]` where emptying the array is this function's business. " +
+            "Where it is not, assigning the element copies it, and " +
+            "`Reference<readonly T[]>` is the parameter that borrows without " +
+            "copying the array itself.\n\n" +
+            "`readonly` is shallow here, as it is in TypeScript and as `const` is " +
+            "through a pointer member in C++: `readonly Body[]` refuses `xs[0] = b` " +
+            "and says nothing about `xs[0].mass = 1`.",
+    },
+
     // -- Layout and the C boundary -------------------------------------------
     GF0301: {
         title: "this type cannot cross the C boundary",

@@ -3624,3 +3624,103 @@ should not be argued with.
 That a *future* C dependency is covered. The wiring is per-target rather than
 per-package, so it applies to whatever `cc` builds — but `tests/allocator-boundary.test.ts`
 exercises the allocator, and the allocator is the only C there is today.
+
+---
+
+## §29 — `readonly T[]`, and what `readonly` is here *(settled and built, 2026-09-04)*
+
+**Answer: `readonly T[]` is a declaration in the prelude, not a compiler
+feature.** `ReadonlyArray<T>` with `length`, `capacity`, a `readonly` index
+signature and `forEach`, and none of `push`, `pop` or `reserve`. Erasure never
+looks at the modifier, so the machine type is the identical
+`{kind: "array", element}` and nothing in the backend knows the type exists.
+
+### What was actually wrong
+
+`readonly i32[]` type-checked already, and meant nothing. `xs[0] = 99` through
+one compiled clean, and so did assigning it straight back to an `i32[]`.
+
+The cause is `noLib: true`. The prelude is the entire global surface (§20), so
+there was no `ReadonlyArray` for tsc to resolve — and tsc's fallback for a
+missing one is `globalArrayType` itself. `readonly i32[]` *was* `i32[]`, spelled
+differently, with no diagnostic anywhere to say so.
+
+That is worse than not having the feature. Nobody writes `readonly` by accident;
+they write it because they mean it, and then rely on it.
+
+### Why the recognition path needed no work
+
+`checker.isArrayType` answers true for `ReadonlyArray` as well as `Array` —
+tsc's own predicate tests the target against both globals — and every array path
+in this compiler goes through it: `erase`, `arrayElementAt`, the
+`Reference<T[]>` arm of `referenceTo`, the generic argument match. So `length`,
+indexing, `forEach`, `capacity`, drop elaboration, monomorphisation and the C
+boundary all continued to work on the day the interface was declared, and the
+copy still costs exactly what an `Array<T>` copy costs.
+
+Assignability is structural and needs no rule: an `i32[]` satisfies
+`ReadonlyArray<i32>`, and a `readonly i32[]` fails the other direction because
+the mutators are not there — which is how TypeScript's own lib does it, and
+`TS4104` is the error.
+
+### The one hole, and `GF0240`
+
+Every way of writing an element is spelled as a write and tsc refuses it on its
+own — `xs[0] = v` is `TS2542`, `xs.push(v)` is `TS2339` — with a single
+exception:
+
+```ts
+function drain(xs: readonly string[]): string { return take(xs[0]); }
+```
+
+`take` reads a slot **and puts the type's default back into it** (§27), which is
+what lets a value leave without a copy. Its signature is `take<T>(value: T): T`,
+so what tsc sees is a read, and no arrangement of the declaration can change
+that. Measured before the fix: the underlying array really was emptied, through
+a view, from a function that could not otherwise touch it.
+
+`GF0240` is that check, in `#take`, and it reads the **index signature's own
+modifier** rather than the name of the type — `Reference<readonly T[]>` is an
+intersection and the array half is the half that carries it.
+
+Note which case this protects. For an `i32[]` a stolen slot is invisible; for a
+`string[]` it is a buffer that changed hands. Without the check the annotation
+would have gone on holding for the element types where it does not matter and
+quietly stopped holding for the ones where it does.
+
+### What `readonly` is, and what it is not
+
+**A check at the write, not a property of the value.** It holds this code to
+what it wrote; it does not stop the same buffer being changed through another
+name that still has the mutators. That is TypeScript's `readonly` everywhere,
+and it is `const T &` in C++ — which is the model this language follows, so it
+is the right amount of guarantee rather than a shortfall.
+
+**Not a borrow.** A `readonly T[]` parameter is taken by value and costs the
+copy. The entire content of by-value versus by-reference is `Reference<T>` (§24)
+and nothing else was going to be allowed to imply it. `Reference<readonly T[]>`
+says borrowed *and* read-only, and is the signature a loop over somebody else's
+array wants.
+
+**Shallow.** `readonly Body[]` refuses `xs[0] = b` and says nothing about
+`xs[0].mass = 1`. Deep would require `Readonly<T>` to survive erasure as the
+class it was made from, and it does not: a mapped type is an anonymous object
+type, `classOf` finds no class, and it would erase structurally to a nameless
+aggregate with the same fields — losing the vtable, the itable and the generated
+destructor. That is the same obstacle a general `const` reference runs into, and
+it is not solved here.
+
+### Left open
+
+**A `readonly` field is takeable.** `take(h.s)` where `s` is declared
+`readonly x: string` empties it, by the same mechanism and for the same reason:
+`take` is a write that tsc reads as a read. It is not array-specific, it
+predates this change, and it is not fixed. Recorded here because the fix is the
+same shape — ask whether the place `take` is about to write is one this code may
+write — and doing both at once was out of scope rather than out of reach.
+
+**A general read-only reference does not exist.** `Reference<T>` has no const
+half (§24), and the mapped-type spelling breaks erasure as above. If it is ever
+wanted, the shape that survives is a brand that erases identically plus a
+frontend check — the backend must not learn about it, because both are one
+`ptr`.
