@@ -71,10 +71,26 @@ console.log(`generated ${target} (${(generated.length / 1024).toFixed(1)} KiB)`)
 // { type: "file" }` of a `.node` is not something TypeScript can resolve — the
 // generated file is outside the typecheck for the same reason the MIR bindings
 // are inside it: this one has nothing worth checking.
-const addon = readdirSync(join(repo, "packages", "backend")).find((file) => file.endsWith(".node"));
+//
+// Picked by **this** platform's triple rather than by being the first `.node`
+// in the directory. Two addons sitting side by side is a supported state —
+// `packages/forge/build.ts` says so in as many words, because one package
+// serves both machines and napi picks by triple at load time — and "the first
+// one" resolves that alphabetically, so a Linux addon dropped in for a package
+// build silently became the one embedded in the Windows CLI. It does not even
+// fail quietly: the `require` below is the host loading it, so the error is
+// `invalid ELF header` from a line about re-exports.
+const platform = `.${process.platform}-`;
+const addons = readdirSync(join(repo, "packages", "backend")).filter((file) =>
+    file.endsWith(".node"),
+);
+const addon = addons.find((file) => file.includes(platform));
 if (addon === undefined) {
     console.error(
-        "no built addon in packages/backend. Run `bun run build:backend` first.",
+        addons.length === 0
+            ? "no built addon in packages/backend. Run `bun run build:backend` first."
+            : `no addon in packages/backend for ${process.platform}; found ${addons.join(", ")}. ` +
+            "Run `bun run build:backend` on this platform.",
     );
     process.exit(1);
 }
