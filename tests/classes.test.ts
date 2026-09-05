@@ -588,6 +588,183 @@ describe("classes: what is rejected", () => {
     });
 });
 
+/**
+ * A **declared receiver** — `area(this: Reference<Circle>): f64`.
+ *
+ * TypeScript's own syntax, and the only place in the language where something
+ * can be said about the receiver at the signature rather than about the
+ * arguments. It is inert today: `this: Reference<C>` is exactly the receiver a
+ * method already has, so writing it changes nothing about the emitted code.
+ * What it buys is the *slot* — a `ConstReference<C>` in that position is what
+ * would let tsc refuse a mutating method on a read-only receiver, which is the
+ * one thing a type-level `Readonly<T>` cannot do on its own.
+ *
+ * The hazard it has to clear first is arity. TypeScript models a declared
+ * `this` as `parameters[0]` and leaves it out of the signature, and a method's
+ * parameters are also *numbered*: the receiver is local 1 and arguments start
+ * at 2. So a `this` left in the list both declares a second binding for the
+ * name and shifts every argument down a slot — which is why the first test
+ * here passes two arguments and checks the answer rather than checking that it
+ * compiled.
+ */
+describe("a declared `this`", () => {
+    test("a method takes one, and its arguments do not shift", async () => {
+        const result = await run(
+            "this-declared",
+            `class Point {
+         constructor(public x: i32, public y: i32) {}
+         sum(this: Reference<Point>): i32 { return this.x + this.y; }
+         scaled(this: Reference<Point>, by: i32, plus: i32): i32 {
+           return this.x * by + plus;
+         }
+       }
+
+       export function main(): i32 {
+         const p = new Point(3, 4);
+         console.log(\`\${p.sum()} \${p.scaled(10, 1)}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("7 31\n");
+        expect(result.leaked).toBe(0);
+    });
+
+    test("a generic class and a generic method both take one", async () => {
+        // The declared type is written against the *unsubstituted* class —
+        // `Reference<Box<T>>` — and the check runs after monomorphisation, where
+        // the receiver is a `Box$i32`. Erasing the annotation under the same
+        // bindings is what makes those the same answer.
+        const result = await run(
+            "this-declared-generic",
+            `class Box<T> {
+         constructor(public v: T) {}
+         get(this: Reference<Box<T>>): T { return this.v; }
+         pick<U>(this: Reference<Box<T>>, u: U): U { return u; }
+       }
+
+       export function main(): i32 {
+         const b = new Box<i32>(7);
+         const s = new Box<string>("hi");
+         console.log(\`\${b.get()} \${b.pick<i32>(5)} \${s.get()}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("7 5 hi\n");
+        expect(result.leaked).toBe(0);
+    });
+
+    test("an override may narrow its receiver to the base", async () => {
+        // Base fields are the prefix of the derived layout, so reading them off a
+        // `Derived` through a `Reference<Base>` finds the right offsets. This is
+        // the case the "receiver is this class" check has to let through.
+        const result = await run(
+            "this-declared-base",
+            `class Base {
+         constructor(public x: i32) {}
+         read(this: Reference<Base>): i32 { return this.x; }
+       }
+
+       class Derived extends Base {
+         constructor(x: i32) { super(x); }
+         override read(this: Reference<Base>): i32 { return this.x * 2; }
+       }
+
+       function readIt(b: Reference<Base>): i32 { return b.read(); }
+
+       export function main(): i32 {
+         const d = new Derived(4);
+         console.log(\`\${d.read()} \${readIt(d)}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("8 8\n");
+        expect(result.leaked).toBe(0);
+    });
+
+    test("an unrelated class is refused", async () => {
+        // The two classes are **structurally identical on purpose**. Where they
+        // are not, tsc catches the call site itself with `TS2684` — "the 'this'
+        // context of type 'B' is not assignable to method's 'this'" — and this
+        // check is never reached. Where they are, tsc believes the annotation,
+        // the call type-checks, and the body reads `A`'s fields off a `B`. Same
+        // layout here, so nothing would have gone wrong today and everything
+        // would the moment either class gained a field.
+        const diagnostic = await expectRejected(
+            "this-declared-wrong",
+            `class A { constructor(public x: i32) {} }
+
+       class B {
+         constructor(public x: i32) {}
+         read(this: Reference<A>): i32 { return this.x; }
+       }
+
+       export function main(): i32 { const b = new B(1); return b.read(); }\n`,
+            "GF0002",
+        );
+        expect(diagnostic.message).toContain("derives from");
+    });
+
+    test("a `static` has no receiver to describe", async () => {
+        const diagnostic = await expectRejected(
+            "this-declared-static",
+            `class C {
+         static make(this: Reference<C>): i32 { return 1; }
+       }
+
+       export function main(): i32 { return C.make(); }\n`,
+            "GF0002",
+        );
+        expect(diagnostic.message).toContain("no receiver");
+    });
+
+    test("a free function has none either", async () => {
+        const diagnostic = await expectRejected(
+            "this-declared-free",
+            `class C { constructor(public x: i32) {} }
+
+       function f(this: Reference<C>): i32 { return 1; }
+
+       export function main(): i32 { return 0; }\n`,
+            "GF0002",
+        );
+        expect(diagnostic.message).toContain("no receiver");
+    });
+
+    test("a receiver taken by value is refused", async () => {
+        // Every call site passes an address. A by-value `this` would be a copy of
+        // the object the caller is calling a method on, which no call means.
+        const diagnostic = await expectRejected(
+            "this-declared-value",
+            `class C {
+         constructor(public x: i32) {}
+         read(this: C): i32 { return this.x; }
+       }
+
+       export function main(): i32 { const c = new C(1); return c.read(); }\n`,
+            "GF0002",
+        );
+        expect(diagnostic.message).toContain("an address");
+    });
+
+    test("an accessor cannot have one, and that is tsc's rule", async () => {
+        // `TS2784` — a `get` takes no parameters and a `set` takes exactly one, and
+        // a declared `this` is a parameter as far as the grammar is concerned. So
+        // an accessor is not markable, which is worth knowing before anything is
+        // designed on top of this.
+        const {result} = await compileSource(
+            "this-declared-accessor",
+            `class C {
+         constructor(public x: i32) {}
+         get doubled(this: Reference<C>): i32 { return this.x * 2; }
+       }
+
+       export function main(): i32 { const c = new C(3); return c.doubled; }\n`,
+        );
+        expect(result.ok).toBe(false);
+        expect(errorCodes(result)).toContain("TS2784");
+    });
+});
+
 describe("`Reference<C>` for a class", () => {
     test("keeps the dynamic type, where a by-value parameter slices", async () => {
         // The pair of lines this feature exists for, and the reason `Reference<T>`

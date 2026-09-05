@@ -119,7 +119,8 @@ export function usesThis(fn: ts.ArrowFunction | ts.FunctionExpression): boolean 
 }
 
 /**
- * The declared `this` parameter — `function (this: Box) { … }` — or `undefined`.
+ * The declared `this` parameter — `function (this: Box) { … }`, or a method's
+ * `area(this: Reference<Circle>): f64` — or `undefined`.
  *
  * TypeScript models a declared `this` as `parameters[0]` rather than as a field
  * of its own, so anything reading `node.parameters` as the written parameters is
@@ -127,11 +128,17 @@ export function usesThis(fn: ts.ArrowFunction | ts.FunctionExpression): boolean 
  * is where the two disagree: the arity check compared a signature without it
  * against an AST with it and reported the disagreement as a compiler gap.
  *
+ * A method's parameters are worse than off by one, because they are also
+ * *numbered*: the receiver is local 1 and the written parameters start at 2, so
+ * a `this` left in the list would both shadow the receiver's binding and shift
+ * every argument by one slot. Every collector has to drop it, which is why this
+ * takes any signature rather than only the two closure forms it was written for.
+ *
  * `this` is a reserved word, so a parameter cannot be named it by accident and
  * the name is a sound test.
  */
 export function thisParameterOf(
-    fn: ts.ArrowFunction | ts.FunctionExpression,
+    fn: ts.SignatureDeclaration,
 ): ts.ParameterDeclaration | undefined {
     const first = fn.parameters[0];
     if (first !== undefined && ts.isIdentifier(first.name) && first.name.text === "this") {

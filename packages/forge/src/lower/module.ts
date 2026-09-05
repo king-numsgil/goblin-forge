@@ -343,7 +343,11 @@ export class Lowerer {
             combined.set(parameter, bound);
         }
 
-        const params = this.#classFnParams(template.declaration, combined);
+        const params = this.#classFnParams(
+            template.declaration,
+            combined,
+            template.isStatic ? undefined : info,
+        );
         const signature = this.#checker.getSignatureFromDeclaration(template.declaration);
         const returns =
             params === undefined || signature === undefined
@@ -2226,7 +2230,7 @@ export class Lowerer {
                 if (method.owner !== info.name) {
                     continue;
                 }
-                const params = this.#classFnParams(method.declaration, bindings);
+                const params = this.#classFnParams(method.declaration, bindings, info);
                 if (params === undefined) {
                     continue;
                 }
@@ -2466,12 +2470,33 @@ export class Lowerer {
         }
     }
 
+    /**
+     * The written parameters, which is not the same list as `node.parameters`.
+     *
+     * `receiver` is the class this body has a `this` in — `undefined` for a
+     * `static` and for a constructor, neither of which has one.
+     */
     #classFnParams(
         node: ts.ConstructorDeclaration | MethodBody,
         bindings: Substitution,
+        receiver?: ClassInfo,
     ): { name: string; type: MachineType }[] | undefined {
         const params: { name: string; type: MachineType }[] = [];
+        const declaredThis = thisParameterOf(node);
+        if (
+            declaredThis !== undefined &&
+            !this.#checkDeclaredThis(declaredThis, receiver, bindings)
+        ) {
+            return undefined;
+        }
         for (const parameter of node.parameters) {
+            // The receiver, and not an argument. It is `parameters[0]` in the AST
+            // and absent from tsc's signature, and here it is worse than off by
+            // one: the receiver is local 1 and arguments start at 2, so leaving it
+            // in would shift every argument a slot and declare a second `this`.
+            if (parameter === declaredThis) {
+                continue;
+            }
             if (!ts.isIdentifier(parameter.name)) {
                 this.unsupported(parameter, "a destructured parameter");
                 return undefined;
@@ -2499,6 +2524,83 @@ export class Lowerer {
             params.push({name: parameter.name.text, type});
         }
         return params;
+    }
+
+    /**
+     * A declared receiver — `area(this: Reference<Circle>): f64`.
+     *
+     * It is a promise about what the *caller* supplies, and tsc is what keeps
+     * it: a receiver whose type is not assignable to the declared one is
+     * refused at the call site, which is the whole reason to write one. Nothing
+     * here re-checks that. What this checks is the two ways the promise can be
+     * one this compiler cannot keep.
+     *
+     * **A `static` and a constructor have no receiver.** tsc refuses the
+     * constructor case itself (`TS2681`); a `static` it accepts, and the
+     * annotation would then describe a `this` that nothing binds.
+     *
+     * **The receiver is this class, or one it derives from.** tsc believes a
+     * declared `this` rather than checking it against the enclosing class, so
+     * `this: Reference<Other>` type-checks and the body then reads `Other`'s
+     * fields off a `Circle` — every offset wrong, no diagnostic. A *base* is
+     * the case that has to stay legal: base fields are the prefix of the
+     * derived layout, so `override read(this: Reference<Base>)` reads the right
+     * offsets off a `Derived`, and narrowing an override's receiver to the base
+     * is a reasonable thing to write. The erasure is what answers, so a
+     * spelling that erases to the same reference passes whatever it is written
+     * as.
+     */
+    #checkDeclaredThis(
+        declared: ts.ParameterDeclaration,
+        receiver: ClassInfo | undefined,
+        bindings: Substitution,
+    ): boolean {
+        if (receiver === undefined) {
+            this.error(
+                declared,
+                "GF0002",
+                "there is no `this` here to describe: a `static` method has no receiver, " +
+                "and nothing is bound to the name inside one. Drop the parameter, or " +
+                "make this an instance method if it wants the object.",
+            );
+            return false;
+        }
+        const type = this.erase(
+            declared,
+            this.#checker.getTypeAtLocation(declared),
+            bindings,
+        );
+        if (type === undefined) {
+            return false;
+        }
+        if (type.kind !== "reference" || type.referent.kind !== "class") {
+            this.error(
+                declared,
+                "GF0002",
+                "a declared `this` is the receiver, and a receiver is an address — " +
+                `write it as \`Reference<${receiver.name}>\`. Taking it by value would ` +
+                "be a copy of the object the caller is calling a method on, which is " +
+                "not what any call site means.",
+            );
+            return false;
+        }
+        const named = type.referent.name;
+        for (let owner: ClassInfo | undefined = receiver; owner !== undefined; owner = owner.base) {
+            if (owner.name === named) {
+                return true;
+            }
+        }
+        this.error(
+            declared,
+            "GF0002",
+            `this is a method of \`${receiver.name}\`, so its receiver is a ` +
+            `\`${receiver.name}\` or something \`${receiver.name}\` derives from — but ` +
+            `it declares \`this\` as a \`${named}\`, which is neither. tsc believes a ` +
+            "declared `this` rather than checking it against the enclosing class, so " +
+            "the body would read the wrong fields off the right object and nothing " +
+            "would say so.",
+        );
+        return false;
     }
 
     #declareClassFn(
@@ -2939,6 +3041,22 @@ export class Lowerer {
 
     #signature(node: ts.FunctionDeclaration, bindings: Substitution): FnSignature | undefined {
         const params: { name: string; type: MachineType }[] = [];
+        // A free function has no receiver. tsc accepts the declaration — it is a
+        // promise about a caller that would supply one through `call` or `bind`,
+        // neither of which exists here — so `this` inside it is a name nothing
+        // binds, and the annotation describes something that cannot happen.
+        const declaredThis = thisParameterOf(node);
+        if (declaredThis !== undefined) {
+            this.error(
+                declaredThis,
+                "GF0002",
+                "a free function has no receiver, so there is nothing for a declared " +
+                "`this` to describe — the call sequence has no slot to pass one in. " +
+                "Make it a method if it wants an object, or take the object as an " +
+                "ordinary `Reference<T>` parameter.",
+            );
+            return undefined;
+        }
         for (const parameter of node.parameters) {
             if (!ts.isIdentifier(parameter.name)) {
                 this.unsupported(parameter, "a destructured parameter");

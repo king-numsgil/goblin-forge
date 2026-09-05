@@ -3703,12 +3703,10 @@ says borrowed *and* read-only, and is the signature a loop over somebody else's
 array wants.
 
 **Shallow.** `readonly Body[]` refuses `xs[0] = b` and says nothing about
-`xs[0].mass = 1`. Deep would require `Readonly<T>` to survive erasure as the
-class it was made from, and it does not: a mapped type is an anonymous object
-type, `classOf` finds no class, and it would erase structurally to a nameless
-aggregate with the same fields — losing the vtable, the itable and the generated
-destructor. That is the same obstacle a general `const` reference runs into, and
-it is not solved here.
+`xs[0].mass = 1`. Deep would require `Readonly<T>` to reach the erasure as the
+class it was made from, which is not free and is not done here. *(§30 measured
+this and it is recoverable — `aliasTypeArguments` carries the unmapped type —
+so the obstacle is smaller than this paragraph originally claimed.)*
 
 ### Left open
 
@@ -3720,7 +3718,121 @@ same shape — ask whether the place `take` is about to write is one this code m
 write — and doing both at once was out of scope rather than out of reach.
 
 **A general read-only reference does not exist.** `Reference<T>` has no const
-half (§24), and the mapped-type spelling breaks erasure as above. If it is ever
-wanted, the shape that survives is a brand that erases identically plus a
-frontend check — the backend must not learn about it, because both are one
-`ptr`.
+half (§24). §30 is where that was worked out.
+
+---
+
+## §30 — What a `ConstReference<T>` would be *(measured, not built, 2026-09-04)*
+
+Nothing here is implemented except the declared receiver at the end, which is
+the piece the rest needs and which stands on its own. The point of the section
+is that the questions were answered by **running tsc**, not by reasoning about
+it — §24's lesson — so the next person starts from measurements rather than
+from a plan.
+
+### The spelling
+
+```ts
+interface ConstReferenceCore<T> {
+    readonly [ReferenceBrand]?: unknown;   // the one-way door
+    readonly [ConstBrand]?: T;             // the referent, unmapped
+}
+type ConstReference<T> = Readonly<T> & ConstReferenceCore<T>;
+```
+
+Three separate jobs, one per line, and none of them is doing another's work.
+
+**`Readonly<T>` refuses the writes.** `p.x = 1` through one is `TS2540`,
+**including inside a generic** — `function f<T extends Point>(p: ConstReference<T>)`
+refuses `p.x = 1`. That is worth stating loudly next to §24, which found that a
+*conditional* type will not resolve over an unresolved type parameter and
+concluded that these types should stay simple. The narrower and correct lesson:
+conditionals defer, homomorphic mapped types do not.
+
+**`[ReferenceBrand]?: unknown` is the one-way door.** A shared optional key is
+checked covariantly, so `Reference<T>`'s `?: T` satisfies `?: unknown` and
+`unknown` does not satisfy `T`. Mutable flows to const, const does not flow
+back, and a plain `T` satisfies both because the key is optional and absent —
+which is what keeps every existing `f(p)` call site working. Making
+`ReferenceBrand` *required* instead was the first idea and is a non-starter for
+that exact reason, the same one `LocalFnCore` documents about its own brand.
+
+**`[ConstBrand]?: T` carries the unmapped type**, and does two things with it.
+`referentOf` reads the referent out of `ReferenceBrand`'s *type*, which is
+`unknown` here, so it has to consult this instead — and then the erasure gets a
+plain `Point`, `classOf` finds the class, and the vtable, itable and destructor
+are all intact. **The mapped type never has to reach the backend at all.** It
+exists only in tsc's view of member access.
+
+The second thing is not obvious and is the reason this key is not optional
+design. `Readonly<>` **drops private members** — `keyof C` does not include
+them — so two nominally distinct classes become interchangeable under it:
+`Readonly<Padded>` is assignable to `Readonly<Packed>`, measured. That is
+exactly the confusion `dvec3`'s `private readonly __linalg` exists to prevent
+(§22), and those two escape it today only because their methods name their own
+types, which is luck rather than design. `[ConstBrand]?: T` restores it:
+`ConstReference<Padded>` is not assignable to `ConstReference<Packed>`, because
+the brand's own type is compared and `Padded` is not a `Packed`.
+
+### What tsc will not do
+
+**A field write is refused; a write *through* a field is not.**
+`ship.crew.push(1)` compiles, because `Readonly<Ship>` makes the binding `crew`
+unwritable and leaves its type `number[]`. C++'s `const` propagates one level
+and this does not. Closing it means a recursive `DeepReadonly<T>` mapping `T[]`
+to `readonly T[]`, which is newly possible now that §29 gave `ReadonlyArray` a
+declaration — and which would want measuring against §23's recursive types
+before anyone believes it.
+
+**`take` and `move` still get through**, for §29's reason: they are writes
+spelled as reads. `GF0240` is the pattern; a const reference needs the same
+check one rung up.
+
+### The declared receiver, which *is* built
+
+`Readonly<T>` cannot stop `p.bump()` — a mapped type has nowhere to record that
+a method mutates, and TypeScript has no `int get() const`. What it does have is
+**`this` parameters**, and they are checked at the call site:
+
+```ts
+class Counter {
+    bump(this: Reference<Counter>): void { this.n = this.n + 1; }
+    read(this: ConstReference<Counter>): i32 { return this.n; }
+}
+```
+
+Measured: with the brands above, tsc refuses `bump()` on a const receiver and
+allows `read()`, **and it survives a type parameter**. So the whole method half
+of const-correctness is tsc's, for the price of an annotation. The polarity is
+inverted from C++ — mutable is the default and const is opted into — which is
+the only version that does not require touching every existing method.
+
+Three things had to be true in this compiler before that annotation was
+writable, and now are:
+
+- **Arity.** A declared `this` is `parameters[0]` in the AST and absent from
+  tsc's signature. A method's parameters are also *numbered* — receiver at
+  local 1, arguments from 2 — so leaving it in the list both declares a second
+  binding for `this` and shifts every argument down a slot. `thisParameterOf`
+  takes any signature now, and `#classFnParams` drops it.
+- **The receiver is checked.** tsc *believes* a declared `this` rather than
+  comparing it to the enclosing class, so `this: Reference<Other>` type-checks
+  and the body then reads another class's fields off this one. Where the two
+  classes differ tsc catches the call site with `TS2684`; where they are
+  structurally identical it does not, and that is the case that would be silent
+  today and wrong tomorrow. `GF0002` now answers, and it allows a **base** —
+  base fields are the prefix of the derived layout, so narrowing an override's
+  receiver to the base reads the right offsets.
+- **A `static` and a free function are refused.** Neither has a receiver, and
+  the annotation would describe a `this` that nothing binds.
+
+### One thing that cannot be marked
+
+**An accessor.** `get x(this: ConstReference<C>)` is `TS2784` — a getter takes
+no parameters and a setter takes exactly one, and a declared `this` is a
+parameter as far as the grammar is concerned. So a getter can never be const,
+which means a const receiver can never read through one. That is a hard limit
+of the spelling rather than a gap in this compiler, and it should be weighed
+before the rest is built: a design where the natural reader of a value is
+unmarkable is a design where `ConstReference<T>` is awkward exactly where it
+would be used most.
