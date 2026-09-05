@@ -990,14 +990,26 @@ function eraseReferent(
     referent: ts.Type,
     state: Erasure,
 ): MachineType | null {
-    // `Reference<Readonly<T>>` — the read-only borrow, and the shape this type
-    // is actually for. It is a `Reference<T>` in every respect that reaches the
-    // backend, so the `readonly` comes off here and the rest of this function
-    // answers about `T`: a contract still dispatches, a class still carries its
-    // vtable, and only tsc remembers that the fields may not be assigned to.
-    const readonlyTarget = readonlyTargetOf(referent);
-    if (readonlyTarget !== null) {
-        return eraseReferent(checker, readonlyTarget, state);
+    // `Reference<Readonly<T>>` — the *almost* read-only borrow, and the one
+    // spelling of it that is refused. It reads like `const T &` and is not one:
+    // it refuses a field write and permits `b.spin()`, and it converts to a
+    // plain `Reference<T>` on the way into anything that asks for one, so the
+    // const-ness is gone at the first call. Both holes close only for a class
+    // that happens to declare a `private` member, which makes whether this type
+    // means anything a property of an unrelated line.
+    //
+    // `ConstReference<T>` is the spelling, and it reaches here with `T` rather
+    // than `Readonly<T>` — its brand carries the unmapped type — so this arm
+    // sees only the one that was written the wrong way.
+    if (readonlyTargetOf(referent) !== null) {
+        throw new ErasureError(
+            "a `Reference<Readonly<T>>` is not a read-only borrow, though it looks " +
+            "like one: it refuses a write to a field and allows a method that " +
+            "writes the same field, and it converts to a plain `Reference<T>` at " +
+            "the first call that wants one. Write `ConstReference<T>`, which is " +
+            "the same address and refuses all three.",
+            "GF0242",
+        );
     }
 
     // A `Reference<T>` inside a generic. What `T` is decides every question
@@ -1400,7 +1412,6 @@ export function nullableOf(checker: ts.TypeChecker, type: ts.Type): ts.Type | nu
     return real[0] ?? null;
 }
 
-/** What a `Reference<T>` refers to, read off its brand, or `null`. */
 /**
  * What a `Pointer<T>` points at.
  *
@@ -1425,8 +1436,26 @@ export function pointeeOf(checker: ts.TypeChecker, type: ts.Type): ts.Type | nul
     return checker.getNonNullableType(pointee);
 }
 
+/**
+ * What a `Reference<T>` — or a `ConstReference<T>` — refers to, read off its
+ * brand.
+ *
+ * **`ConstBrand` first, and it has to be.** A `ConstReference<T>` declares
+ * `ReferenceBrand` too, which is what makes it a reference to everything that
+ * asks; but it declares it as `unknown`, because that asymmetry is the one-way
+ * door stopping a read-only borrow from converting to a mutable one. So the
+ * mutable brand is exactly the wrong place to read the referent from here, and
+ * reading it would hand back `unknown` — "this `Reference<T>` has no `T`" about
+ * a type that plainly has one.
+ *
+ * Read from a brand rather than from the intersection's other member for the
+ * reason {@link pointeeOf} gives, and for a second one here: the other member
+ * is `Readonly<T>`, and the erasure wants the `T`.
+ */
 export function referentOf(checker: ts.TypeChecker, type: ts.Type): ts.Type | null {
-    const brand = brandedProperty(checker, type, "ReferenceBrand");
+    const brand =
+        brandedProperty(checker, type, "ConstBrand") ??
+        brandedProperty(checker, type, "ReferenceBrand");
     if (!brand) {
         return null;
     }

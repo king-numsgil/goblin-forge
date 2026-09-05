@@ -300,6 +300,23 @@ describe("codes raised by a program", () => {
         );
     });
 
+    test("GF0242 — the read-only borrow written the wrong way", async () => {
+        await expectRejected(
+            "diag-0242",
+            // Refuses a field and not a method, and converts to a mutable
+            // reference at the first call. `ConstReference<T>` is the spelling.
+            `interface S { a: i32; }
+
+       function read(s: Reference<Readonly<S>>): i32 { return s.a; }
+
+       export function main(): i32 {
+         const s: S = {a: 1};
+         return read(s);
+       }\n`,
+            "GF0242",
+        );
+    });
+
     test("GF0301 — a type that cannot cross the C boundary", async () => {
         await expectRejected(
             "diag-0301",

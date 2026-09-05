@@ -3915,4 +3915,88 @@ because the gap is the point.
 apart only by a brand are one type under it (§30 measured this). Neither is
 fixable here; both are properties of the mapped type, and the second is the
 reason a `ConstReference<T>` would carry the unmapped type in a brand of its
-own.
+own. *(§32 built it, and does.)*
+
+---
+
+## §32 — `ConstReference<T>`, and one spelling for `const T &` *(settled and built, 2026-09-04)*
+
+**Answer: `ConstReference<T>` is the read-only borrow, and it is the only
+spelling.** `Reference<Readonly<T>>` is `GF0242`.
+
+```ts
+type ConstReference<T> = Readonly<T> & ConstReferenceCore<T>;
+
+interface ConstReferenceCore<T> {
+    readonly [ReferenceBrand]?: unknown;   // the one-way door
+    readonly [ConstBrand]?: T;             // the referent, unmapped
+}
+```
+
+The same address a `Reference<T>` is — one machine word, the same ABI, the same
+erasure — and the compiler change is one line in `referentOf`, which reads
+`ConstBrand` before `ReferenceBrand`.
+
+### Why there had to be one spelling
+
+§31 shipped `Reference<Readonly<T>>` as the read-only borrow. It is not one, and
+the way it fails is the bad way: **it depends on a line somewhere else.**
+
+| | plain class or shape | class with a `private` member |
+|---|---|---|
+| `b.x = 1` | refused | refused |
+| passed where `Reference<T>` is wanted | **allowed** | refused |
+| `b.spin()`, `spin` taking a mutable `this` | **allowed** | refused |
+
+A private member makes a class nominal to tsc, so the two right-hand columns
+close by accident. Whether the annotation means anything is then a property of
+an unrelated declaration, which is worse than it meaning nothing — a guarantee
+that holds in the file you tested and not in the next one.
+
+Keeping both spellings and documenting the difference was the alternative and
+was rejected: the weaker one reads exactly like the stronger one, and there is
+no signature where it is the better choice.
+
+### The two brands, and what each is for
+
+**`[ReferenceBrand]?: unknown`, where `ReferenceCore` carries `T`.** A key both
+types declare is checked covariantly, so `T` satisfies `unknown` and `unknown`
+does not satisfy `T`: mutable converts to const, const never converts back. Both
+optional, so a plain value satisfies either and no call site has to write
+anything — which is exactly what a *required* brand would cost, for the reason
+`LocalFnCore` gives about its own. Declaring `ReferenceBrand` at all is also
+what makes a `ConstReference<T>` *be* a reference to everything that reads the
+brand, so the ABI, the borrow rules and the C-boundary checks are unchanged
+without a line written for any of them.
+
+**`[ConstBrand]?: T`** carries the referent unmapped, and does two jobs.
+`referentOf` needs it, because the other brand says `unknown` — reading that one
+would answer "this `Reference<T>` has no `T`" about a type that plainly has one.
+And it repairs nominality: `keyof` drops `private` members, so
+`Readonly<aligned_dvec3>` satisfies a `Readonly<dvec3>` (§30), and comparing
+this key compares the unmapped types instead, which are nominal. There is a test
+that hands a padded vector to a packed parameter.
+
+### The method half is tsc's, through `this`
+
+`Readonly<T>` cannot stop `b.spin()` — TypeScript has no `int get() const`. A
+declared receiver (§30) can, and now does:
+
+```ts
+class Body {
+    spin(this: Reference<Body>): void { … }        // mutates
+    mass(this: ConstReference<Body>): f64 { … }    // does not
+}
+```
+
+`TS2684` on a const receiver calling `spin`, and `mass` is callable through
+either. The polarity is inverted from C++ — mutable is the default, const is
+opted into — because that is the only version that does not require touching
+every method that already exists.
+
+**An accessor still cannot be marked**, and this is the one real gap. A getter
+takes no parameters and a setter exactly one, so a declared `this` does not fit
+and `get x(this: ConstReference<C>)` is `TS2784`. A getter is therefore not
+reachable through a read-only borrow. §30 predicted this would be awkward
+exactly where the type is most wanted, and it is: write a method where it
+matters.

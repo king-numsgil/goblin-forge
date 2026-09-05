@@ -537,31 +537,46 @@ inheriting it. TypeScript disagrees and will type-check `new Derived(4)` against
 `Base`'s signature; that is `GF0241` here. A base whose constructor takes no
 arguments needs none of this — there is nothing to forward.
 
-**`Reference<Readonly<T>>` is `const T &`** — borrowed, and not written:
+**`ConstReference<T>` is `const T &`** — borrowed, and not written:
 
 ```ts
-function centre(b: Reference<Readonly<Body>>): dvec3 {
+function centre(b: ConstReference<Body>): dvec3 {
   return b.position;       // fine
   // b.position = v;       // TS2540 — read-only property
+  // spin(b);              // TS2345 — will not become a Reference<Body>
+  // b.spin();             // TS2684 — `spin` declares a mutable receiver
 }
 ```
 
-`Readonly<T>` is TypeScript's own mapped type, and here it is a *view*: it
-erases to exactly what `T` erases to, so a class keeps its layout, its vtable
-and its dispatch, and nothing reaches the backend. By value it is nearly
-pointless — a by-value parameter is a copy, and refusing to write your own copy
-protects nobody — so the borrowed form is the one worth writing.
+It is the same address a `Reference<T>` is: one machine word, the same ABI, the
+same erasure, and nothing in the backend knows which was written. A value
+converts to one implicitly and so does a `Reference<T>`; the reverse does not
+happen, which is the difference between a promise and a suggestion.
 
-Three things it does not do. It **does not stop a method**: `b.spin()` compiles,
-because TypeScript has no way to say a method leaves its receiver alone, which
-is what a declared `this` below is for. It is **shallow**, so `Readonly<Ship>`
-refuses `s.crew = xs` and permits `s.crew.push(x)`, as `const` does through a
-pointer member. And it **drops `private` members**, so two classes told apart
-only by a private brand are the same type under it.
+The third refusal needs the method to say what it needs, and that is a `this`
+parameter — TypeScript's own syntax, and C++'s `const` member function with the
+polarity inverted, since a method here mutates unless it says otherwise:
 
-`Readonly<T[]>` is `readonly T[]` and `Readonly<string>` is `string`; both are
-tsc's own doing. Do not write `Readonly<i32>` — a scalar has nothing to make
-read-only, and what you get is a type you can take and cannot use.
+```ts
+class Body {
+  spin(this: Reference<Body>): void { … }        // mutates
+  mass(this: ConstReference<Body>): f64 { … }    // does not — callable on both
+}
+```
+
+`Readonly<T>` is the mapped type underneath, and on its own it is a *view of a
+value*: it erases to exactly what `T` erases to, so a class keeps its layout,
+its vtable and its dispatch. Use it by value, as a field type, or as
+`Readonly<T[]>` — which is `readonly T[]`. **`Reference<Readonly<T>>` is
+`GF0242`**: it refuses a field and permits a method that writes the same field,
+and it converts to a `Reference<T>` at the first call, so it reads as a
+guarantee and is not one.
+
+`const` is shallow here, as it is in C++ through a pointer member:
+`ConstReference<Ship>` refuses `s.crew = xs` and permits `s.crew.push(x)`. An
+accessor cannot be marked at all — a getter takes no parameters, so a declared
+`this` will not fit — and `Readonly<i32>` is not worth writing, because a scalar
+has nothing to make read-only.
 
 A method may also declare its receiver, using TypeScript's `this` parameter:
 

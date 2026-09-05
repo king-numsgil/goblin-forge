@@ -246,31 +246,30 @@ describe("references", () => {
 });
 
 /**
- * `Readonly<T>`, and `Reference<Readonly<T>>` — the read-only borrow.
+ * `Readonly<T>` — a view of a value, and the mechanism the borrow is built on.
  *
- * `Readonly<T>` is TypeScript's own mapped type, which `noLib` means the
- * prelude has to declare. It is a **view**: it erases to whatever `T` erases
- * to, so a class keeps its name, its vtable and its interned MIR struct, and
- * the backend never learns the type was written.
+ * TypeScript's own mapped type, which `noLib` means the prelude has to declare.
+ * It erases to whatever `T` erases to, so a class keeps its name, its vtable
+ * and its interned MIR struct, and the backend never learns it was written.
  *
  * That unwrapping is not a shortcut — erasing the mapped type *structurally*
- * gets a different answer three ways over, and each of them is a test below.
- * A class would lose its nominality and therefore its dispatch. `keyof` drops
- * `private`, so a layout would lose fields it has. And over an unresolved type
- * parameter a mapped type has no properties at all, so `Readonly<T>` inside a
- * generic erased to an empty struct rather than to what the instantiation
- * bound `T` to.
+ * gets a different answer three ways over, and each of them is a test here or
+ * next door. A class would lose its nominality and therefore its dispatch.
+ * `keyof` drops `private`, so a layout would lose fields it has. And over an
+ * unresolved type parameter a mapped type has no properties at all, so
+ * `Readonly<T>` inside a generic erased to an empty struct rather than to what
+ * the instantiation bound `T` to.
  *
- * By value it is nearly pointless — refusing to write your own copy protects
- * nobody — so most of these borrow. `Reference<Readonly<T>>` is `const T &`,
- * and it is the signature a loop over somebody else's data wants.
+ * **The borrow is `ConstReference<T>`, not `Reference<Readonly<T>>`**, and the
+ * second is `GF0242`. What is left for this type on its own is by-value
+ * positions, field types, and `Readonly<T[]>`.
  */
 describe("`Readonly<T>`", () => {
-    test("a borrowed shape reads, and will not be written", async () => {
+    test("by value it reads, and will not be written", async () => {
         const result = await run(
             "readonly-shape",
             `${POINT}
-       function sum(p: Reference<Readonly<Point>>): i32 { return p.x + p.y; }
+       function sum(p: Readonly<Point>): i32 { return p.x + p.y; }
 
        export function main(): i32 {
          const p: Point = {x: 3, y: 4};
@@ -282,11 +281,11 @@ describe("`Readonly<T>`", () => {
         expect(result.leaked).toBe(0);
     });
 
-    test("writing through one is tsc's to refuse", async () => {
+    test("writing one is tsc's to refuse", async () => {
         const {result} = await compileSource(
             "readonly-shape-write",
             `${POINT}
-       function bad(p: Reference<Readonly<Point>>): void { p.x = 9; }
+       function bad(p: Readonly<Point>): void { p.x = 9; }
 
        export function main(): i32 {
          const p: Point = {x: 1, y: 2};
@@ -298,150 +297,54 @@ describe("`Readonly<T>`", () => {
         expect(errorCodes(result)).toContain("TS2540");
     });
 
-    test("a class keeps its vtable, so dispatch still works through one", async () => {
-        // The test that says the unwrapping is real. Erased structurally, a
-        // `Readonly<Animal>` is a nameless aggregate with `Animal`'s fields and no
-        // vtable slot — so this would either not compile or answer 1.
-        const result = await run(
-            "readonly-class-dispatch",
-            `class Animal { speak(): i32 { return 1; } }
-       class Dog extends Animal { override speak(): i32 { return 2; } }
-
-       function ask(a: Reference<Readonly<Animal>>): i32 { return a.speak(); }
-
-       export function main(): i32 {
-         const d = new Dog();
-         console.log(\`\${ask(d)}\`);
-         return 0;
-       }\n`,
-        );
-        expect(result.stdout).toBe("2\n");
-        expect(result.leaked).toBe(0);
-    });
-
-    test("a class field is refused, and a method is not", async () => {
-        // `Readonly<T>` cannot stop `c.bump()`: TypeScript has no way to say a
-        // method does not mutate its receiver, which is what a declared `this` is
-        // for. Both halves asserted, because the gap is the point.
-        const result = await run(
-            "readonly-class-method",
-            `class Counter {
-         constructor(public n: i32) {}
-         bump(): void { this.n = this.n + 1; }
-       }
-
-       function poke(c: Reference<Readonly<Counter>>): i32 { c.bump(); return c.n; }
-
-       export function main(): i32 {
-         const c = new Counter(1);
-         console.log(\`\${poke(c)}\`);
-         return 0;
-       }\n`,
-        );
-        expect(result.stdout).toBe("2\n");
-
-        const {result: refused} = await compileSource(
-            "readonly-class-field-write",
-            `class Counter { constructor(public n: i32) {} }
-
-       function poke(c: Reference<Readonly<Counter>>): void { c.n = 9; }
-
-       export function main(): i32 { const c = new Counter(1); poke(c); return 0; }\n`,
-        );
-        expect(refused.ok).toBe(false);
-        expect(errorCodes(refused)).toContain("TS2540");
-    });
-
-    test("it survives a type parameter, where a mapped type has no properties", async () => {
-        // Unwrapped to `T` *before* anything asks for properties, so the type
-        // parameter resolves from the instantiation's bindings the way a bare `T`
-        // does. Erased structurally this is an object with no fields, which is
-        // `GF0001`.
-        const result = await run(
-            "readonly-generic",
+    test("`Reference<Readonly<T>>` is refused, and points at the spelling", async () => {
+        // The almost-const borrow. It refuses a field write, permits a method
+        // that writes the same field, and converts to a plain `Reference<T>` at
+        // the first call that wants one — and both holes close only for a class
+        // that happens to declare a `private` member.
+        const diagnostic = await expectRejected(
+            "readonly-reference-refused",
             `${POINT}
-       function first<T>(a: Reference<Readonly<T>>, b: Reference<Readonly<T>>): i32 {
-         return 1;
-       }
-
-       interface Named { tag: string; }
+       function sum(p: Reference<Readonly<Point>>): i32 { return p.x + p.y; }
 
        export function main(): i32 {
-         const p: Point = {x: 1, y: 2};
-         const n: Named = {tag: "a"};
-         console.log(\`\${first<Point>(p, p)} \${first<Named>(n, n)}\`);
-         return 0;
+         const p: Point = {x: 3, y: 4};
+         return sum(p);
        }\n`,
+            "GF0242",
         );
-        expect(result.stdout).toBe("1 1\n");
-        expect(result.leaked).toBe(0);
+        expect(diagnostic.message).toContain("ConstReference");
     });
 
-    test("an owning field is borrowed rather than copied", async () => {
+    test("as a field type, and over an array", async () => {
         const result = await run(
-            "readonly-owning",
-            `interface Held { name: string; }
+            "readonly-field-array",
+            `interface Holder { rows: Readonly<i32[]>; }
 
-       function len(h: Reference<Readonly<Held>>): usize { return h.name.length; }
+       function size(s: Readonly<string>): usize { return s.length; }
 
        export function main(): i32 {
-         const h: Held = {name: "abcd"};
-         console.log(\`\${len(h)} \${h.name}\`);
+         const h: Holder = {rows: [1, 2, 3]};
+         console.log(\`\${h.rows[1]} \${h.rows.length} \${size("abcd")}\`);
          return 0;
        }\n`,
         );
-        expect(result.stdout).toBe("4 abcd\n");
+        expect(result.stdout).toBe("2 3 4\n");
         expect(result.leaked).toBe(0);
-    });
-
-    test("it is shallow, and nests", async () => {
-        const result = await run(
-            "readonly-nested",
-            `interface Inner { n: i32; }
-       interface Outer { inner: Inner; }
-
-       function read(o: Reference<Readonly<Outer>>): i32 { return o.inner.n; }
-
-       export function main(): i32 {
-         const o: Outer = {inner: {n: 5}};
-         console.log(\`\${read(o)}\`);
-         return 0;
-       }\n`,
-        );
-        expect(result.stdout).toBe("5\n");
     });
 
     test("over an array and a string, tsc has already answered", async () => {
         // A homomorphic mapped type over an array is `readonly T[]`, and over a
         // primitive it is the primitive — so neither reaches the unwrapping at
         // all, and `Readonly<i32[]>` is the `readonly i32[]` of the array module.
-        const result = await run(
-            "readonly-array-string",
-            `function total(xs: Readonly<i32[]>): i32 {
-         let sum: i32 = 0;
-         for (let i: usize = 0; i < xs.length; i = i + 1) { sum = sum + xs[i]; }
-         return sum;
-       }
-
-       function size(s: Readonly<string>): usize { return s.length; }
-
-       export function main(): i32 {
-         const xs: i32[] = [1, 2, 3];
-         console.log(\`\${total(xs)} \${size("abcd")}\`);
-         return 0;
-       }\n`,
-        );
-        expect(result.stdout).toBe("6 4\n");
-        expect(result.leaked).toBe(0);
-
-        const {result: refused} = await compileSource(
+        const {result} = await compileSource(
             "readonly-array-push",
             `function bad(xs: Readonly<i32[]>): void { xs.push(3); }
 
        export function main(): i32 { const xs: i32[] = [1]; bad(xs); return 0; }\n`,
         );
-        expect(refused.ok).toBe(false);
-        expect(errorCodes(refused)).toContain("TS2339");
+        expect(result.ok).toBe(false);
+        expect(errorCodes(result)).toContain("TS2339");
     });
 
     test("a file's own `Readonly` is not this one", async () => {
@@ -466,5 +369,205 @@ describe("`Readonly<T>`", () => {
         );
         expect(result.stdout).toBe("13\n");
         expect(result.leaked).toBe(0);
+    });
+});
+
+/**
+ * `ConstReference<T>` — `const T &`, and the only spelling for it.
+ *
+ * The same address a `Reference<T>` is: one machine word, the same ABI, the
+ * same erasure, nothing in the backend that knows which was written. What
+ * differs is what tsc will allow, and it is three things rather than one.
+ *
+ * The type is `Readonly<T> & ConstReferenceCore<T>`, and each of the two brands
+ * in that core is load-bearing:
+ *
+ * `[ReferenceBrand]?: unknown`, where a `Reference<T>` carries `T`, is the
+ * **one-way door**. A key both declare is checked covariantly, so `T` satisfies
+ * `unknown` and `unknown` does not satisfy `T` — mutable converts to const and
+ * never back. Both optional, so a plain value still satisfies either and no
+ * call site has to write anything. It is also what makes a `ConstReference<T>`
+ * *be* a reference to everything that reads the brand.
+ *
+ * `[ConstBrand]?: T` carries the referent unmapped — the erasure reads it,
+ * because the other brand says `unknown` — and repairs the nominality
+ * `Readonly<>` throws away, since `keyof` drops `private` members.
+ *
+ * Without the door, both the laundering test and the method test below pass or
+ * fail depending on whether the class happens to declare a `private` field.
+ * That was the state of `Reference<Readonly<T>>`, and is why it is `GF0242`.
+ */
+describe("`ConstReference<T>`", () => {
+    test("it borrows, reads, and runs", async () => {
+        const result = await run(
+            "cref-read",
+            `class Body {
+         constructor(public mass: f64, public name: string) {}
+         heavy(this: ConstReference<Body>): boolean { return this.mass > 1.0; }
+       }
+
+       function named(b: ConstReference<Body>): string { return b.name; }
+
+       export function main(): i32 {
+         const b = new Body(2.5, "ceres");
+         console.log(\`\${named(b)} \${b.heavy()}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("ceres true\n");
+        expect(result.leaked).toBe(0);
+    });
+
+    test("a field write is refused", async () => {
+        const {result} = await compileSource(
+            "cref-write",
+            `${POINT}
+       function bad(p: ConstReference<Point>): void { p.x = 9; }
+
+       export function main(): i32 { const p: Point = {x: 1, y: 2}; bad(p); return 0; }\n`,
+        );
+        expect(result.ok).toBe(false);
+        expect(errorCodes(result)).toContain("TS2540");
+    });
+
+    test("it does not launder into a mutable reference", async () => {
+        // Neither of these declares a `private` member, which is the whole point:
+        // under `Reference<Readonly<T>>` both of these compiled and mutated.
+        for (const [name, source] of [
+            [
+                "shape",
+                `${POINT}
+       function mutate(p: Reference<Point>): void { p.x = 9; }
+       function read(p: ConstReference<Point>): void { mutate(p); }
+
+       export function main(): i32 { const p: Point = {x: 1, y: 2}; read(p); return 0; }\n`,
+            ],
+            [
+                "class",
+                `class C { constructor(public x: i32) {} }
+       function mutate(c: Reference<C>): void { c.x = 9; }
+       function read(c: ConstReference<C>): void { mutate(c); }
+
+       export function main(): i32 { const c = new C(1); read(c); return 0; }\n`,
+            ],
+        ] as const) {
+            const {result} = await compileSource(`cref-launder-${name}`, source);
+            expect({name, ok: result.ok}).toEqual({name, ok: false});
+            expect({name, codes: errorCodes(result)}).toEqual({name, codes: ["TS2345"]});
+        }
+    });
+
+    test("a mutating method is refused, and a const one is not", async () => {
+        // The half `Readonly<T>` cannot reach on its own. `bump` says what it
+        // needs; `read` says it needs less, and is callable through either.
+        const {result} = await compileSource(
+            "cref-mutating-method",
+            `class C {
+         constructor(public x: i32) {}
+         bump(this: Reference<C>): void { this.x = this.x + 1; }
+       }
+
+       function poke(c: ConstReference<C>): void { c.bump(); }
+
+       export function main(): i32 { const c = new C(1); poke(c); return 0; }\n`,
+        );
+        expect(result.ok).toBe(false);
+        expect(errorCodes(result)).toContain("TS2684");
+
+        const allowed = await run(
+            "cref-const-method",
+            `class C {
+         constructor(public x: i32) {}
+         read(this: ConstReference<C>): i32 { return this.x; }
+       }
+
+       function ask(c: ConstReference<C>): i32 { return c.read(); }
+
+       export function main(): i32 {
+         const c = new C(7);
+         // Through a const borrow, and on the value itself: a method that asks
+         // for less is callable from more.
+         console.log(\`\${ask(c)} \${c.read()}\`);
+         return 0;
+       }\n`,
+        );
+        expect(allowed.stdout).toBe("7 7\n");
+    });
+
+    test("a class keeps its vtable, so dispatch still works through one", async () => {
+        // The test that says the unwrapping is real. Erased structurally, this is
+        // a nameless aggregate with no vtable slot — so it would either not
+        // compile or answer 1.
+        const result = await run(
+            "cref-dispatch",
+            `class Animal { speak(): i32 { return 1; } }
+       class Dog extends Animal { override speak(): i32 { return 2; } }
+
+       function ask(a: ConstReference<Animal>): i32 { return a.speak(); }
+
+       export function main(): i32 {
+         const d = new Dog();
+         console.log(\`\${ask(d)}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("2\n");
+        expect(result.leaked).toBe(0);
+    });
+
+    test("the const brand keeps two classes apart that `Readonly<>` merges", async () => {
+        // `keyof` drops `private` members, so `Readonly<aligned_dvec3>` satisfies
+        // a `Readonly<dvec3>` — the exact confusion the linalg brand exists to
+        // prevent. Comparing `[ConstBrand]` compares the unmapped types, which
+        // are nominal.
+        const {result} = await compileSource(
+            "cref-nominal",
+            `import { dvec3, aligned_dvec3 } from "std/linalg";
+
+       function packed(v: ConstReference<dvec3>): f64 { return v.x; }
+
+       export function main(): i32 {
+         const padded = new aligned_dvec3(1, 2, 3);
+         const x: f64 = packed(padded);
+         return 0;
+       }\n`,
+        );
+        expect(result.ok).toBe(false);
+        expect(errorCodes(result)).toContain("TS2345");
+    });
+
+    test("an owning field is borrowed rather than copied, and survives a generic", async () => {
+        const result = await run(
+            "cref-owning-generic",
+            `interface Held { name: string; }
+
+       function len(h: ConstReference<Held>): usize { return h.name.length; }
+       function pass<T>(v: ConstReference<T>): ConstReference<T> { return v; }
+
+       export function main(): i32 {
+         const h: Held = {name: "abcd"};
+         console.log(\`\${len(pass<Held>(h))} \${h.name}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("4 abcd\n");
+        expect(result.leaked).toBe(0);
+    });
+
+    test("it is shallow, and nests", async () => {
+        const result = await run(
+            "cref-nested",
+            `interface Inner { n: i32; }
+       interface Outer { inner: Inner; }
+
+       function read(o: ConstReference<Outer>): i32 { return o.inner.n; }
+
+       export function main(): i32 {
+         const o: Outer = {inner: {n: 5}};
+         console.log(\`\${read(o)}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("5\n");
     });
 });

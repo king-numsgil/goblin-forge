@@ -704,6 +704,88 @@ type Reference<T> = T & ReferenceCore<T>;
  */
 type Readonly<T> = { readonly [K in keyof T]: T[K] };
 
+declare const ConstBrand: unique symbol;
+
+interface ConstReferenceCore<T> {
+    /**
+     * **`unknown`, where {@link ReferenceCore} carries `T`** — and that is the
+     * whole of the one-way door.
+     *
+     * A key both types declare is checked covariantly, so `T` satisfies
+     * `unknown` and `unknown` does not satisfy `T`: a `Reference<T>` converts
+     * to a `ConstReference<T>` and never back. Both are optional, so a plain
+     * value satisfies either and `f(p)` still needs nothing written at the
+     * call site — which is the property a *required* brand would destroy, for
+     * the reason {@link LocalFnCore} gives about its own.
+     *
+     * It also means a `ConstReference<T>` **is** a reference to everything that
+     * reads the brand, which is what keeps the erasure, the ABI and every
+     * borrow rule identical to `Reference<T>`'s. The two differ in what may be
+     * written, and in nothing else.
+     */
+    readonly [ReferenceBrand]?: unknown;
+
+    /**
+     * The referent, **unmapped**, and it is doing two jobs.
+     *
+     * The erasure reads the referent out of a brand's type, and this type's
+     * `ReferenceBrand` says `unknown` — so without this there would be nothing
+     * to point at.
+     *
+     * And it restores what `Readonly<T>` throws away. `keyof` drops `private`
+     * members, so two classes told apart only by a private brand are the same
+     * type under `Readonly<>` — `Readonly<aligned_dvec3>` satisfies a
+     * `Readonly<dvec3>`. Comparing *this* key compares `aligned_dvec3` against
+     * `dvec3`, which are nominal, and the distinction is back.
+     */
+    readonly [ConstBrand]?: T;
+}
+
+/**
+ * A **read-only borrow** — C++'s `const T &`, and the only spelling for it.
+ *
+ *     function centre(b: ConstReference<Body>): dvec3 { return b.position; }
+ *
+ * An address, exactly as {@link Reference} is: one machine word, the same ABI,
+ * the same erasure, and nothing in the backend knows which one was written. A
+ * value converts to one implicitly and so does a `Reference<T>`; what does not
+ * happen is the reverse.
+ *
+ * Three things it refuses that a `Reference<T>` allows, and the third is the
+ * reason this type exists rather than `Reference<Readonly<T>>`:
+ *
+ *   * **A field write.** `b.position = v` is `TS2540`, from the
+ *     {@link Readonly} half.
+ *   * **Laundering.** Passing one where a `Reference<T>` is wanted is
+ *     `TS2345`. Without the door above, that conversion is allowed for every
+ *     class that happens not to declare a `private` member — so const-ness
+ *     would hold or not hold depending on a detail of an unrelated
+ *     declaration.
+ *   * **A mutating method.** `b.spin()` is `TS2684`, provided `spin` says what
+ *     it needs:
+ *
+ * ```ts
+ * class Body {
+ *     spin(this: Reference<Body>): void { … }        // mutates
+ *     mass(this: ConstReference<Body>): f64 { … }    // does not
+ * }
+ * ```
+ *
+ * That is C++'s `const` member function with the polarity inverted: a method
+ * is mutable unless it says otherwise, because TypeScript has no `int get()
+ * const` and something had to be the default. A method that says nothing is
+ * callable on a `Reference<T>` and not on one of these.
+ *
+ * **An accessor cannot say it.** A getter takes no parameters and a setter
+ * exactly one, and a declared `this` is a parameter to the grammar — so
+ * `get x(this: ConstReference<C>)` is `TS2784`, and a getter is not reachable
+ * through a read-only borrow. Write a method where that matters.
+ *
+ * Shallow, like every `const` here: `c.parts.push(x)` is not this type's
+ * business, and `readonly T[]` is how a borrowed array says the same thing.
+ */
+type ConstReference<T> = Readonly<T> & ConstReferenceCore<T>;
+
 // ---------------------------------------------------------------------------
 // Closures. DECISIONS §18: three function types, all written down.
 //

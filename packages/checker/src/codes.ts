@@ -349,6 +349,31 @@ export const CODES = {
             "the way C++'s implicit default constructor does.",
     },
 
+    GF0242: {
+        title: "`Reference<Readonly<T>>` is not the read-only borrow",
+        explanation:
+            "It looks like `const T &` and is not one, in two ways that a reader has " +
+            "no way to see:\n\n" +
+            "**It stops a field and not a method.** `b.position = v` is refused; " +
+            "`b.spin()` is not, and `spin` may write the same field. `Readonly<T>` " +
+            "makes properties read-only, and TypeScript has no way to say that a " +
+            "method leaves its receiver alone.\n\n" +
+            "**It converts to a `Reference<T>`.** Passing one to anything that asks " +
+            "for a mutable reference is accepted, so the const-ness is gone at the " +
+            "first call rather than at the first write.\n\n" +
+            "Both holes happen to close for a class that declares a `private` " +
+            "member, because that makes it nominal to tsc — which means whether " +
+            "this type means anything depends on a line somewhere else that has " +
+            "nothing to do with it. That is the worst version of a guarantee.\n\n" +
+            "`ConstReference<T>` is the spelling, and it is the same address: one " +
+            "machine word, the same ABI, the same erasure. It refuses the write, " +
+            "the conversion, and — for a method that declares " +
+            "`this: Reference<T>` — the call.\n\n" +
+            "`Readonly<T>` on its own is not affected and stays useful: as a field " +
+            "type, by value where a copy is wanted anyway, and as `Readonly<T[]>`, " +
+            "which is `readonly T[]`.",
+    },
+
     // -- Layout and the C boundary -------------------------------------------
     GF0301: {
         title: "this type cannot cross the C boundary",
