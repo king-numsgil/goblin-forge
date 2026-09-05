@@ -776,10 +776,16 @@ interface ConstReferenceCore<T> {
  * const` and something had to be the default. A method that says nothing is
  * callable on a `Reference<T>` and not on one of these.
  *
- * **An accessor cannot say it.** A getter takes no parameters and a setter
- * exactly one, and a declared `this` is a parameter to the grammar — so
- * `get x(this: ConstReference<C>)` is `TS2784`, and a getter is not reachable
- * through a read-only borrow. Write a method where that matters.
+ * **Accessors work, and need nothing written.** `Readonly<T>` turns an accessor
+ * pair into a read-only *property*, so reading `c.doubled` through one is fine
+ * — including an overridden getter, which still dispatches — and `c.value = 9`
+ * is `TS2540`. That is the whole of what an accessor should do here.
+ *
+ * The one thing that cannot be said is that a **getter** leaves its receiver
+ * alone: a getter has no parameter list for a `this` to go in, so
+ * `get x(this: ConstReference<C>)` is `TS2784`. A getter that writes is
+ * therefore callable through a read-only borrow. It is a getter lying about
+ * being a read, and C++ has the same hole through `mutable`.
  *
  * Shallow, like every `const` here: `c.parts.push(x)` is not this type's
  * business, and `readonly T[]` is how a borrowed array says the same thing.

@@ -581,11 +581,17 @@ compile-time `const` over that is a lint painted on a hole. The two cases that
 want checking have spellings already: `ConstReference<T>` for a borrowed value,
 `readonly T[]` for a borrowed array.
 
+Accessors need nothing written: reading `s.name` through a const borrow works,
+including an overridden getter, and `s.name = x` is refused — an accessor pair
+is a read-only property under `Readonly<T>`. The one thing that cannot be said
+is that a *getter* leaves its receiver alone, since a getter has no parameter
+list for a `this`, so a getter that writes is callable through a const borrow.
+C++ has the same hole through `mutable`.
+
 `const` is shallow here, as it is in C++ through a pointer member:
-`ConstReference<Ship>` refuses `s.crew = xs` and permits `s.crew.push(x)`. An
-accessor cannot be marked at all — a getter takes no parameters, so a declared
-`this` will not fit — and `Readonly<i32>` is not worth writing, because a scalar
-has nothing to make read-only.
+`ConstReference<Ship>` refuses `s.crew = xs` and permits `s.crew.push(x)`. And
+`Readonly<i32>` is not worth writing, because a scalar has nothing to make
+read-only.
 
 A method may also declare its receiver, using TypeScript's `this` parameter:
 

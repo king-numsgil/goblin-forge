@@ -554,6 +554,77 @@ describe("`ConstReference<T>`", () => {
         expect(result.leaked).toBe(0);
     });
 
+    test("an accessor reads through one, and does not write through one", async () => {
+        // `Readonly<>` turns an accessor pair into a read-only *property*, so the
+        // getter half is reachable and the setter half is not — which is the
+        // behaviour wanted, and it costs nothing. A getter cannot *declare*
+        // `this: ConstReference<C>` (`TS2784`, a getter takes no parameters), but
+        // it does not need to: nothing about reading one is refused.
+        const result = await run(
+            "cref-accessor",
+            `class Base {
+         constructor(protected n: i32) {}
+         get tag(): i32 { return 1; }
+         get doubled(): i32 { return this.n * 2; }
+       }
+
+       class Derived extends Base {
+         constructor(n: i32) { super(n); }
+         override get tag(): i32 { return 2; }
+       }
+
+       function ask(b: ConstReference<Base>): i32 { return b.tag + b.doubled; }
+
+       export function main(): i32 {
+         const d = new Derived(5);
+         console.log(\`\${ask(d)}\`);
+         return 0;
+       }\n`,
+        );
+        // 2 from the override, dispatched through the const borrow, and 10.
+        expect(result.stdout).toBe("12\n");
+        expect(result.leaked).toBe(0);
+
+        const {result: refused} = await compileSource(
+            "cref-setter",
+            `class C {
+         private n: i32 = 0;
+         get value(): i32 { return this.n; }
+         set value(v: i32) { this.n = v; }
+       }
+
+       function poke(c: ConstReference<C>): void { c.value = 9; }
+
+       export function main(): i32 { const c = new C(); poke(c); return 0; }\n`,
+        );
+        expect(refused.ok).toBe(false);
+        expect(errorCodes(refused)).toContain("TS2540");
+    });
+
+    test("a getter that mutates is the one thing not refused", async () => {
+        // The whole of the accessor gap, and it is narrower than "getters do not
+        // work": what cannot be said is that a *getter* leaves its receiver
+        // alone, because a getter has no parameter list for a `this` to go in.
+        // A method has one and can say it; a getter that writes is a getter
+        // lying about being a read, and C++ has the same hole through `mutable`.
+        const result = await run(
+            "cref-mutating-getter",
+            `class C {
+         private n: i32 = 0;
+         get next(): i32 { this.n = this.n + 1; return this.n; }
+       }
+
+       function ask(c: ConstReference<C>): i32 { return c.next; }
+
+       export function main(): i32 {
+         const c = new C();
+         console.log(\`\${ask(c)} \${ask(c)}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("1 2\n");
+    });
+
     test("it is shallow, and nests", async () => {
         const result = await run(
             "cref-nested",

@@ -3830,12 +3830,13 @@ writable, and now are:
 
 **An accessor.** `get x(this: ConstReference<C>)` is `TS2784` — a getter takes
 no parameters and a setter takes exactly one, and a declared `this` is a
-parameter as far as the grammar is concerned. So a getter can never be const,
-which means a const receiver can never read through one. That is a hard limit
-of the spelling rather than a gap in this compiler, and it should be weighed
-before the rest is built: a design where the natural reader of a value is
-unmarkable is a design where `ConstReference<T>` is awkward exactly where it
-would be used most.
+parameter as far as the grammar is concerned. So a getter can never be marked.
+
+*(This was written as "a const receiver can never read through one", and that
+was wrong — §32 measured it. `Readonly<T>` makes an accessor pair a read-only
+property, so reading through a const borrow works and writing does not, with
+nothing written. What the missing annotation actually costs is only the ability
+to refuse a getter that mutates.)*
 
 *(§31 built `Readonly<T>` and with it `Reference<Readonly<T>>`, which is most of
 what this section was for. What is left undone here is the brands — the one-way
@@ -3994,12 +3995,18 @@ either. The polarity is inverted from C++ — mutable is the default, const is
 opted into — because that is the only version that does not require touching
 every method that already exists.
 
-**An accessor still cannot be marked**, and this is the one real gap. A getter
-takes no parameters and a setter exactly one, so a declared `this` does not fit
-and `get x(this: ConstReference<C>)` is `TS2784`. A getter is therefore not
-reachable through a read-only borrow. §30 predicted this would be awkward
-exactly where the type is most wanted, and it is: write a method where it
-matters.
+**Accessors work, and §30's worry about them was wrong.** `Readonly<T>` turns
+an accessor pair into a read-only *property*, so the getter half is reachable
+through a const borrow — an overridden one included, still dispatching — and
+the setter half is `TS2540`. That is precisely the split wanted, and it costs
+nothing: no annotation, no rule, no code.
+
+What survives of that worry is much smaller. A getter has no parameter list for
+a `this` to go in, so `get x(this: ConstReference<C>)` is `TS2784` and there is
+no way to say that a *getter* leaves its receiver alone. A getter that writes
+is therefore callable through a read-only borrow. That is a getter lying about
+being a read, and C++ has the same hole through `mutable` — so it is a gap in
+the same place C++ has one, rather than a gap this design opened.
 
 ### `Pointer<Readonly<T>>` is refused, and there is no `ConstPointer<T>`
 
