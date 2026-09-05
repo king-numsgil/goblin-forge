@@ -962,6 +962,28 @@ function eraseWrapper(
     if (pointee.getFlags() & ts.TypeFlags.Unknown) {
         return {kind: "pointer", pointee: {kind: "void"}};
     }
+    // `Pointer<Readonly<T>>` — the same trap `Reference<Readonly<T>>` is, and
+    // refused for the same reason. It stops `p.x = v` and stops nothing else:
+    // `p[0] = v` goes through the index signature, a mutating method goes
+    // through the receiver, and passing it where a `Pointer<T>` is wanted is
+    // accepted, so the const-ness is gone at the first call.
+    //
+    // There is no `ConstPointer<T>` to send the reader to, and that is a
+    // decision rather than a gap — a `Pointer<T>` is the escape hatch, and
+    // const on the one construct defined by carrying what this compiler will
+    // not vouch for is a lint over a hole (§24, §32).
+    if (readonlyTargetOf(pointee) !== null) {
+        throw new ErasureError(
+            "a `Pointer<Readonly<T>>` is not a read-only pointer, though it looks " +
+            "like one: it refuses `p.field = v` and permits `p[0] = v`, a method " +
+            "that writes the same field, and being passed anywhere a `Pointer<T>` " +
+            "is wanted. There is no read-only pointer here on purpose — a pointer " +
+            "is the escape hatch, and every operation on one is already unchecked. " +
+            "Write `ConstReference<T>` for a borrow that is checked, or " +
+            "`Pointer<T>` and mean it.",
+            "GF0242",
+        );
+    }
     // The indirection that makes `struct Node { struct Node *next; }` a shape
     // with a size rather than an infinite one: a pointer is a machine word
     // whatever is behind it, so a cycle may close through here.

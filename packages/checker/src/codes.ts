@@ -350,25 +350,36 @@ export const CODES = {
     },
 
     GF0242: {
-        title: "`Reference<Readonly<T>>` is not the read-only borrow",
+        title: "`Readonly<T>` inside an address does not make it read-only",
         explanation:
-            "It looks like `const T &` and is not one, in two ways that a reader has " +
-            "no way to see:\n\n" +
+            "`Reference<Readonly<T>>` and `Pointer<Readonly<T>>` both look like " +
+            "`const T &` and `const T *`, and neither is one. `Readonly<T>` makes " +
+            "*properties* read-only, which is less than it appears from inside an " +
+            "address:\n\n" +
             "**It stops a field and not a method.** `b.position = v` is refused; " +
-            "`b.spin()` is not, and `spin` may write the same field. `Readonly<T>` " +
-            "makes properties read-only, and TypeScript has no way to say that a " +
-            "method leaves its receiver alone.\n\n" +
-            "**It converts to a `Reference<T>`.** Passing one to anything that asks " +
-            "for a mutable reference is accepted, so the const-ness is gone at the " +
-            "first call rather than at the first write.\n\n" +
-            "Both holes happen to close for a class that declares a `private` " +
-            "member, because that makes it nominal to tsc — which means whether " +
-            "this type means anything depends on a line somewhere else that has " +
-            "nothing to do with it. That is the worst version of a guarantee.\n\n" +
-            "`ConstReference<T>` is the spelling, and it is the same address: one " +
-            "machine word, the same ABI, the same erasure. It refuses the write, " +
-            "the conversion, and — for a method that declares " +
+            "`b.spin()` is not, and `spin` may write the same field. TypeScript has " +
+            "no way to say that a method leaves its receiver alone.\n\n" +
+            "**It converts away.** Passing one where the mutable form is wanted is " +
+            "accepted, so the const-ness is gone at the first call rather than at " +
+            "the first write. For a reference this happens to close for a class " +
+            "that declares a `private` member, because that makes it nominal to " +
+            "tsc — so whether the annotation means anything depends on a line " +
+            "somewhere else that has nothing to do with it. That is the worst " +
+            "version of a guarantee.\n\n" +
+            "**Through a pointer it also stops nothing at all about `p[0] = v`**, " +
+            "which goes through the index signature rather than through a " +
+            "property.\n\n" +
+            "`ConstReference<T>` is the spelling for a read-only borrow, and it is " +
+            "the same address: one machine word, the same ABI, the same erasure. " +
+            "It refuses the write, the conversion, and — for a method that declares " +
             "`this: Reference<T>` — the call.\n\n" +
+            "**There is deliberately no `ConstPointer<T>`.** A `Pointer<T>` is the " +
+            "escape hatch, whose stated job is to carry what this compiler will not " +
+            "vouch for; it is covariant, its indexing is unchecked and its " +
+            "arithmetic is arbitrary. A compile-time `const` over that is a lint " +
+            "painted on a hole, and the two cases that want checking — a borrowed " +
+            "value and a borrowed array — are `ConstReference<T>` and " +
+            "`readonly T[]`.\n\n" +
             "`Readonly<T>` on its own is not affected and stays useful: as a field " +
             "type, by value where a copy is wanted anyway, and as `Readonly<T[]>`, " +
             "which is `readonly T[]`.",

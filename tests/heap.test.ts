@@ -554,6 +554,94 @@ describe("the layout intrinsics", () => {
     });
 });
 
+/**
+ * `Pointer<Readonly<T>>` — refused, and not replaced.
+ *
+ * The same trap `Reference<Readonly<T>>` is, and worse through a pointer: it
+ * refuses `p.field = v` and stops nothing about `p[0] = v`, which goes through
+ * the index signature rather than through a property. It also converts to a
+ * plain `Pointer<T>` at the first call that wants one.
+ *
+ * There is **no `ConstPointer<T>`** to send the reader to, deliberately. A
+ * `Pointer<T>` is the escape hatch — covariant on purpose, unchecked indexing,
+ * arbitrary arithmetic — and a compile-time `const` over that is a lint painted
+ * on a hole. The two cases that want checking have spellings:
+ * `ConstReference<T>` for a borrowed value, `readonly T[]` for a borrowed
+ * array.
+ */
+describe("`Pointer<Readonly<T>>`", () => {
+    test("it is refused, and says what to write instead", async () => {
+        const diagnostic = await expectRejected(
+            "heap-pointer-readonly",
+            `class C { constructor(public x: i32) {} }
+
+       function read(p: Pointer<Readonly<C>>): i32 { return p.x; }
+
+       export function main(): i32 {
+         const p = alloc(C, 1);
+         const v = read(p);
+         p.free();
+         return v;
+       }\n`,
+            "GF0242",
+        );
+        expect(diagnostic.message).toContain("ConstReference");
+    });
+
+    test("a read-only pointee is refused in a field and a local too", async () => {
+        // Anywhere the type is erased, not only in a parameter — the refusal is
+        // in the pointer arm of the erasure rather than at a signature.
+        for (const [name, source] of [
+            [
+                "local",
+                `class C { constructor(public x: i32) {} }
+       export function main(): i32 {
+         const p: Pointer<Readonly<C>> = alloc(C, 1);
+         p.free();
+         return 0;
+       }\n`,
+            ],
+            [
+                "field",
+                `class C { constructor(public x: i32) {} }
+       interface Holder { at: Pointer<Readonly<C>>; }
+       export function main(): i32 {
+         const p = alloc(C, 1);
+         const h: Holder = {at: p};
+         p.free();
+         return 0;
+       }\n`,
+            ],
+        ] as const) {
+            const {result} = await compileSource(`heap-pointer-readonly-${name}`, source);
+            expect({name, ok: result.ok}).toEqual({name, ok: false});
+            expect({name, seen: errorCodes(result).includes("GF0242")}).toEqual({
+                name,
+                seen: true,
+            });
+        }
+    });
+
+    test("a plain `Pointer<T>` is untouched", async () => {
+        const result = await run(
+            "heap-pointer-plain",
+            `class C { constructor(public x: i32) {} }
+
+       function bump(p: Pointer<C>): void { p.x = p.x + 1; }
+
+       export function main(): i32 {
+         const p = alloc(C, 1);
+         bump(p);
+         console.log(\`\${p.x}\`);
+         p.free();
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("2\n");
+        expect(result.leaked).toBe(0);
+    });
+});
+
 describe("the pointer's own members", () => {
     test("`address` is the bits, and two allocations differ", async () => {
         const result = await run(

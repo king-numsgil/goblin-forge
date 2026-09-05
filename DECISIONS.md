@@ -4000,3 +4000,28 @@ and `get x(this: ConstReference<C>)` is `TS2784`. A getter is therefore not
 reachable through a read-only borrow. §30 predicted this would be awkward
 exactly where the type is most wanted, and it is: write a method where it
 matters.
+
+### `Pointer<Readonly<T>>` is refused, and there is no `ConstPointer<T>`
+
+The same trap, and worse: through a pointer, `Readonly<T>` also stops nothing
+about `p[0] = v`, which goes through the index signature rather than through a
+property. `GF0242` covers both, which is why its title names the shape rather
+than one of the two spellings — it is one rule with two instances, not two
+rules.
+
+**Not building `ConstPointer<T>` is the decision, not the omission.** A
+`Pointer<T>` is the escape hatch: §24 defines it as "an address and nothing
+more, whose job is to carry what this compiler will not vouch for", it is
+covariant on purpose and documented as being exactly as unsound as `Shape**`,
+its indexing is unchecked and its arithmetic arbitrary. A compile-time `const`
+over that is a lint painted on a hole, and it would cost a parallel
+`CorePointer` — `deref()` returning a `ConstReference<T>`, `at()` returning a
+`ConstPointer<T>`, a read-only index signature, and a decision about whether
+`free()` belongs on one at all — against `ConstReference<T>`'s one line.
+
+The two cases that actually want checking already have spellings, and neither
+is a pointer: a borrowed value is `ConstReference<T>`, a borrowed array is
+`readonly T[]`. The one place a `const T *` would pay is documenting an FFI
+signature — and §24 already decided that a `Pointer<T>` does not get the
+C-boundary checking a `Reference<T>` gets, for the same reason. The payoff
+lands in the one spot the design has opted out of.

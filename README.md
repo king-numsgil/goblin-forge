@@ -567,10 +567,19 @@ class Body {
 `Readonly<T>` is the mapped type underneath, and on its own it is a *view of a
 value*: it erases to exactly what `T` erases to, so a class keeps its layout,
 its vtable and its dispatch. Use it by value, as a field type, or as
-`Readonly<T[]>` — which is `readonly T[]`. **`Reference<Readonly<T>>` is
-`GF0242`**: it refuses a field and permits a method that writes the same field,
-and it converts to a `Reference<T>` at the first call, so it reads as a
-guarantee and is not one.
+`Readonly<T[]>` — which is `readonly T[]`.
+
+**Putting it inside an address is `GF0242`**, for both `Reference<Readonly<T>>`
+and `Pointer<Readonly<T>>`: they refuse a field and permit a method that writes
+the same field, they convert to the mutable form at the first call, and through
+a pointer `p[0] = v` is not a property write at all. They read as guarantees and
+are not.
+
+There is deliberately **no `ConstPointer<T>`**. A `Pointer<T>` is the escape
+hatch — covariant on purpose, unchecked indexing, arbitrary arithmetic — and a
+compile-time `const` over that is a lint painted on a hole. The two cases that
+want checking have spellings already: `ConstReference<T>` for a borrowed value,
+`readonly T[]` for a borrowed array.
 
 `const` is shallow here, as it is in C++ through a pointer member:
 `ConstReference<Ship>` refuses `s.crew = xs` and permits `s.crew.push(x)`. An
