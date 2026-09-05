@@ -657,6 +657,53 @@ type GfPrimitive = number | string | boolean;
  */
 type Reference<T> = T & ReferenceCore<T>;
 
+/**
+ * `T` with every property read-only — a **view of a value**, never a different
+ * value.
+ *
+ * TypeScript's own `Readonly<T>`, which lives in `lib.es5.d.ts` and therefore
+ * does not exist here until this file says so. It erases to exactly what `T`
+ * erases to: the same layout, the same size, the same class with the same
+ * vtable, so nothing in the backend knows it was written.
+ *
+ * **`Reference<Readonly<T>>` is what it is for.** By value it is close to
+ * pointless — a by-value parameter is a copy, and refusing to write your own
+ * copy protects nobody. Borrowed, it is the read-only borrow this language
+ * otherwise has no spelling for:
+ *
+ *     function centre(b: Reference<Readonly<Body>>): dvec3 { return b.position; }
+ *
+ * That signature says borrowed *and* read-only, which is `const Body &`, and
+ * `b.position = v` inside it is a `TS2540`.
+ *
+ * Three things it does not do, each for its own reason:
+ *
+ *   * **It does not stop a method.** `b.spin()` is fine, because TypeScript has
+ *     no way to say that a method does not mutate its receiver — there is no
+ *     `int get() const` to write. A method declares `this: Reference<T>` or is
+ *     silent, and that is where a mutating method would be refused.
+ *   * **It is shallow.** `Readonly<Ship>` refuses `s.crew = xs` and says
+ *     nothing about `s.crew.push(x)`: the field's binding is read-only, its
+ *     type is not. C++'s `const` behaves the same way through a pointer member.
+ *   * **It drops `private` members**, because `keyof T` does not include them.
+ *     Two classes told apart *only* by a private brand are therefore the same
+ *     type under it — `Readonly<aligned_dvec3>` satisfies a
+ *     `Readonly<dvec3>` — so this is not the type to reach for where that
+ *     distinction is what matters.
+ *
+ * `Readonly<T[]>` and `Readonly<string>` need no thought — tsc resolves the
+ * first to `readonly T[]` and the second straight back to `string`, because a
+ * homomorphic mapped type over an array or a primitive is not a mapped type in
+ * the result.
+ *
+ * **Do not write `Readonly<i32>`.** It is not the identity, tempting as that
+ * would be: an `i32` is `number` intersected with a brand, so tsc builds an
+ * object type from it with no properties to speak of — one that accepts an
+ * `i32` and is not assignable back to one. A type you can take and cannot use.
+ * There is nothing in a scalar to make read-only.
+ */
+type Readonly<T> = { readonly [K in keyof T]: T[K] };
+
 // ---------------------------------------------------------------------------
 // Closures. DECISIONS §18: three function types, all written down.
 //

@@ -10,8 +10,14 @@
  * arrived through an alias chain or a generic instantiation is still recognised,
  * and — more to the point — the brand keys are `unique symbol`s, so no source
  * file can spell one and claim a width it does not have.
+ *
+ * `Readonly<T>` is the one exception, because a mapped type has nowhere to put
+ * a brand: it is recognised by its alias, and made safe by checking that the
+ * alias was declared in the prelude rather than by trusting the name. See
+ * {@link readonlyTargetOf}.
  */
 
+import { globalDeclarations } from "@goblin-forge/runtime/paths";
 import ts from "typescript";
 
 import {
@@ -575,6 +581,20 @@ export function erase(
         return erase(checker, nullable, state);
     }
 
+    // `Readonly<T>` — a view of a `T`, and the same bytes. Unwrapped before
+    // anything looks at properties, which is not an optimisation: erasing the
+    // mapped type *structurally* would answer a different question and get a
+    // different answer three ways over. A class would lose its name and with it
+    // its vtable and its interned MIR struct; `keyof` drops `private`, so a
+    // brand-only distinction would vanish from the layout as well as from tsc;
+    // and over an unresolved type parameter there are no properties at all, so
+    // `Readonly<T>` in a generic erased to an empty struct rather than to
+    // whatever the instantiation bound `T` to.
+    const readonlyTarget = readonlyTargetOf(type);
+    if (readonlyTarget !== null) {
+        return erase(checker, readonlyTarget, state);
+    }
+
     // A type this erasure has already answered — which, for one still open, is a
     // cycle closing: `Node` reached from inside `Node`. Asked before anything
     // else, so a recursive type stops here rather than a level further in, and
@@ -970,6 +990,16 @@ function eraseReferent(
     referent: ts.Type,
     state: Erasure,
 ): MachineType | null {
+    // `Reference<Readonly<T>>` — the read-only borrow, and the shape this type
+    // is actually for. It is a `Reference<T>` in every respect that reaches the
+    // backend, so the `readonly` comes off here and the rest of this function
+    // answers about `T`: a contract still dispatches, a class still carries its
+    // vtable, and only tsc remembers that the fields may not be assigned to.
+    const readonlyTarget = readonlyTargetOf(referent);
+    if (readonlyTarget !== null) {
+        return eraseReferent(checker, readonlyTarget, state);
+    }
+
     // A `Reference<T>` inside a generic. What `T` is decides every question
     // below — contract or class or shape — so it is answered first, from the
     // machine type this instantiation already erased at its call site.
@@ -1306,6 +1336,48 @@ export function ambientClassNameOf(type: ts.Type): string | null {
         return null;
     }
     return declaration.name.text;
+}
+
+/**
+ * The `T` of a `Readonly<T>`, or `null` for anything else.
+ *
+ * `Readonly<T>` is a *view*: it erases to whatever `T` erases to, so the answer
+ * here is the type to ask about instead. tsc has already resolved the useful
+ * cases away before this is reached — `Readonly<i32[]>` arrives as
+ * `readonly i32[]` and `Readonly<string>` as `string`, because a homomorphic
+ * mapped type over an array or a primitive is not a mapped type in the result —
+ * so what is left is objects, classes, and mapped types over an unresolved type
+ * parameter.
+ *
+ * **Recognised by the declaration, never by the name.** `aliasSymbol` gives the
+ * alias a type was written as and `aliasTypeArguments` its arguments, both
+ * public API and both surviving instantiation; the check that it is *this*
+ * `Readonly` is that the symbol was declared in the prelude. A module-local
+ * `type Readonly<T> = …` shadows the global one for the file that writes it,
+ * and unwrapping that would answer about a type this compiler has never seen —
+ * the same hazard `STD_MODULES` avoids by keying on the specifier rather than
+ * on a bare name. A second *global* one cannot exist: a type alias does not
+ * merge, so it is `TS2300` before anything gets here.
+ */
+function readonlyTargetOf(type: ts.Type): ts.Type | null {
+    const alias = type.aliasSymbol;
+    if (alias === undefined || alias.getName() !== "Readonly") {
+        return null;
+    }
+    const args = type.aliasTypeArguments;
+    const target = args?.length === 1 ? args[0] : undefined;
+    if (target === undefined) {
+        return null;
+    }
+    const prelude = normalisePath(globalDeclarations());
+    const fromPrelude = (alias.declarations ?? []).some(
+        (declaration) => normalisePath(declaration.getSourceFile().fileName) === prelude,
+    );
+    return fromPrelude ? target : null;
+}
+
+function normalisePath(path: string): string {
+    return path.replace(/\\/g, "/").toLowerCase();
 }
 
 /**

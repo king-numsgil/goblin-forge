@@ -537,6 +537,32 @@ inheriting it. TypeScript disagrees and will type-check `new Derived(4)` against
 `Base`'s signature; that is `GF0241` here. A base whose constructor takes no
 arguments needs none of this — there is nothing to forward.
 
+**`Reference<Readonly<T>>` is `const T &`** — borrowed, and not written:
+
+```ts
+function centre(b: Reference<Readonly<Body>>): dvec3 {
+  return b.position;       // fine
+  // b.position = v;       // TS2540 — read-only property
+}
+```
+
+`Readonly<T>` is TypeScript's own mapped type, and here it is a *view*: it
+erases to exactly what `T` erases to, so a class keeps its layout, its vtable
+and its dispatch, and nothing reaches the backend. By value it is nearly
+pointless — a by-value parameter is a copy, and refusing to write your own copy
+protects nobody — so the borrowed form is the one worth writing.
+
+Three things it does not do. It **does not stop a method**: `b.spin()` compiles,
+because TypeScript has no way to say a method leaves its receiver alone, which
+is what a declared `this` below is for. It is **shallow**, so `Readonly<Ship>`
+refuses `s.crew = xs` and permits `s.crew.push(x)`, as `const` does through a
+pointer member. And it **drops `private` members**, so two classes told apart
+only by a private brand are the same type under it.
+
+`Readonly<T[]>` is `readonly T[]` and `Readonly<string>` is `string`; both are
+tsc's own doing. Do not write `Readonly<i32>` — a scalar has nothing to make
+read-only, and what you get is a type you can take and cannot use.
+
 A method may also declare its receiver, using TypeScript's `this` parameter:
 
 ```ts

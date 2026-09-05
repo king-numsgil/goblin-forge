@@ -3836,3 +3836,83 @@ of the spelling rather than a gap in this compiler, and it should be weighed
 before the rest is built: a design where the natural reader of a value is
 unmarkable is a design where `ConstReference<T>` is awkward exactly where it
 would be used most.
+
+*(§31 built `Readonly<T>` and with it `Reference<Readonly<T>>`, which is most of
+what this section was for. What is left undone here is the brands — the one-way
+door and the nominality repair — and they are only needed once a const receiver
+has to be told apart from a mutable one.)*
+
+---
+
+## §31 — `Readonly<T>` is a view *(settled and built, 2026-09-04)*
+
+**Answer: `Readonly<T>` is TypeScript's own mapped type, declared in the
+prelude, and it erases to exactly what `T` erases to.** One helper in the
+erasure unwraps it; nothing else in the compiler changed, and the backend does
+not know the type exists.
+
+`Reference<Readonly<T>>` is the point of it. That is `const T &` — borrowed and
+not written — and it is the read-only borrow §29 said the language had no
+spelling for. By value the type is nearly pointless: a by-value parameter is a
+copy, and refusing to write your own copy protects nobody.
+
+### Why unwrapping, rather than erasing the mapped type
+
+A mapped type has the properties of what it was made from, so erasing it
+*structurally* looks like it would work. It gets a different answer three ways
+over, and each one is a test:
+
+- **A class loses its name**, and with it the interned MIR struct, the vtable
+  and its dispatch. `Reference<Readonly<Animal>>` would stop being polymorphic
+  — quietly, by answering the base's method.
+- **`keyof` drops `private`**, so the layout would lose fields the object has.
+  Not a wrong type: a wrong *size*.
+- **Over an unresolved type parameter there are no properties at all**, so
+  `Readonly<T>` inside a generic erased to an empty struct rather than to what
+  the instantiation bound `T` to.
+
+Unwrapping first sidesteps all three, because everything downstream then asks
+about `T` — including the type-parameter lookup, which is what makes it work
+inside a generic.
+
+### Recognised by its declaration, never by its name
+
+This is the one place the erasure reads an alias name rather than a brand, and
+the file's own header says why that is normally forbidden: a brand key is a
+`unique symbol` and no source file can forge one. A mapped type has nowhere to
+put a brand. So the check is that the alias symbol was **declared in the
+prelude**, which is the same discipline `STD_MODULES` uses in keying on the
+specifier rather than the bare name. A module-local `type Readonly<T> = …`
+shadows the global one for the file that writes it and is left alone — there is
+a test that writes a wrapping one and reads the field it declares. A second
+*global* one cannot exist, because a type alias does not merge: that is
+`TS2300` before anything reaches here.
+
+### What tsc had already decided
+
+`Readonly<T[]>` arrives as `readonly T[]` and `Readonly<string>` as `string` —
+a homomorphic mapped type over an array or a primitive is not a mapped type in
+the result — so neither reaches the unwrapping, and the first is exactly §29's
+`ReadonlyArray`. The two features met without being introduced.
+
+`Readonly<i32>` is the one that does not work and cannot be made to: an `i32`
+is `number` intersected with a brand, so tsc builds an object type with no
+usable properties — one that accepts an `i32` and is not assignable back to
+one. It is refused by tsc at the first use rather than by this compiler, which
+is the right side of the line: there is nothing in a scalar to make read-only,
+and the prelude says so.
+
+### What it still does not do
+
+**It does not stop a method.** `c.bump()` through a `Reference<Readonly<C>>`
+compiles and mutates, because TypeScript cannot say that a method leaves its
+receiver alone. That is the declared receiver of §30, and it is why the two
+halves are separate features: `Readonly<T>` is the fields, `this:` is the
+methods, and neither implies the other. Both halves are asserted in one test,
+because the gap is the point.
+
+**It is shallow**, and **it drops `private` members** — so two classes told
+apart only by a brand are one type under it (§30 measured this). Neither is
+fixable here; both are properties of the mapped type, and the second is the
+reason a `ConstReference<T>` would carry the unmapped type in a brand of its
+own.
