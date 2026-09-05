@@ -352,6 +352,24 @@ export class BodyLowerer extends BoundaryLowerer {
             return undefined;
         }
 
+        // Before anything is emitted: a class that does not inherit its base's
+        // constructor cannot be constructed at all, and saying so here names the
+        // rule. Left to the arity check below it becomes "takes 0 arguments, and
+        // 1 was supplied" about a constructor nobody wrote.
+        const uninherited = this.outer.uninheritedConstructor(info);
+        if (uninherited !== undefined) {
+            this.outer.error(
+                expression,
+                "GF0241",
+                `\`${name}\` declares no constructor, and it does not inherit ` +
+                `\`${uninherited.name}\`'s — a base's constructor initialises the ` +
+                `base's fields and knows nothing about \`${name}\`'s. Give ` +
+                `\`${name}\` one that forwards: ` +
+                "`constructor(…) { super(…); }`.",
+            );
+            return undefined;
+        }
+
         const local = this.f.addLocal({
             ty,
             storage: "Temporary",

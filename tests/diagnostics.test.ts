@@ -284,6 +284,22 @@ describe("codes raised by a program", () => {
         );
     });
 
+    test("GF0241 — a constructor that is not inherited", async () => {
+        await expectRejected(
+            "diag-0241",
+            // tsc reads this as a call to `Base`'s constructor and checks the
+            // argument against it; there is no constructor here to call.
+            `class Base { constructor(public x: i32) {} }
+       class Derived extends Base {}
+
+       export function main(): i32 {
+         const d = new Derived(4);
+         return d.x;
+       }\n`,
+            "GF0241",
+        );
+    });
+
     test("GF0301 — a type that cannot cross the C boundary", async () => {
         await expectRejected(
             "diag-0301",

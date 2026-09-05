@@ -522,6 +522,33 @@ class Animal {
 `static` methods are free functions in a namespace: no receiver, no vtable slot,
 and therefore usable as a function pointer where an instance method is not.
 
+**A constructor is not inherited**, as in C++. A derived class that wants to be
+constructed writes one and forwards:
+
+```ts
+class Derived extends Base {
+  constructor(x: i32) { super(x); }      // required — `Base`'s is not inherited
+}
+```
+
+The base's constructor initialises the base's fields and knows nothing about the
+derived class's, so it is exactly the one that cannot be right for the class
+inheriting it. TypeScript disagrees and will type-check `new Derived(4)` against
+`Base`'s signature; that is `GF0241` here. A base whose constructor takes no
+arguments needs none of this — there is nothing to forward.
+
+A method may also declare its receiver, using TypeScript's `this` parameter:
+
+```ts
+class Circle {
+  area(this: Reference<Circle>): f64 { return dpi() * this.r * this.r; }
+}
+```
+
+It changes nothing today — that is the receiver a method already has — and it
+is checked: a `static`, a free function, a by-value `this`, and a class that is
+neither this one nor a base of it are all refused.
+
 ### On the heap
 
 `new C(…)` gives a value its scope releases. `alloc` gives a pointer that

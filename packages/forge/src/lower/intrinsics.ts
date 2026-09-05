@@ -194,6 +194,24 @@ export abstract class IntrinsicLowerer extends WidthPass {
             return undefined;
         }
 
+        // Before the allocation: the same rule `new` reports, at the other place
+        // a class is constructed. Left to the arity check it arrives as `alloc`
+        // complaining about its own argument shape, which points at this call's
+        // spelling rather than at the class.
+        const uninherited = this.outer.uninheritedConstructor(info);
+        if (uninherited !== undefined) {
+            this.outer.error(
+                expression,
+                "GF0241",
+                `\`${info.name}\` declares no constructor, and it does not inherit ` +
+                `\`${uninherited.name}\`'s — a base's constructor initialises the ` +
+                `base's fields and knows nothing about \`${info.name}\`'s. Give ` +
+                `\`${info.name}\` one that forwards: ` +
+                "`constructor(…) { super(…); }`.",
+            );
+            return undefined;
+        }
+
         const size = this.temporaryTyped(expression, USIZE, {kind: "SizeOf", value: ty});
         const align = this.temporaryTyped(expression, USIZE, {kind: "AlignOf", value: ty});
         if (size === undefined || align === undefined) {

@@ -1237,6 +1237,39 @@ export class Lowerer {
         return false;
     }
 
+    /**
+     * The base whose constructor this class does **not** inherit, or
+     * `undefined` when constructing it is fine.
+     *
+     * C++'s rule, and for C++'s reason: a base's constructor initialises the
+     * base's fields and knows nothing about the derived class's, so it is
+     * precisely the constructor that cannot be right for the class inheriting
+     * it. `using Base::Base` is the opt-in there and has no spelling here.
+     *
+     * tsc disagrees — `new Derived(4)` is a call to `Base`'s constructor as far
+     * as it is concerned — so it type-checks the arguments against the base's
+     * signature and hands over a call this compiler has no constructor for.
+     * Without this the failure is the *arity* check reporting that a generated
+     * constructor takes none of the arguments tsc just insisted on, which
+     * describes the symptom and names neither the rule nor the fix.
+     *
+     * A base that takes no arguments is not a problem: there is nothing to
+     * forward, and the generated constructor calls it the way C++'s implicit
+     * default constructor does.
+     */
+    uninheritedConstructor(info: ClassInfo): ClassInfo | undefined {
+        if (info.ctor !== undefined) {
+            return undefined;
+        }
+        for (let base = info.base; base !== undefined; base = base.base) {
+            if (base.ctor === undefined) {
+                continue;
+            }
+            return base.ctor.parameters.length > 0 ? base : undefined;
+        }
+        return undefined;
+    }
+
     classNameAt(expression: ts.Expression, bindings: Substitution): string | undefined {
         // The **erasure** first, because it is the only answer that has the
         // substitution in it. Inside a generic, tsc still says `T` however the

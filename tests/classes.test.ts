@@ -1242,6 +1242,153 @@ describe("parameter properties", () => {
     });
 });
 
+/**
+ * **A constructor is not inherited** — C++'s rule, and for C++'s reason.
+ *
+ * A base's constructor initialises the base's fields and knows nothing about
+ * the derived class's, so it is exactly the constructor that cannot be right
+ * for the class inheriting it. C++ says so by making `Derived d(4)` ill-formed
+ * unless `using Base::Base` opts in; there is no such spelling here, so a
+ * derived class that wants to be constructed writes one and forwards.
+ *
+ * TypeScript disagrees, which is the whole reason this is a diagnostic and not
+ * silence: tsc reads `new Derived(4)` as a call to `Base`'s constructor and
+ * checks the arguments against it. So tsc *enforces the base's arity* and this
+ * compiler then has a generated constructor taking none of it — which is how
+ * this used to surface, as "this takes 0 arguments, and 1 was supplied" about a
+ * constructor nobody wrote.
+ */
+describe("constructors are not inherited", () => {
+    test("`new` on a class that declares none names the base and the fix", async () => {
+        const diagnostic = await expectRejected(
+            "ctor-not-inherited",
+            `class Base { constructor(public x: i32) {} }
+       class Derived extends Base {}
+
+       export function main(): i32 {
+         const d = new Derived(4);
+         return d.x;
+       }\n`,
+            "GF0241",
+        );
+        expect(diagnostic.message).toContain("`Base`");
+        expect(diagnostic.message).toContain("super");
+    });
+
+    test("`alloc` reports it too, at the other place a class is constructed", async () => {
+        const diagnostic = await expectRejected(
+            "ctor-not-inherited-alloc",
+            `class Base { constructor(public x: i32) {} }
+       class Derived extends Base {}
+
+       export function main(): i32 {
+         const p = alloc(Derived, 4);
+         const v: i32 = p.x;
+         p.free();
+         return v;
+       }\n`,
+            "GF0241",
+        );
+        expect(diagnostic.message).toContain("`Base`");
+    });
+
+    test("it names the nearest base that declares one", async () => {
+        // `B` declares none either, so the constructor `C` is not getting is
+        // `A`'s. Naming `B` would send the reader to a class with nothing in it.
+        const diagnostic = await expectRejected(
+            "ctor-not-inherited-deep",
+            `class A { constructor(public x: i32) {} }
+       class B extends A {}
+       class C extends B {}
+
+       export function main(): i32 {
+         const c = new C(4);
+         return c.x;
+       }\n`,
+            "GF0241",
+        );
+        expect(diagnostic.message).toContain("`A`");
+    });
+
+    test("and stops at the first one that does", async () => {
+        const diagnostic = await expectRejected(
+            "ctor-not-inherited-middle",
+            `class A { constructor(public x: i32) {} }
+       class B extends A { constructor(x: i32) { super(x); } }
+       class C extends B {}
+
+       export function main(): i32 {
+         const c = new C(4);
+         return c.x;
+       }\n`,
+            "GF0241",
+        );
+        expect(diagnostic.message).toContain("`B`");
+    });
+
+    test("forwarding to the base is what makes it work", async () => {
+        const result = await run(
+            "ctor-forwarded",
+            `class Base { constructor(public x: i32) {} }
+
+       class Derived extends Base {
+         constructor(x: i32) { super(x * 2); }
+       }
+
+       export function main(): i32 {
+         const d = new Derived(4);
+         const p = alloc(Derived, 5);
+         console.log(\`\${d.x} \${p.x}\`);
+         p.free();
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("8 10\n");
+        expect(result.leaked).toBe(0);
+    });
+
+    test("a base that needs no arguments is not this rule", async () => {
+        // Nothing to forward, so the generated constructor calls it the way C++'s
+        // implicit default constructor does. Both shapes: a base with no
+        // constructor at all, and one whose constructor takes nothing.
+        const result = await run(
+            "ctor-no-args-base",
+            `class Plain { x: i32 = 3; }
+       class FromPlain extends Plain {}
+
+       class Empty { y: i32 = 0; constructor() { this.y = 7; } }
+       class FromEmpty extends Empty {}
+
+       export function main(): i32 {
+         const a = new FromPlain();
+         const b = new FromEmpty();
+         console.log(\`\${a.x} \${b.y}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("3 7\n");
+        expect(result.leaked).toBe(0);
+    });
+
+    test("asking for no arguments is tsc's to refuse, and it does", async () => {
+        // The other half of the same situation, and it never reaches this
+        // compiler: tsc believes the constructor *is* inherited, so it wants the
+        // base's arity and `new Derived()` is `TS2554` before anything is lowered.
+        const {result} = await compileSource(
+            "ctor-not-inherited-noargs",
+            `class Base { constructor(public x: i32) {} }
+       class Derived extends Base {}
+
+       export function main(): i32 {
+         const d = new Derived();
+         return d.x;
+       }\n`,
+        );
+        expect(result.ok).toBe(false);
+        expect(errorCodes(result)).toContain("TS2554");
+    });
+});
+
 describe("class members at the edges", () => {
     test("an implicit `super()` runs, so base fields are reachable", async () => {
         const result = await run(

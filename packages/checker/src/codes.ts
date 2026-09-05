@@ -325,6 +325,30 @@ export const CODES = {
             "and says nothing about `xs[0].mass = 1`.",
     },
 
+    GF0241: {
+        title: "a constructor is not inherited",
+        explanation:
+            "A derived class does not get its base's constructor. This is C++'s rule " +
+            "— a `Derived d(4)` is ill-formed where `Derived` declares no constructor " +
+            "of its own, and `using Base::Base` is the opt-in — and it is the rule " +
+            "here because construction is where a class's own fields get their " +
+            "values. An inherited constructor initialises the base's fields and " +
+            "leaves the derived class's untouched, so it is exactly the constructor " +
+            "that cannot be right for the class inheriting it.\n\n" +
+            "TypeScript disagrees, which is why this is a diagnostic rather than " +
+            "nothing: tsc treats `new Derived(4)` as a call to `Base`'s constructor " +
+            "and type-checks the arguments against it. So the arity it enforces is " +
+            "the base's, and the constructor this compiler generates for a class " +
+            "with no declared one takes no arguments at all.\n\n" +
+            "Write one and forward what the base needs:\n\n" +
+            "    class Derived extends Base {\n" +
+            "        constructor(x: i32) { super(x); }\n" +
+            "    }\n\n" +
+            "A base whose constructor takes **no** arguments needs none of this: " +
+            "there is nothing to forward, and the generated constructor calls it " +
+            "the way C++'s implicit default constructor does.",
+    },
+
     // -- Layout and the C boundary -------------------------------------------
     GF0301: {
         title: "this type cannot cross the C boundary",
