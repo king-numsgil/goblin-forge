@@ -179,18 +179,23 @@ pub fn emit_module(
     // is what discovers the names they refer to.
     let mut globals = Globals::new();
     let classes = crate::llvm::vtable::emit(module, &mut globals, target)?;
+    // The literal table is made here rather than beside the bodies, because a
+    // module-level constant can hold a `string` — and then a literal in a constant
+    // and the same text in a body have to be one object, which is what sharing the
+    // table is for.
+    let mut literals = Literals::new();
     declarations.extend(global::emit(
         module,
         &mut globals,
         &mut types,
         &mut layouts,
         &symbols,
+        &mut literals,
     )?);
     let mut debug = debug::Debug::new(module, windows, debug_info);
 
     // Bodies last: emitting one can discover a string literal, a named type or
     // an intrinsic, and all three are written above it in the file.
-    let mut literals = Literals::new();
     let mut intrinsics: BTreeSet<String> = BTreeSet::new();
     let mut bodies = Vec::new();
     for (index, function) in module.funcs.iter().enumerate() {

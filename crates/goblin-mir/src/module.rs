@@ -72,6 +72,18 @@ pub enum GlobalInit {
     SizeOf(TyId),
     /// `alignOf<T>()`, the same way.
     AlignOf(TyId),
+    /// A `T[]` of this many elements begins here; that many subtrees follow.
+    ///
+    /// The one place the type does *not* say how many leaves to expect, which is
+    /// what a `FixedArray` carries in its type and a `T[]` carries in its data. So
+    /// the count is a leaf, and the walk stays self-describing at every position —
+    /// including an array nested in one, where a count taken from the remaining
+    /// leaves would have been ambiguous.
+    ///
+    /// An empty one is [`GlobalInit::Zero`] instead: zeroed bytes are a null handle
+    /// and the runtime reads a null handle as an empty array, so it needs neither a
+    /// count nor an object.
+    Array(u64),
 }
 
 /// A global this module reads but does not define: another Goblin module's

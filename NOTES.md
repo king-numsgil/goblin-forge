@@ -211,8 +211,9 @@ backend failure:
 | an interface mixing methods and data | `checker/src/types.ts`, `contractOf` — a rule, not a gap | — |
 | writing *through* a `Pointer<Pointer<T>>` for a primitive `T` — `cells[i] = p` | tsc, not the compiler. `Pointer<Pointer<u8>>` is `CorePointer<u8> & CorePointer<CorePointer<u8>>`, and the two index signatures merge to `u8 & CorePointer<u8>`, which nothing produces. Reading is fine, and `Pointer<CString>` is the spelling for a `char **` that has to be written | later |
 | a `static` field on a **generic** class | `classes.ts`, where a generic is set aside. The value would be the same for every instantiation — a static may not mention `T` — but `Box.zero` has no syntax for saying which one, and TypeScript never needed one. The same refusal a static *method* on a generic gets | later |
-| a **`string`** or **`T[]`** module-level constant | `lower/module.ts`, `#globalTypeAllowed` — `GF0008`. Both are laid out statically by the runtime already, so what is missing is the rule that a global is *never destroyed* rather than the layout. GLOBALS-PLAN | later |
-| a **function's address** in a constant — `fixedArrayOf(f, g)` | `lower/fold.ts`, the pointer arm. `Const::Func` is a leaf the backend already writes; the only obstacle is that globals are folded before functions are declared, so the fold cannot resolve a `FuncId` yet. Moving the fold after the declaration loop is the whole change | later |
+| an **array nested in** a module-level constant — `{ xs: readonly i32[] }` | `lower/module.ts`, `#globalTypeAllowed` — `GF0008`. A top-level one works; nested, there is nowhere to say `readonly` about a field's element type, and lifting this means asking tsc the readonly question about a *type* rather than about an annotation | later |
+| **string concatenation** in a constant — `"so" + "l"` | `lower/fold.ts`, `#string` — `GF0007`. Would mean interning a string this compiler made up rather than one the program wrote, which is a different thing from recording a literal | later |
+| a **`std/linalg` factory** in a constant — `dvec3.splat(2)` | `lower/fold.ts`, `#structure`. `new dvec3(…)` and `.zero()` fold; the rest have values to work out (`identity`'s diagonal, `fromRotation`'s trigonometry) and each would be its own arm | later |
 | **escaping closures — `HeapFn<F>`** | nothing declares the type. DECISIONS §18 step 2: captures by move into an owning environment, reusing `GF0235` for contention. Not started, and deliberately after `LocalFn` | later |
 | **`RefCount<T>`** | nothing declares the type. DECISIONS §18 step 3, and its own feature rather than part of closures — shared ownership does not exist anywhere in the value model yet | later |
 | optional/rest/defaulted/destructured parameters | `lower/module.ts`, `#signature`; `classes.ts`, `#classFnParams` | later |
@@ -255,6 +256,12 @@ rule is C++'s constant initialisation, so nothing runs before `main` at all.
 
 A plain `static` field is the one **writable** global, in `.data`. Everything else
 is `.rodata`.
+
+A `string` and a `readonly T[]` can be constants, and are safe for a reason the
+runtime already had: a static string's header says `owned = 0` and a static array's
+says `cap = 0`, so releasing either is a no-op the runtime decides. An array
+constant must be `readonly`, because `const` stops the name being rebound and
+nothing else — `push` and `xs[0] = v` would both reach into read-only memory.
 
 **`Reference<T>` for a struct is the next real gap in the value model.** Today
 every struct parameter copies and there is no way to say otherwise. Erasing it

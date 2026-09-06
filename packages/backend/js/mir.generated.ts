@@ -10,10 +10,10 @@
 // module, which is the failure mode this whole arrangement exists to remove.
 
 /** Fingerprint of the wire format these bindings were generated from. */
-export const SCHEMA_FINGERPRINT = 0xbc0fe6c1155f7dcbn;
+export const SCHEMA_FINGERPRINT = 0xfc7f5aca0b997d3en;
 
 /** The same value as hex, for comparing against the addon's report. */
-export const SCHEMA_FINGERPRINT_HEX = "bc0fe6c1155f7dcb";
+export const SCHEMA_FINGERPRINT_HEX = "fc7f5aca0b997d3e";
 
 // ---------------------------------------------------------------------------
 // postcard writer
@@ -325,6 +325,7 @@ export type GlobalInit =
   | { kind: "Scalar"; value: Const }
   | { kind: "SizeOf"; value: TyId }
   | { kind: "AlignOf"; value: TyId }
+  | { kind: "Array"; value: bigint }
 ;
 
 export interface Global {
@@ -903,6 +904,11 @@ export function writeGlobalInit(w: Writer, v: GlobalInit): void {
     case "AlignOf": {
       w.varint(3);
       writeTyId(w, v.value);
+      break;
+    }
+    case "Array": {
+      w.varint(4);
+      w.varintBig(v.value);
       break;
     }
   }

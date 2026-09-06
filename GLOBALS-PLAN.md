@@ -156,20 +156,61 @@ A **run-time** proof is deliberately not here. Reading a global end to end wants
 real source, a real binary and real output, which is stage 2's harness test — a
 better version of the same check than a hand-written IR probe.
 
-### The next widening, now that the rest is built
+### The three widenings *(done 2026-09-06)*
 
-**A named function's address folds, and is refused only for an ordering reason.**
-`const DISPATCH: FixedArray<(a: i32) => i32, 4> = fixedArrayOf(f, g, h, i)` is a
-dispatch table, `Const::Func` is a leaf the backend already writes, and the only
-thing in the way is that globals are folded *before* functions are declared, so
-the fold cannot resolve a `FuncId` yet. Moving the fold after the declaration loop
-is the whole change; nothing needs it before then, because a body is lowered later
-still.
+All three of the things this section listed as "next" are built.
 
-**`string` and `T[]` are the other one**, and the type table above says what they
-need. `const UP: dvec3 = new dvec3(0, 1, 0)` is a third: it wants the linalg
-constructor recognised by the folder, which is a `LINALG_CTORS` lookup rather than
-anything new about globals.
+**A named function's address folds.** `const HANDLERS: FixedArray<(a: i32) => i32,
+3> = fixedArrayOf(double, triple, negate)` is C's `int (*fns[])(int)`, indexed at
+run time. A code address is decided by the linker rather than by the program, which
+is exactly what makes it something a constant can hold. `Const::Func` was already a
+leaf the backend wrote; the only change was **ordering** — constants are folded
+after the functions are declared now, because the fold needs a `FuncId` to exist.
+A closure still cannot: it captures a frame, and there is none before `main`.
+
+**`std/linalg` values fold.** `new dvec3(0, 1, 0)` is the field walk with a
+constructor's arguments in place of an object literal's properties, and
+`dvec3.zero()` is one `Zero` leaf. Whether it *is* a linalg type is asked of the
+checker rather than inferred from the shape, because `X.zero()` at any struct would
+otherwise fold to zeroes — including somebody's own class with a `zero` static,
+without running it. The other factories (`splat`, `identity`, `fromRotation`) have
+values to work out and do not fold.
+
+**`string` and `readonly T[]` fold**, and the reason it is safe is the same in both
+cases and was already in the runtime: a marker for "this buffer did not come from
+the allocator". A string literal's header says `owned = 0`; an array's says
+`cap = 0`. Releasing either is a no-op the *runtime* decides, so nothing here had to
+arrange for a global never to be freed, and copying one into a local clones and
+frees normally. Every test for these runs, so the live-allocation check is what
+proves it.
+
+Two things they needed:
+
+- **`GlobalInit::Array(u64)`**, the one leaf that is about the leaves rather than
+  about a value. A `FixedArray` carries its count in its type and a `T[]` carries it
+  in its data, so this is the single position where the type does not say how many
+  leaves follow. An *empty* one is `Zero` instead: zeroed bytes are a null handle,
+  and the runtime reads a null handle as empty, so it costs no object.
+- **A side object per array**, `__gf_ga$<global>$<n>`, holding the header and the
+  elements, with the global's own value being a pointer past it. The header is padded
+  when the element wants more alignment than its sixteen bytes provide, because what
+  has to be aligned is the first *element* — the same correction `array_bytes` makes
+  in the runtime, arrived at from the static side.
+
+**An array constant has to be `readonly`.** `const` stops the name being rebound and
+nothing else, so `xs.push(v)` and `xs[0] = v` are both still writes and both would
+reach into read-only memory. `readonly T[]` (§29) is the type that has neither, so
+tsc refuses them and the compiler needs no rule. The same check applies to a
+`static readonly xs: i32[]`, where `readonly` marks the *field* and says nothing
+about its elements — that one was missed at first and is now covered by a test.
+
+Nested arrays are refused: inside a struct there is nowhere to say `readonly` about
+a field's element type. That is the one restriction left here worth lifting, and
+lifting it means asking tsc the readonly question about a type rather than about an
+annotation.
+
+Still not folding: string concatenation, which would mean interning a string this
+compiler made up rather than one the program wrote.
 
 ### Stage 2 — the frontend: declaring and reading a module-private `const`
 

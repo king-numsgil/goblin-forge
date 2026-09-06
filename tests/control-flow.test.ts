@@ -263,11 +263,12 @@ describe("declarations the language does not have yet", () => {
     }
 
     // A top-level function *value* changed code rather than becoming legal, and it
-    // is worth having its own test rather than a row: the refusal is now about the
-    // constant and not about the arrow, so the message names the address rather
-    // than the syntax. An arrow inside a function body is a `LocalFn` and works —
-    // `tests/closures.test.ts` — which is exactly why "an arrow function is not
-    // supported" would be the wrong thing to assert here now.
+    // is worth having its own test rather than a row: the refusal is about the
+    // constant and not about the arrow. A *named* function folds — a constant may
+    // hold a code address, which is `tests/globals.test.ts` — and a closure cannot,
+    // because it captures a frame that does not exist before `main`. An arrow inside
+    // a function body is a `LocalFn` and works, which is why "an arrow function is
+    // not supported" would be the wrong thing to assert here.
     for (const [what, prelude] of [
         ["an arrow function", "const f = (a: i32): i32 => a;\n"],
         ["a function expression", "const f = function (a: i32): i32 { return a; };\n"],
@@ -278,7 +279,7 @@ describe("declarations the language does not have yet", () => {
                 `${prelude}export function main(): i32 {\n  return 0;\n}\n`,
                 "GF0007",
             );
-            expect(diagnostic.message).toContain("address");
+            expect(diagnostic.message).toContain("capture");
         });
     }
 

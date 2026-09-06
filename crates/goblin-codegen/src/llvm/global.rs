@@ -25,7 +25,12 @@ use crate::layout::{Layouts, Repr};
 use crate::llvm::data::Globals;
 use crate::llvm::func::{sign_extend, truncate};
 use crate::llvm::ty::{Element, Types, array_padding, ident, scalar};
-use crate::llvm::Symbols;
+use crate::llvm::{Literals, Symbols};
+use crate::runtime::STRING_HEADER_BYTES;
+
+/// The runtime's `ArrayHeader`: `{ len: u64, cap: u64 }`, and a handle points past
+/// it. Stated here because a static array has to agree with `array_bytes`.
+const ARRAY_HEADER_BYTES: u32 = 16;
 
 /// Emit a data object for every global this module defines, and hand back a
 /// declaration for every one it imports.
@@ -35,15 +40,16 @@ pub fn emit(
     types: &mut Types,
     layouts: &mut Layouts<'_>,
     symbols: &Symbols,
+    literals: &mut Literals,
 ) -> Result<Vec<String>> {
     for (index, global) in module.globals.iter().enumerate() {
         let Some(symbol) = module.sym(global.name) else {
             internal_error!("global {index} has no name");
         };
         let ty = types.of(layouts, global.ty)?;
-        let mut leaves = Leaves::new(&global.init);
+        let mut leaves = Leaves::new(&global.init, symbol);
         let value = leaves
-            .value(module, types, layouts, symbols, global.ty)
+            .value(module, types, layouts, symbols, globals, literals, global.ty)
             .map_err(|error| error.in_function(symbol))?;
         leaves.finish(symbol)?;
 
@@ -100,11 +106,21 @@ pub fn symbol_of(symbols: &Symbols, global: &GlobalRef) -> Result<String> {
 struct Leaves<'a> {
     leaves: &'a [GlobalInit],
     at: usize,
+    /// The global's symbol, for naming the side objects an array needs.
+    owner: &'a str,
+    /// How many side objects this global has already produced, so each is named
+    /// once. A struct of two arrays needs two, and they cannot share a name.
+    objects: usize,
 }
 
 impl<'a> Leaves<'a> {
-    fn new(leaves: &'a [GlobalInit]) -> Leaves<'a> {
-        Leaves { leaves, at: 0 }
+    fn new(leaves: &'a [GlobalInit], owner: &'a str) -> Leaves<'a> {
+        Leaves {
+            leaves,
+            at: 0,
+            owner,
+            objects: 0,
+        }
     }
 
     /// Every leaf must land somewhere. One left over means the frontend
@@ -136,46 +152,141 @@ impl<'a> Leaves<'a> {
     ///
     /// The type text is *not* included: a top-level global writes it once before
     /// the value, and an aggregate writes it per element. Both are the caller.
+    #[allow(clippy::too_many_arguments)]
     fn value(
         &mut self,
         module: &Module,
         types: &mut Types,
         layouts: &mut Layouts<'_>,
         symbols: &Symbols,
+        globals: &mut Globals,
+        literals: &mut Literals,
         ty: TyId,
     ) -> Result<String> {
         // A `Zero` covers whatever sits at this position — a scalar, a struct, a
         // 4096-element table — so it is answered before the type is taken apart.
         // That is what keeps a zeroed table one leaf on the wire rather than 4096.
+        //
+        // At a `T[]` it is also the *empty* array: zeroed bytes are a null handle,
+        // and the runtime reads a null handle as empty. So an empty one needs no
+        // object and no count.
         if matches!(self.leaves.get(self.at), Some(GlobalInit::Zero)) {
             self.at += 1;
             return Ok("zeroinitializer".to_owned());
         }
 
+        // A `T[]` before the `Repr` match, because its representation is one word
+        // and its *value* is a separate object this has to emit first.
+        if let Some(TyKind::Array(element)) = module.ty(ty).map(|def| &def.kind) {
+            let element = *element;
+            return self.array(module, types, layouts, symbols, globals, literals, element);
+        }
+
         match layouts.repr(ty)? {
             Repr::Void => internal_error!("a global cannot be `void`"),
-            Repr::Register(_) => self.leaf(module, layouts, symbols, ty),
+            Repr::Register(_) => self.leaf(module, layouts, symbols, globals, literals, ty),
             Repr::Vector { elem, lanes } => {
                 let mut parts = Vec::with_capacity(lanes as usize);
                 for _ in 0..lanes {
                     parts.push(format!(
                         "{} {}",
                         scalar(elem),
-                        self.leaf(module, layouts, symbols, ty)?
+                        self.leaf(module, layouts, symbols, globals, literals, ty)?
                     ));
                 }
                 Ok(format!("<{}>", parts.join(", ")))
             }
-            Repr::Aggregate => self.aggregate(module, types, layouts, symbols, ty),
+            Repr::Aggregate => {
+                self.aggregate(module, types, layouts, symbols, globals, literals, ty)
+            }
         }
     }
 
+    /// A `T[]`: a side object holding the runtime's header and the elements, and
+    /// the value is a pointer past that header.
+    ///
+    /// `cap = 0` is what makes it safe to have one at all. The runtime reads that
+    /// as "this buffer did not come from the allocator", so `gf_array_free` on it
+    /// is a no-op — the same bargain a string literal strikes with `owned = 0`, and
+    /// the reason a static array needs no rule about who may release it.
+    ///
+    /// The header is padded when the element wants more alignment than its sixteen
+    /// bytes provide, because what has to be aligned is the *first element* rather
+    /// than the object. That is the same correction `array_bytes` describes in the
+    /// runtime, arrived at from the static side.
+    #[allow(clippy::too_many_arguments)]
+    fn array(
+        &mut self,
+        module: &Module,
+        types: &mut Types,
+        layouts: &mut Layouts<'_>,
+        symbols: &Symbols,
+        globals: &mut Globals,
+        literals: &mut Literals,
+        element: TyId,
+    ) -> Result<String> {
+        let count = match self.next(element, layouts)? {
+            GlobalInit::Array(count) => *count,
+            other => internal_error!("a `T[]` needs a count leaf, and this one has {other:?}"),
+        };
+
+        let element_ty = types.of(layouts, element)?;
+        let layout = layouts.layout(element)?;
+        let (stride, align) = (layout.stride(), layout.align.max(1));
+        let padding = align.saturating_sub(ARRAY_HEADER_BYTES);
+
+        let mut parts = Vec::with_capacity(count as usize);
+        for _ in 0..count {
+            let value = self.value(module, types, layouts, symbols, globals, literals, element)?;
+            parts.push(if stride == layout.size {
+                format!("{element_ty} {value}")
+            } else {
+                // The same tail padding `Types::aggregate` gives a fixed array's
+                // elements, and for the same reason: a stride wider than the element
+                // means every index past the first is otherwise wrong.
+                format!(
+                    "<{{ {element_ty}, [{} x i8] }}> <{{ {element_ty} {value}, [{} x i8] zeroinitializer }}>",
+                    stride - layout.size,
+                    stride - layout.size
+                )
+            });
+        }
+
+        let symbol = format!("__gf_ga${}${}", self.owner, self.objects);
+        self.objects += 1;
+        let head = if padding == 0 {
+            "i64, i64".to_owned()
+        } else {
+            format!("[{padding} x i8], i64, i64")
+        };
+        let head_value = if padding == 0 {
+            format!("i64 {count}, i64 0")
+        } else {
+            format!("[{padding} x i8] zeroinitializer, i64 {count}, i64 0")
+        };
+        globals.define(format!(
+            "@{} = internal constant <{{ {head}, [{count} x {element_ty}] }}> \
+             <{{ {head_value}, [{count} x {element_ty}] [{}] }}>, align {}",
+            ident(&symbol),
+            parts.join(", "),
+            align.max(ARRAY_HEADER_BYTES),
+        ));
+        Ok(format!(
+            "getelementptr (i8, ptr @{}, i64 {})",
+            ident(&symbol),
+            padding + ARRAY_HEADER_BYTES
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn aggregate(
         &mut self,
         module: &Module,
         types: &mut Types,
         layouts: &mut Layouts<'_>,
         symbols: &Symbols,
+        globals: &mut Globals,
+        literals: &mut Literals,
         ty: TyId,
     ) -> Result<String> {
         // A fixed array is structural rather than named, so it is shaped here the
@@ -188,7 +299,8 @@ impl<'a> Leaves<'a> {
             let element_ty = types.of(layouts, element)?;
             let mut parts = Vec::with_capacity(length as usize);
             for _ in 0..length {
-                let value = self.value(module, types, layouts, symbols, element)?;
+                let value =
+                    self.value(module, types, layouts, symbols, globals, literals, element)?;
                 parts.push(if padding == 0 {
                     format!("{element_ty} {value}")
                 } else {
@@ -216,7 +328,8 @@ impl<'a> Leaves<'a> {
                 ),
                 Element::Field(field) => {
                     let text = types.of(layouts, field)?;
-                    let value = self.value(module, types, layouts, symbols, field)?;
+                    let value =
+                        self.value(module, types, layouts, symbols, globals, literals, field)?;
                     format!("{text} {value}")
                 }
             });
@@ -230,6 +343,8 @@ impl<'a> Leaves<'a> {
         module: &Module,
         layouts: &mut Layouts<'_>,
         symbols: &Symbols,
+        globals: &mut Globals,
+        literals: &mut Literals,
         ty: TyId,
     ) -> Result<String> {
         match self.next(ty, layouts)? {
@@ -237,7 +352,12 @@ impl<'a> Leaves<'a> {
             GlobalInit::Zero => Ok("zeroinitializer".to_owned()),
             GlobalInit::SizeOf(of) => Ok(layouts.layout(*of)?.size.to_string()),
             GlobalInit::AlignOf(of) => Ok(layouts.layout(*of)?.align.max(1).to_string()),
-            GlobalInit::Scalar(constant) => constant_text(module, layouts, symbols, constant),
+            GlobalInit::Array(count) => {
+                internal_error!("an array of {count} is not a scalar position")
+            }
+            GlobalInit::Scalar(constant) => {
+                constant_text(module, layouts, symbols, globals, literals, constant)
+            }
         }
     }
 }
@@ -247,6 +367,8 @@ fn constant_text(
     module: &Module,
     layouts: &mut Layouts<'_>,
     symbols: &Symbols,
+    globals: &mut Globals,
+    literals: &mut Literals,
     constant: &Const,
 ) -> Result<String> {
     Ok(match constant {
@@ -280,13 +402,26 @@ fn constant_text(
         Const::Func { func, .. } => {
             format!("@{}", ident(&crate::llvm::func::symbol_of(symbols, func)?))
         }
-        // Both are relocations into objects this does not emit, and both are
-        // refused in the frontend — a `string` global is GLOBALS-PLAN's next
-        // widening, and folding *through* another global produces its value
-        // rather than its address. So either one arriving is a compiler bug.
-        Const::Str { .. } => {
-            internal_error!("a `string` cannot be a global's value yet")
+        // The same object a literal in a function body gets, deduplicated by
+        // content through the same table — so a string that appears in a constant
+        // and again in a body is one object. `owned = 0` in its header is what makes
+        // it safe to hold statically: releasing it is a no-op the *runtime* decides,
+        // so nothing here has to arrange for a global never to be freed.
+        //
+        // The value is the symbol plus the header, which is what a `string` is
+        // everywhere else, so a global and a local are indistinguishable downstream.
+        Const::Str { text, .. } => {
+            let Some(text) = module.sym(*text) else {
+                internal_error!("a string literal in a global has no text");
+            };
+            let symbol = literals.symbol(globals, text);
+            format!(
+                "getelementptr (i8, ptr @{}, i64 {STRING_HEADER_BYTES})",
+                ident(&symbol)
+            )
         }
+        // Folding *through* another constant produces its value, never its address,
+        // so this is the compiler being wrong rather than a program being wrong.
         Const::Global { .. } => {
             internal_error!("a global's value cannot be another global's address")
         }

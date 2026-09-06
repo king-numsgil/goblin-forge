@@ -265,6 +265,316 @@ describe("one constant reading another", () => {
     });
 });
 
+describe("constants that own something", () => {
+    // A `string` and a `T[]` both hold a buffer, and a static one is safe for the
+    // same reason in both cases: the runtime already has a marker for "this did not
+    // come from the allocator" — `owned = 0` in a string's header, `cap = 0` in an
+    // array's — so releasing one is a no-op the *runtime* decides. Nothing had to be
+    // arranged for a global never to be freed.
+    //
+    // Every test here runs, so the live-allocation check is doing the real work:
+    // a static buffer that got freed, or a copy that did not, shows up as a
+    // mismatch rather than as wrong output.
+
+    test("a `string` constant", async () => {
+        const result = await run(
+            "global-string",
+            `const NAME: string = "sol";
+
+       export function main(): i32 {
+         console.log(NAME);
+         console.log(\`\${NAME.length}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("sol\n3\n");
+    });
+
+    test("copying one clones the buffer and leaves the static alone", async () => {
+        // The case the allocation check is for: the local's scope frees its clone,
+        // and nothing frees the static. If the copy were a share, the count would be
+        // wrong in one direction; if the static were freed, in the other.
+        const result = await run(
+            "global-string-copy",
+            `const NAME: string = "sol";
+
+       function shout(s: string): string {
+         return s + "!";
+       }
+
+       export function main(): i32 {
+         const copy: string = NAME;
+         console.log(copy);
+         console.log(shout(NAME));
+         console.log(NAME);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("sol\nsol!\nsol\n");
+    });
+
+    test("a `readonly T[]` constant, and its elements", async () => {
+        const result = await run(
+            "global-array",
+            `const PLANETS: readonly string[] = ["mercury", "venus", "earth"];
+       const MASSES: readonly f64[] = [0.055, 0.815, 1.0];
+
+       export function main(): i32 {
+         console.log(\`\${PLANETS[2]} \${PLANETS.length} \${MASSES[1]}\`);
+         PLANETS.forEach((p) => { console.log(p); });
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("earth 3 0.815\nmercury\nvenus\nearth\n");
+    });
+
+    test("an empty one costs no object at all", async () => {
+        // Zeroed bytes are a null handle and the runtime reads a null handle as
+        // empty, so this is one `Zero` leaf and no side object.
+        const {project, result} = await compileSource(
+            "global-array-empty",
+            `const NOTHING: readonly i32[] = [];
+
+       export function main(): i32 {
+         return cast<i32>(NOTHING.length);
+       }\n`,
+            {emitIr: true},
+        );
+        expect(result.ok).toBe(true);
+
+        const ir = readFileSync(`${project.dir}/build/main.ll`, "utf8");
+        expect(ir).toContain("$NOTHING = internal constant ptr zeroinitializer");
+        expect(ir).not.toContain("__gf_ga$");
+    });
+
+    test("a non-empty one is a header plus elements, with `cap = 0`", async () => {
+        const {project, result} = await compileSource(
+            "global-array-object",
+            `const MASSES: readonly f64[] = [1.5, 2.5];
+
+       export function main(): i32 {
+         return cast<i32>(MASSES.length);
+       }\n`,
+            {emitIr: true},
+        );
+        expect(result.ok).toBe(true);
+
+        const ir = readFileSync(`${project.dir}/build/main.ll`, "utf8");
+        const object = ir.split("\n").find((line) => line.includes("__gf_ga$"));
+        // `len = 2`, then `cap = 0` — the marker that says the allocator never
+        // handed this out, so freeing it is a no-op.
+        expect(object).toContain("i64 2, i64 0");
+        // And the handle points past the sixteen-byte header, which is what a `T[]`
+        // is everywhere else.
+        expect(ir).toContain("i64 16)");
+    });
+
+    test("a struct can hold a string", async () => {
+        const result = await run(
+            "global-struct-string",
+            `interface Named { id: i32; label: string; }
+
+       const SOL: Named = { id: 1, label: "sol" };
+
+       export function main(): i32 {
+         console.log(\`\${SOL.id} \${SOL.label}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("1 sol\n");
+    });
+
+    test("an array of structs", async () => {
+        const result = await run(
+            "global-array-structs",
+            `interface Body { mass: f64; id: i32; }
+
+       const BODIES: readonly Body[] = [
+         { mass: 1.5, id: 1 },
+         { mass: 2.5, id: 2 },
+       ];
+
+       export function main(): i32 {
+         console.log(\`\${BODIES[0].mass} \${BODIES[1].id} \${BODIES.length}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("1.5 2 2\n");
+    });
+
+    test("a `static readonly` string works the same way", async () => {
+        const result = await run(
+            "global-static-string",
+            `class Build {
+         static readonly version: string = "0.3.0";
+       }
+
+       export function main(): i32 {
+         console.log(Build.version);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("0.3.0\n");
+    });
+
+    test("a mutable array is refused, and says what to write", async () => {
+        // `const` stops the name being rebound and nothing else, so `push` and
+        // `xs[0] = v` would both still be allowed and both would write to read-only
+        // memory. `readonly T[]` is the type that has neither.
+        const diagnostic = await expectRejected(
+            "global-array-mutable",
+            `const XS: i32[] = [1, 2];
+
+       export function main(): i32 {
+         return cast<i32>(XS.length);
+       }\n`,
+            "GF0008",
+        );
+        expect(diagnostic.message).toContain("readonly");
+    });
+
+    test("an array nested in a struct is refused", async () => {
+        // There is nowhere to say `readonly` about a field's element type from the
+        // outside, so this is refused rather than guessed at.
+        await expectRejected(
+            "global-nested-array",
+            `interface Holder { xs: readonly i32[]; }
+
+       const H: Holder = { xs: [1] };
+
+       export function main(): i32 {
+         return cast<i32>(H.xs.length);
+       }\n`,
+            "GF0008",
+        );
+    });
+
+    test("building a string does not fold", async () => {
+        const diagnostic = await expectRejected(
+            "global-string-concat",
+            `const NAME: string = "so" + "l";
+
+       export function main(): i32 {
+         console.log(NAME);
+         return 0;
+       }\n`,
+            "GF0007",
+        );
+        expect(diagnostic.message).toContain("literal");
+    });
+});
+
+describe("a function's address in a constant", () => {
+    test("a dispatch table, indexed at run time", async () => {
+        // C's `int (*fns[])(int)`. A code address is decided by the linker rather
+        // than by the program, which is what makes it something a constant can hold.
+        const result = await run(
+            "global-dispatch",
+            `function double(a: i32): i32 { return a * 2; }
+       function triple(a: i32): i32 { return a * 3; }
+       function negate(a: i32): i32 { return -a; }
+
+       const HANDLERS: FixedArray<(a: i32) => i32, 3> =
+         fixedArrayOf(double, triple, negate);
+
+       export function main(): i32 {
+         let total: i32 = 0;
+         let i: usize = 0;
+         while (i < 3) {
+           total = total + HANDLERS[i](10);
+           i = i + 1;
+         }
+         console.log(\`\${total}\`);
+         return 0;
+       }\n`,
+        );
+        // 20 + 30 - 10.
+        expect(result.stdout).toBe("40\n");
+    });
+
+    test("one on its own, and a null one", async () => {
+        const result = await run(
+            "global-fnptr",
+            `function answer(): i32 { return 42; }
+
+       const ANSWER: () => i32 = answer;
+       const NONE: (() => i32) | null = null;
+
+       export function main(): i32 {
+         return NONE === null ? ANSWER() : 0;
+       }\n`,
+        );
+        expect(result.exitCode).toBe(42);
+    });
+
+    test("a closure does not fold, and says why", async () => {
+        const diagnostic = await expectRejected(
+            "global-closure",
+            `const F: (a: i32) => i32 = (a) => a * 2;
+
+       export function main(): i32 {
+         return F(1);
+       }\n`,
+            "GF0007",
+        );
+        expect(diagnostic.message).toContain("capture");
+    });
+});
+
+describe("`std/linalg` constants", () => {
+    test("a vector written out component by component", async () => {
+        const result = await run(
+            "global-linalg",
+            `import { dvec3 } from "std/linalg";
+
+       const UP: dvec3 = new dvec3(0, 1, 0);
+       const ORIGIN: dvec3 = dvec3.zero();
+       const G: f64 = -9.81;
+
+       export function main(): i32 {
+         const gravity: dvec3 = UP.scale(G);
+         console.log(\`\${UP.x} \${UP.y} \${ORIGIN.y} \${gravity.y}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("0 1 0 -9.81\n");
+    });
+
+    test("a table of them", async () => {
+        const result = await run(
+            "global-linalg-table",
+            `import { dvec3 } from "std/linalg";
+
+       const AXES: FixedArray<dvec3, 3> = fixedArrayOf(
+         new dvec3(1, 0, 0),
+         new dvec3(0, 1, 0),
+         new dvec3(0, 0, 1),
+       );
+
+       export function main(): i32 {
+         console.log(\`\${AXES[0].x} \${AXES[1].y} \${AXES[2].z}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("1 1 1\n");
+    });
+
+    test("a factory that has to compute something does not fold", async () => {
+        const diagnostic = await expectRejected(
+            "global-linalg-splat",
+            `import { dvec3 } from "std/linalg";
+
+       const TWOS: dvec3 = dvec3.splat(2);
+
+       export function main(): i32 {
+         return cast<i32>(TWOS.x);
+       }\n`,
+            "GF0007",
+        );
+        expect(diagnostic.message).toContain("new dvec3");
+    });
+});
+
 describe("a constant some other build defines", () => {
     test("`declare const` is an extern data symbol, and only if read", async () => {
         const {project, result} = await compileSource(
@@ -479,19 +789,22 @@ describe("`static` fields", () => {
         expect(refusals[0]?.message).toContain("generic class `Box`");
     });
 
-    test("the type rule is the same one a module constant gets", async () => {
-        await expectRejected(
-            "static-string",
+    test("the `readonly` array rule applies here too", async () => {
+        // `static readonly xs: i32[]` makes the *field* read-only and says nothing
+        // about its elements, so `C.xs[0] = v` would still type-check — and would
+        // write into the read-only object the elements live in.
+        const diagnostic = await expectRejected(
+            "static-array-mutable",
             `class C {
-         static readonly label: string = "sol";
+         static readonly xs: i32[] = [1, 2];
        }
 
        export function main(): i32 {
-         console.log(C.label);
-         return 0;
+         return cast<i32>(C.xs.length);
        }\n`,
             "GF0008",
         );
+        expect(diagnostic.message).toContain("readonly");
     });
 
     test("a static with no value is refused", async () => {
@@ -540,46 +853,24 @@ describe("the rules", () => {
         expect(diagnostic.message).toContain("`const`");
     });
 
-    test("a `string` constant is `GF0008`, and says it is a gap", async () => {
+    test("a class cannot be a constant, and the message names both types", async () => {
+        // `string` and `readonly T[]` used to be here. What is left is the type that
+        // genuinely cannot: a class has a vtable pointer, which is a relocation onto
+        // a table, and slices when copied.
         const diagnostic = await expectRejected(
-            "global-string",
-            `const NAME: string = "sol";
+            "global-class",
+            `class Body { mass: f64 = 1; }
+       interface Holder { body: Body; }
+
+       const H: Holder = { body: new Body() };
 
        export function main(): i32 {
-         console.log(NAME);
          return 0;
        }\n`,
             "GF0008",
         );
-        expect(diagnostic.message).toContain("release");
-    });
-
-    test("a `T[]` constant is `GF0008` too", async () => {
-        await expectRejected(
-            "global-array",
-            `const XS: i32[] = [1, 2];
-
-       export function main(): i32 {
-         return cast<i32>(XS.length);
-       }\n`,
-            "GF0008",
-        );
-    });
-
-    test("a struct holding a `string` names both types", async () => {
-        const diagnostic = await expectRejected(
-            "global-struct-string",
-            `interface Named { id: i32; name: string; }
-
-       const WHO: Named = { id: 1, name: "sol" };
-
-       export function main(): i32 {
-         return WHO.id;
-       }\n`,
-            "GF0008",
-        );
-        expect(diagnostic.message).toContain("Named");
-        expect(diagnostic.message).toContain("string");
+        expect(diagnostic.message).toContain("Holder");
+        expect(diagnostic.message).toContain("Body");
     });
 
     test("a call does not fold", async () => {
@@ -682,12 +973,14 @@ describe("the rules", () => {
         // forced for every constant rather than only for the ones something reads.
         await expectRejected(
             "global-unused-bad",
-            `const UNUSED: string = "sol";
+            `function compute(): i32 { return 1; }
+
+       const UNUSED: i32 = compute();
 
        export function main(): i32 {
          return 0;
        }\n`,
-            "GF0008",
+            "GF0007",
         );
     });
 

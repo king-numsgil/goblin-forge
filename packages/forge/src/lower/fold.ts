@@ -59,6 +59,30 @@ export interface FoldContext {
     /** The lowerer's erasure, so a failure is reported the way it is elsewhere. */
     erase(at: ts.Node, type: ts.Type): MachineType | undefined;
 
+    /**
+     * Whether this expression's type is one of `std/linalg`'s.
+     *
+     * Asked rather than inferred from the shape, because `new X(1, 2, 3)` at a
+     * three-field struct and `X.zero()` at any struct would both fold happily and
+     * one of them would be somebody's own class with a `zero` static — folded to
+     * zeroes without running it.
+     */
+    linalg(expression: ts.Expression): boolean;
+
+    /**
+     * The `Const::Func` for a name that means a declared function, if it does.
+     *
+     * A code address is decided by the linker rather than by the program, which is
+     * exactly what a constant may hold: `fixedArrayOf(onKey, onMouse)` is C's
+     * `void (*fns[])(…)`. Resolved through the lowerer because the `FuncId` is
+     * its to hand out, which is also why constants are folded after the functions
+     * are declared.
+     */
+    functionAddress(expression: ts.Expression, type: MachineType): Const | undefined;
+
+    /** A `string` literal's text, interned into the module's string table. */
+    stringConstant(text: string, at: ts.Node): Const;
+
     readonly checker: ts.TypeChecker;
 
     error(node: ts.Node, code: string, message: string): void;
@@ -104,6 +128,10 @@ export class ConstantFolder {
                 return this.#structure(inner, type);
             case "fixedArray":
                 return this.#fixedArray(inner, type);
+            case "array":
+                return this.#array(inner, type);
+            case "string":
+                return this.#string(inner);
             case "scalar":
             case "bool":
             case "pointer":
@@ -132,13 +160,40 @@ export class ConstantFolder {
             );
             return undefined;
         }
+        // `new dvec3(0, 1, 0)` — a `std/linalg` value, component by component. The
+        // type is a struct of scalars, so folding it is the field walk below with a
+        // constructor's arguments in place of an object literal's properties.
+        if (ts.isNewExpression(expression) && this.#context.linalg(expression)) {
+            return this.#positional(
+                expression,
+                fields,
+                expression.arguments ?? ts.factory.createNodeArray(),
+                type,
+            );
+        }
+        // `dvec3.zero()`, `dmat4.zero()` — every byte zero, which is one leaf. The
+        // other factories are calls with values to work out (`identity`, `splat`,
+        // `fromRotation`), and none of them folds yet.
+        if (
+            ts.isCallExpression(expression) &&
+            ts.isPropertyAccessExpression(expression.expression) &&
+            expression.expression.name.text === "zero" &&
+            expression.arguments.length === 0 &&
+            this.#context.linalg(expression)
+        ) {
+            return {leaves: [{kind: "Zero"}]};
+        }
         if (!ts.isObjectLiteralExpression(expression)) {
+            const linalg = this.#context.linalg(expression)
+                ? ` A \`${renderType(type)}\` is written with one argument per component ` +
+                  "— `new dvec3(0, 1, 0)` — or as `.zero()`."
+                : "";
             this.#refuse(
                 expression,
                 "GF0007",
                 `this is the value of a module-level \`${renderType(type)}\`, so it has ` +
                 "to be written out as an object literal — that is what makes it " +
-                "resolvable without running anything.",
+                `resolvable without running anything.${linalg}`,
             );
             return undefined;
         }
@@ -173,6 +228,103 @@ export class ConstantFolder {
                 return undefined;
             }
             const folded = this.fold(value, field.type);
+            if (folded === undefined) {
+                return undefined;
+            }
+            leaves.push(...folded.leaves);
+        }
+        return {leaves};
+    }
+
+    /**
+     * A `string` constant: the literal's text, interned.
+     *
+     * One word pointing at bytes the runtime lays out with `owned = 0`, so nothing
+     * releases it and nothing has to be told not to. Concatenation does not fold —
+     * `"a" + "b"` would have to intern a string this compiler made up, which is a
+     * different thing from recording one the program wrote.
+     */
+    #string(expression: ts.Expression): FoldedInit | undefined {
+        if (!ts.isStringLiteral(expression) && !ts.isNoSubstitutionTemplateLiteral(expression)) {
+            this.#refuse(
+                expression,
+                "GF0007",
+                "a module-level `string` has to be a literal. Nothing here can build one " +
+                "at compile time: concatenation, `substring` and the rest all allocate, " +
+                "and there is nowhere for that to happen before `main`.",
+            );
+            return undefined;
+        }
+        return {
+            leaves: [
+                {
+                    kind: "Scalar",
+                    value: this.#context.stringConstant(expression.text, expression),
+                },
+            ],
+        };
+    }
+
+    /**
+     * A `readonly T[]` constant: a count, then the elements.
+     *
+     * The count is a leaf because the *type* does not carry one — that is the whole
+     * difference between a `T[]` and a `FixedArray<T, N>`, and it is why this is the
+     * one position where the leaves say how many of them there are.
+     */
+    #array(
+        expression: ts.Expression,
+        type: Extract<MachineType, { kind: "array" }>,
+    ): FoldedInit | undefined {
+        if (!ts.isArrayLiteralExpression(expression)) {
+            this.#refuse(
+                expression,
+                "GF0007",
+                `this is the value of a module-level \`${renderType(type)}\`, so it has to ` +
+                "be written out as an array literal.",
+            );
+            return undefined;
+        }
+        // An empty one is a `Zero`: zeroed bytes are a null handle, and the runtime
+        // reads a null handle as an empty array. So it costs no object at all.
+        if (expression.elements.length === 0) {
+            return {leaves: [{kind: "Zero"}]};
+        }
+
+        const leaves: GlobalInit[] = [{kind: "Array", value: BigInt(expression.elements.length)}];
+        for (const element of expression.elements) {
+            if (ts.isSpreadElement(element)) {
+                this.#refuse(element, "GF0007", "a spread does not fold.");
+                return undefined;
+            }
+            const folded = this.fold(element, type.element);
+            if (folded === undefined) {
+                return undefined;
+            }
+            leaves.push(...folded.leaves);
+        }
+        return {leaves};
+    }
+
+    /** Values in order against fields in order: a constructor's arguments. */
+    #positional(
+        at: ts.Node,
+        fields: readonly { readonly name: string; readonly type: MachineType }[],
+        values: readonly ts.Expression[],
+        type: MachineType,
+    ): FoldedInit | undefined {
+        if (values.length !== fields.length) {
+            this.#refuse(
+                at,
+                "GF0007",
+                `a \`${renderType(type)}\` has ${fields.length} components and ` +
+                `${values.length} were written.`,
+            );
+            return undefined;
+        }
+        const leaves: GlobalInit[] = [];
+        for (const [index, field] of fields.entries()) {
+            const folded = this.fold(values[index]!, field.type);
             if (folded === undefined) {
                 return undefined;
             }
@@ -271,11 +423,21 @@ export class ConstantFolder {
                     ],
                 };
             }
+            // A *function's* address is decided by the linker, not by the program,
+            // so it is exactly the kind of thing a constant can hold. Every other
+            // address is worked out while the program runs.
+            const address = this.#context.functionAddress(expression, type);
+            if (address !== undefined) {
+                return {leaves: [{kind: "Scalar", value: address}]};
+            }
             this.#refuse(
                 expression,
                 "GF0007",
-                `a module-level \`${renderType(type)}\` can only be \`null\`: every other ` +
-                "address is decided while the program runs.",
+                type.kind === "fnptr"
+                    ? `a module-level \`${renderType(type)}\` has to name a function or be ` +
+                      "`null`: a closure captures, and there is no frame here to capture from."
+                    : `a module-level \`${renderType(type)}\` can only be \`null\`: every ` +
+                      "other address is worked out while the program runs.",
             );
             return undefined;
         }

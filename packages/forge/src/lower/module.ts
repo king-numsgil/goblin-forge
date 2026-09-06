@@ -10,6 +10,7 @@
 
 import {
     type ClassId,
+    type Const,
     type ExternGlobalId,
     type ExternId,
     FieldId,
@@ -32,6 +33,7 @@ import {
     ErasureError,
     layoutKey,
     layoutKeyHash,
+    linalgTypeOf,
     type MachineType,
     NO_BINDINGS,
     type Note,
@@ -287,6 +289,14 @@ export class Lowerer {
                 globalAt: (expression) => this.#foldOperand(expression),
                 prelude: (name) => !this.shadowsPrelude(name),
                 erase: (at, type) => this.erase(at, type, NO_BINDINGS),
+                linalg: (expression) =>
+                    linalgTypeOf(this.#checker.getTypeAtLocation(expression)) !== null,
+                functionAddress: (expression, type) => this.#functionAddress(expression, type),
+                stringConstant: (text) => ({
+                    kind: "Str",
+                    text: this.#mir.sym(text),
+                    ty: this.#mir.ty({kind: "Str"}),
+                }),
                 checker: this.#checker,
                 error: (node, code, message) => this.error(node, code, message),
             },
@@ -1057,6 +1067,17 @@ export class Lowerer {
         // same table. After the classes, because that is where they were collected.
         for (const info of this.#classes.values()) {
             for (const field of info.staticFields.values()) {
+                // The same `readonly` rule a top-level one gets, and it has to be
+                // here too: `static readonly xs: i32[]` makes the *field* read-only
+                // and says nothing about the elements, so `C.xs[0] = v` would still
+                // type-check and would write into read-only memory.
+                if (
+                    field.type.kind === "array" &&
+                    !this.#globalArrayIsReadonly(field.declaration)
+                ) {
+                    this.#failedGlobals.add(this.#keyOf(field.declaration, field.name));
+                    continue;
+                }
                 this.#pendingGlobals.set(this.#keyOf(field.declaration, field.name), {
                     declaration: field.declaration,
                     name: `${field.owner}.${field.name}`,
@@ -1067,10 +1088,6 @@ export class Lowerer {
                 });
             }
         }
-        for (const key of [...this.#pendingGlobals.keys()]) {
-            this.#globalRecord(key);
-        }
-
         // Two passes: declare every function before lowering any body, so a call
         // to something defined further down the file resolves.
         const declared: { node: ts.FunctionDeclaration; builder: FunctionBuilder }[] = [];
@@ -1081,6 +1098,14 @@ export class Lowerer {
                     declared.push(one);
                 }
             }
+        }
+
+        // Folded *after* the functions are declared, because a constant may hold a
+        // function's address — a dispatch table is `fixedArrayOf(onKey, onMouse)` —
+        // and that needs a `FuncId` to exist. Nothing declared above reads a
+        // constant, and the bodies that do are lowered below.
+        for (const key of [...this.#pendingGlobals.keys()]) {
+            this.#globalRecord(key);
         }
 
         for (const body of classBodies) {
@@ -2861,6 +2886,10 @@ export class Lowerer {
                     this.#failedGlobals.add(key);
                     continue;
                 }
+                if (type.kind === "array" && !this.#globalArrayIsReadonly(declaration)) {
+                    this.#failedGlobals.add(key);
+                    continue;
+                }
                 this.#pendingGlobals.set(key, {
                     declaration,
                     name: declaration.name.text,
@@ -2874,6 +2903,32 @@ export class Lowerer {
                 });
             }
         }
+    }
+
+    /**
+     * A declared function's address, as a constant a global can hold.
+     *
+     * The same `Const::Func` a function used as a value produces, reached from the
+     * folder. A *generic* is refused here by saying nothing: `functionValueAt`
+     * answers `undefined` for one, because a generic has no single address, and the
+     * folder's own message about naming a function is the right complaint.
+     */
+    #functionAddress(expression: ts.Expression, type: MachineType): Const | undefined {
+        if (type.kind !== "fnptr") {
+            return undefined;
+        }
+        const target = this.functionValueAt(expression);
+        if (target === undefined) {
+            return undefined;
+        }
+        return {
+            kind: "Func",
+            func:
+                target.kind === "defined"
+                    ? {kind: "Local", value: target.id}
+                    : {kind: "Extern", value: this.externIdOf(target)},
+            ty: this.tyOf(type, expression),
+        };
     }
 
     /**
@@ -3045,8 +3100,28 @@ export class Lowerer {
             case "bool":
             case "pointer":
             case "fnptr":
+            // A `string` is one word pointing at bytes the runtime lays out with
+            // `owned = 0`, so a static one releases nothing and needs no rule about
+            // who would have.
+            case "string":
                 return true;
             case "fixedArray":
+                return this.#globalTypeAllowed(type.element, at, outer);
+            case "array":
+                // Only as the whole constant, never nested. A nested one would need
+                // the *readonly* question answered about a type this cannot see the
+                // annotation for, and the check below is on the declaration.
+                if (type !== outer) {
+                    this.error(
+                        at,
+                        "GF0008",
+                        `a \`${renderType(outer)}\` holds a \`${renderType(type)}\`, and a ` +
+                        "module-level constant can hold an array only as the whole value. " +
+                        "Nested, there is nowhere to say it is `readonly`, and a writable " +
+                        "one would put its elements in read-only memory.",
+                    );
+                    return false;
+                }
                 return this.#globalTypeAllowed(type.element, at, outer);
             case "struct":
                 return type.fields.every((field) =>
@@ -3081,6 +3156,34 @@ export class Lowerer {
      * vtables, and the written name is still the tail of it — a disassembly says
      * `__gf_g$1f3a9c02$LIMIT`, which needs no quoting and reads as itself.
      */
+    /**
+     * Whether an array-typed constant was declared `readonly T[]` — `GF0008` if not.
+     *
+     * A `const` stops the *name* being rebound and nothing else, so `xs.push(v)` and
+     * `xs[0] = v` are both still writes, and both would reach into `.rodata`. The
+     * elements are the problem rather than the handle, so what closes it is the type
+     * that has no `push` and a read-only index signature: §29's `readonly T[]`.
+     *
+     * Asked of tsc rather than of the machine type, because erasure deliberately does
+     * not look at the modifier — a `readonly i32[]` and an `i32[]` are the same
+     * layout and the same `{kind: "array"}`.
+     */
+    #globalArrayIsReadonly(declaration: ts.VariableDeclaration | ts.PropertyDeclaration): boolean {
+        const type = this.#checker.getTypeAtLocation(declaration.type ?? declaration);
+        if (this.#checker.getPropertyOfType(type, "push") === undefined) {
+            return true;
+        }
+        this.error(
+            declaration.type ?? declaration,
+            "GF0008",
+            "a module-level constant holding an array has to be `readonly`. `const` " +
+            "stops the name being rebound and nothing else, so `push` and `xs[0] = v` " +
+            "would both still be allowed — and both would write to read-only memory. " +
+            "Write `readonly` before the element type and tsc refuses them instead.",
+        );
+        return false;
+    }
+
     #globalSymbolOf(node: ts.Node, name: string): string {
         const tag = moduleTag(this.#relative(node.getSourceFile().fileName));
         return `__gf_g$${tag}$${name}`;

@@ -384,6 +384,10 @@ function globalInit(module: Module, leaf: GlobalInit): string {
             return `sizeOf(${ty(module, leaf.value)})`;
         case "AlignOf":
             return `alignOf(${ty(module, leaf.value)})`;
+        // The one leaf that is about the leaves rather than about a value: this many
+        // element subtrees follow it.
+        case "Array":
+            return `array(${leaf.value})`;
     }
 }
 

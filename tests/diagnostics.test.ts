@@ -160,11 +160,10 @@ describe("codes raised by a program", () => {
     test("GF0008 — a type that cannot be a module-level constant", async () => {
         await expectRejected(
             "diag-0008",
-            `const NAME: string = "sol";
+            `const XS: i32[] = [1, 2];
 
        export function main(): i32 {
-         console.log(NAME);
-         return 0;
+         return cast<i32>(XS.length);
        }\n`,
             "GF0008",
         );
