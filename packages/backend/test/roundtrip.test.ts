@@ -69,13 +69,11 @@ describe("the napi boundary", () => {
         // function is. `summary.rs` has collected those since before anything
         // emitted one; this is the first fixture that does.
         expect(summary.defines).toEqual(["FIXTURE_SHARED", "work_0"]);
-        // Read from the real call sites, not the declaration list.
-        //
-        // An *imported* global is missing from this list, and the fixture has one.
-        // That is undefined at link time just as an extern function is, so it
-        // belongs here — GLOBALS-PLAN stage 4, which owns the import path and has
-        // to change this line to land.
-        expect(summary.requires).toEqual(["gf_print_i32"]);
+        // Read from the real call sites, not the declaration list — and an imported
+        // *constant* needs no such walk, because the frontend makes its MIR extern
+        // at the first read. So the table is exactly the used set, and listing it is
+        // the honest answer rather than an approximation.
+        expect(summary.requires).toEqual(["gf_print_i32", "other_module$CONST"]);
     });
 
     test("a stale frontend is reported, not silently decoded", () => {

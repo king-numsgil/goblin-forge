@@ -69,6 +69,17 @@ pub fn summarise(module: &Module) -> ModuleSummary {
             }
         }
     }
+    // An imported **constant** needs no such walk, and that is a property of the
+    // frontend rather than a shortcut here: the MIR extern for one is made at the
+    // first read, so every entry in this table got there by being read. The
+    // declared surface and the used part are the same set, where for functions they
+    // are not.
+    requires.extend(
+        module
+            .extern_globals
+            .iter()
+            .filter_map(|g| module.sym(g.name).map(str::to_owned)),
+    );
     requires.sort_unstable();
     requires.dedup();
 

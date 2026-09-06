@@ -15,6 +15,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 
 import { compileSource, errorCodes, expectRejected, run } from "./harness.ts";
 
@@ -261,6 +262,91 @@ describe("one constant reading another", () => {
             },
         );
         expect(result.stdout).toBe("5 9\n");
+    });
+});
+
+describe("a constant some other build defines", () => {
+    test("`declare const` is an extern data symbol, and only if read", async () => {
+        const {project, result} = await compileSource(
+            "global-extern",
+            `declare const gf_probe_read: i32;
+       declare const gf_probe_unread: i32;
+
+       export function main(): i32 {
+         return gf_probe_read;
+       }\n`,
+            {emitIr: true},
+        );
+        // It does not link — nothing defines it — but it compiles, and the IR is
+        // where the declaration is checked.
+        const ir = readFileSync(`${project.dir}/build/main.ll`, "utf8");
+        expect(ir).toContain("@gf_probe_read = external global i32");
+        // The one nothing reads costs no undefined symbol. The MIR extern is made
+        // at the first read, which is the rule an extern *function* follows too.
+        expect(ir).not.toContain("gf_probe_unread");
+        // The symbol is the bare name, verbatim: that is the only thing the two
+        // sides share, so mangling it would be this compiler inventing a contract.
+        expect(ir).not.toContain("__gf_g$");
+        expect(result.ok).toBe(false);
+    });
+
+    test("nothing defining it is an unresolved external, not a silent zero", async () => {
+        const {result} = await compileSource(
+            "global-extern-unresolved",
+            `declare const gf_no_such_constant: i32;
+
+       export function main(): i32 {
+         return gf_no_such_constant;
+       }\n`,
+        );
+        expect(result.ok).toBe(false);
+        const message = result.diagnostics.map((d) => d.message).join("\n");
+        expect(message).toContain("gf_no_such_constant");
+    });
+
+    test("folding through an imported constant is refused, and says why", async () => {
+        const diagnostic = await expectRejected(
+            "global-extern-fold",
+            `declare const gf_probe_base: i32;
+
+       const DERIVED: i32 = gf_probe_base + 1;
+
+       export function main(): i32 {
+         return DERIVED;
+       }\n`,
+            "GF0007",
+        );
+        expect(diagnostic.message).toContain("linker");
+    });
+
+    test("a library's constant crosses by its source, not by its symbol", async () => {
+        // The recommended path, and the one that works. A Goblin library's exported
+        // constant is emitted under a module-qualified symbol, so a consumer cannot
+        // name it with `declare const` — and does not need to: importing the source
+        // folds the value into the consumer, which is the same way DECISIONS §25 has
+        // a generic cross a library boundary.
+        const {project: libProject, result: lib} = await compileSource(
+            "global-lib",
+            "export function unused(): i32 { return 0; }\n",
+            {
+                type: "static-lib",
+                files: {"consts.ts": "export const LIB_LIMIT: i32 = 11;\n"},
+            },
+        );
+        expect(lib.ok).toBe(true);
+
+        const source = join(dirname(libProject.entry), "consts.ts").replaceAll("\\", "/");
+        const result = await run(
+            "global-lib-app",
+            `import { LIB_LIMIT } from "${source}";
+
+       export function main(): i32 {
+         console.log(\`\${LIB_LIMIT}\`);
+         return 0;
+       }\n`,
+            {nativeLibs: [lib.output!]},
+        );
+        expect(result.stdout).toBe("11\n");
     });
 });
 

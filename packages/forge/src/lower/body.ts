@@ -3187,7 +3187,10 @@ export class BodyLowerer extends BoundaryLowerer {
                         global:
                             record.kind === "defined"
                                 ? {kind: "Local", value: record.id}
-                                : {kind: "Extern", value: record.id},
+                                // The MIR extern is made *here*, at the read, so a
+                                // `declare const` nothing reads costs no undefined
+                                // symbol — the rule an extern function follows.
+                                : {kind: "Extern", value: this.outer.externGlobalIdOf(record)},
                         ty: this.outer.tyOf(pointer, expression),
                     },
                 },

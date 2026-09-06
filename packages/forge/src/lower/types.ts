@@ -142,10 +142,12 @@ export type GlobalRecord =
       }
     | {
           readonly kind: "imported";
-          readonly id: ExternGlobalId;
           readonly name: string;
+          /** The symbol, verbatim: what the two sides share and all they share. */
           readonly symbol: string;
           readonly type: MachineType;
+          /** For the span on the extern, when a read makes one. */
+          readonly declaration: ts.VariableDeclaration;
       };
 
 /**

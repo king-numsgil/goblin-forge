@@ -10,6 +10,7 @@
 
 import {
     type ClassId,
+    type ExternGlobalId,
     type ExternId,
     FieldId,
     type FuncId,
@@ -132,6 +133,8 @@ export class Lowerer {
      * through to find it.
      */
     readonly #failedGlobals = new Set<string>();
+    /** MIR externs for imported constants, made at the first read and shared. */
+    readonly #externGlobals = new Map<string, ExternGlobalId>();
     readonly #folder: ConstantFolder;
 
     #classes = new Map<string, ClassInfo>();
@@ -2792,13 +2795,28 @@ export class Lowerer {
                     this.unsupported(statement, "a destructuring pattern at the top level");
                     continue;
                 }
+                // `declare const NAME: i32` — a constant some *other* build defines,
+                // which is the data twin of a body-less `declare function`. The
+                // symbol is the bare name, verbatim, because that is the only thing
+                // the two sides share; nothing here folds, and reading one is a load
+                // rather than a value this compiler knows.
+                const ambient =
+                    statement.modifiers?.some(
+                        (m) => m.kind === ts.SyntaxKind.DeclareKeyword,
+                    ) ?? false;
+                if (ambient) {
+                    this.#declareGlobalImport(declaration, declaration.name.text);
+                    continue;
+                }
                 if (declaration.initializer === undefined) {
                     this.error(
                         declaration,
                         "GF0007",
                         "a module-level constant has to be given its value here: there is " +
                         "no later point at which one could be assigned, because nothing " +
-                        "runs before `main`.",
+                        "runs before `main`. A constant some other library defines is " +
+                        "`declare const` instead, which names its symbol and has no value " +
+                        "on this side.",
                     );
                     continue;
                 }
@@ -2809,6 +2827,69 @@ export class Lowerer {
                 });
             }
         }
+    }
+
+    /**
+     * `declare const NAME: T` — an extern data symbol.
+     *
+     * The MIR extern is **not** made here, only the record that can make one, for
+     * the reason {@link Lowerer.externIdOf} gives about functions: an extern in the
+     * module is an undefined symbol in the object file, so a header declaring
+     * twenty constants of which a program reads two must not cost twenty.
+     *
+     * The type is checked the same way a defined one's is. A `string` cannot be one
+     * either — not because it could not be laid out over there, but because this
+     * side would have to know it owns nothing, and what crosses is a symbol and a
+     * type rather than an agreement about ownership.
+     */
+    #declareGlobalImport(declaration: ts.VariableDeclaration, name: string): void {
+        const key = this.#keyOf(declaration, name);
+        const type = this.erase(
+            declaration.type ?? declaration,
+            this.#checker.getTypeAtLocation(declaration.type ?? declaration),
+            NO_BINDINGS,
+        );
+        // Remembered as *failed* rather than simply absent, so that a read reports
+        // nothing further: the type is the mistake, and "the name is not supported"
+        // underneath it is a second complaint about the same one line.
+        if (type === undefined) {
+            this.#failedGlobals.add(key);
+            return;
+        }
+        if (!this.#globalTypeAllowed(type, declaration.type ?? declaration, type)) {
+            this.#failedGlobals.add(key);
+            return;
+        }
+        this.#globals.set(key, {
+            kind: "imported",
+            declaration,
+            name,
+            symbol: name,
+            type,
+        });
+    }
+
+    /**
+     * The MIR extern for an imported constant, made at the first read.
+     *
+     * Which is also what makes `Module::extern_globals` exactly the set a link
+     * needs: every entry got there by being read, so listing the table *is* the
+     * "only what is used" rule rather than an approximation of it. That differs
+     * from extern functions, where the table is the declared surface and the call
+     * sites are walked to find the used part.
+     */
+    externGlobalIdOf(record: Extract<GlobalRecord, { kind: "imported" }>): ExternGlobalId {
+        const existing = this.#externGlobals.get(record.symbol);
+        if (existing !== undefined) {
+            return existing;
+        }
+        const id = this.#mir.externGlobal({
+            name: record.symbol,
+            ty: this.tyOf(record.type, record.declaration),
+            span: this.span(record.declaration),
+        });
+        this.#externGlobals.set(record.symbol, id);
+        return id;
     }
 
     /**
@@ -2824,6 +2905,11 @@ export class Lowerer {
         if (known !== undefined) {
             return known;
         }
+        // Before the pending lookup, because a rejected `declare const` is neither
+        // known nor pending — and a read of one has already been told why.
+        if (this.#failedGlobals.has(key)) {
+            return "reported";
+        }
         const pending = this.#pendingGlobals.get(key);
         if (pending === undefined) {
             return undefined;
@@ -2838,9 +2924,6 @@ export class Lowerer {
                 "other constants. A module-level constant is folded at compile time, so " +
                 "a cycle has no value to fold to rather than merely no order to run in.",
             );
-            return "reported";
-        }
-        if (this.#failedGlobals.has(key)) {
             return "reported";
         }
 

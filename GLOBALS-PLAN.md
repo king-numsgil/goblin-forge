@@ -63,9 +63,12 @@ Each ends at a state where the four commands in `CLAUDE.md` are green.
 
 - [x] **Stage 0** — the MIR and the wire format *(done 2026-09-06)*
 - [x] **Stage 1** — codegen: data emission, and the address constant *(done 2026-09-06)*
-- [ ] **Stage 2** — the frontend: declaring and reading a module-private `const`
-- [ ] **Stage 3** — reading another global, and cycles
-- [ ] **Stage 4** — `export` and `import`
+- [x] **Stage 2** — the frontend: declaring and reading a module-private `const`
+      *(done 2026-09-06)*
+- [x] **Stage 3** — reading another global, and cycles *(done 2026-09-06, with
+      stage 2 — the on-demand fold that makes order irrelevant *is* the cycle
+      check, so separating them would have meant writing it twice)*
+- [x] **Stage 4** — `export` and `import` *(done 2026-09-06)*
 - [ ] **Stage 5** — `static` fields
 
 ### Stage 0 — the MIR and the wire format
@@ -153,6 +156,21 @@ A **run-time** proof is deliberately not here. Reading a global end to end wants
 real source, a real binary and real output, which is stage 2's harness test — a
 better version of the same check than a hand-written IR probe.
 
+### The next widening, now that the rest is built
+
+**A named function's address folds, and is refused only for an ordering reason.**
+`const DISPATCH: FixedArray<(a: i32) => i32, 4> = fixedArrayOf(f, g, h, i)` is a
+dispatch table, `Const::Func` is a leaf the backend already writes, and the only
+thing in the way is that globals are folded *before* functions are declared, so
+the fold cannot resolve a `FuncId` yet. Moving the fold after the declaration loop
+is the whole change; nothing needs it before then, because a body is lowered later
+still.
+
+**`string` and `T[]` are the other one**, and the type table above says what they
+need. `const UP: dvec3 = new dvec3(0, 1, 0)` is a third: it wants the linalg
+constructor recognised by the folder, which is a `LINALG_CTORS` lookup rather than
+anything new about globals.
+
 ### Stage 2 — the frontend: declaring and reading a module-private `const`
 
 `#declare` in `lower/module.ts` accepts a top-level `VariableStatement` for the
@@ -177,20 +195,52 @@ table.
 
 ### Stage 3 — reading another global, and cycles
 
-`const B: i32 = A + 1`. A dependency graph over the module's globals, resolved
-before any of them is emitted, with a new diagnostic code for a cycle —
-`const X = Y; const Y = X`. Declaration order must not matter, because it does
-not matter for a function.
+*Done with stage 2*, because the mechanism is one mechanism: folding on demand
+with a visiting set is what makes written order irrelevant **and** what sees a
+cycle, so building them separately would have meant writing it twice.
+
+**One claim here was wrong: "declaration order must not matter, because it does
+not matter for a function".** It does matter, and tsc is what makes it: a module
+`const` is block-scoped, so a forward reference is `TS2448` before this compiler
+is involved. What survives is better founded — order-independence matters *across
+files*, where the compiler picks the walk order, and that is exactly where a cycle
+is still reachable, because **circular imports are legal TypeScript**. So the
+guard earns its place on the cross-file case and tsc owns the same-file one. Both
+have tests, and the same-file test asserts `TS2448` so that a change on tsc's side
+shows up here rather than silently.
 
 ### Stage 4 — `export` and `import`
 
-`Linkage::Export` and the module-qualified symbol; an importing module records an
-`ExternGlobal` and reads through `GlobalRef::Extern`. Three things to get right:
-folding *through* an import is refused, because an extern symbol has no value at
-compile time; a global in a file outside the project root cannot be exported at
-all, for the tag reason in the table above; and `summary.rs` must report an
-imported global in `requires`, which it does not today — the assertion in
-`packages/backend/test/roundtrip.test.ts` is written to fail until it does.
+Two spellings, and the interesting part is that they are *different mechanisms*
+rather than two halves of one.
+
+**An import within one compilation needed nothing at all.** The lowerer walks
+every non-declaration source into one MIR module, so a constant in `a.ts` read
+from `b.ts` is `GlobalRef::Local` — one record, reached from both names, because
+an import resolves to the *exported declaration's own symbol*. The same fact that
+makes a named and a namespaced call land on one function.
+
+**`declare const NAME: T` is the extern**, and it is the data twin of a body-less
+`declare function`: the symbol is the bare name verbatim, because that is the only
+thing the two sides share. The MIR extern is made at the **first read**, so a
+header declaring twenty constants of which a program reads two costs two undefined
+symbols. Which also means `Module::extern_globals` *is* the used set, so
+`summary.rs` lists the table rather than walking for reads — the opposite of the
+rule for extern functions, and for a reason worth the comment it has.
+
+**A Goblin library's constant crosses by its source, not by its symbol.** Its
+exported symbol is module-qualified, so a consumer cannot name it with `declare
+const` — and does not need to: importing the source folds the value in, which is
+how DECISIONS §25 already has a generic cross a library boundary. There is a test
+that builds a `static-lib`, links it, imports its `consts.ts`, and reads the value.
+That is also why the "a global outside the project root cannot be exported" refusal
+this plan predicted was **not** built: nothing needs a stable symbol for it, because
+nothing names it. What remains is a reproducibility wart rather than a bug — an
+imported library source file is outside the consumer's root, so `#relative` falls
+back to its absolute path and the *internal* symbol differs between machines. That
+is pre-existing and identical for a library's internal functions; fixing it means
+deciding what the stable name of an out-of-project file is, which is one change
+covering both.
 
 ### Stage 5 — `static` fields
 
