@@ -673,7 +673,8 @@ impl<'a, 'm> Emitter<'a, 'm> {
                 | Const::Null(ty)
                 | Const::Bool { ty, .. }
                 | Const::Str { ty, .. }
-                | Const::Func { ty, .. } => Ok(*ty),
+                | Const::Func { ty, .. }
+                | Const::Global { ty, .. } => Ok(*ty),
                 Const::Unit => Err(InternalError::new("`unit` has no type")),
             },
         }
@@ -1350,6 +1351,13 @@ impl<'a, 'm> Emitter<'a, 'm> {
             Const::Func { func, .. } => {
                 let symbol = self.func_symbol(func)?;
                 Some(Val::new("ptr", format!("@{}", ident(&symbol))))
+            }
+            // GLOBALS-PLAN stage 1. The node exists and the frontend does not
+            // emit one yet, so reaching this is the compiler being wrong rather
+            // than a program being wrong — which is what an internal error is
+            // for, and why it is not a politely returned diagnostic.
+            Const::Global { global, .. } => {
+                internal_error!("{global:?} has no data object yet")
             }
         })
     }

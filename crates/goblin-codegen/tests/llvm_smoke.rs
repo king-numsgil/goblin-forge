@@ -138,6 +138,7 @@ fn shapes() -> Module {
         sigs: Vec::new(),
         externs: Vec::new(),
         globals: Vec::new(),
+        extern_globals: Vec::new(),
         funcs: Vec::new(),
     };
     for kind in [
@@ -493,6 +494,7 @@ fn shapes_with_a_body() -> Module {
         }],
         externs: Vec::new(),
         globals: Vec::new(),
+        extern_globals: Vec::new(),
         funcs: Vec::new(),
     };
     let span = Span {

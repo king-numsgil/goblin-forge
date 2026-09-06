@@ -21,14 +21,14 @@ pub mod ty;
 
 pub use body::{
     AbortReason, BinOp, Block, BlockKind, CallDest, Callee, CastKind, Const, FuncRef, Function,
-    Linkage, LocalDecl, Operand, Place, Projection, Rvalue, SimdBinOp, SimdUnOp, Statement,
-    SwitchTarget, Terminator, UnOp, UnwindAction,
+    GlobalRef, Linkage, LocalDecl, Operand, Place, Projection, Rvalue, SimdBinOp, SimdUnOp,
+    Statement, SwitchTarget, Terminator, UnOp, UnwindAction,
 };
 pub use ids::{
-    BlockId, ClassId, ExternId, FieldId, FileId, FuncId, InterfaceId, LocalId, SigId, StructId,
-    SymId, TyId,
+    BlockId, ClassId, ExternGlobalId, ExternId, FieldId, FileId, FuncId, GlobalId, InterfaceId,
+    LocalId, SigId, StructId, SymId, TyId,
 };
-pub use module::{ExternFunc, Global, Module};
+pub use module::{ExternFunc, ExternGlobal, Global, GlobalInit, Module};
 pub use span::Span;
 pub use ty::{
     Abi, Category, ClassDef, FieldDef, FloatTy, Impl, IntTy, InterfaceDef, InterfaceMethod, Param,
@@ -121,6 +121,7 @@ mod tests {
             }],
             externs: Vec::new(),
             globals: Vec::new(),
+            extern_globals: Vec::new(),
             funcs: vec![Function {
                 name: SymId(1),
                 sig: SigId(0),

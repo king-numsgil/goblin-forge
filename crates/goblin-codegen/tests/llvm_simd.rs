@@ -77,6 +77,7 @@ fn base() -> Module {
         sigs: Vec::new(),
         externs: Vec::new(),
         globals: Vec::new(),
+        extern_globals: Vec::new(),
         funcs: Vec::new(),
     };
 

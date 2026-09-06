@@ -57,6 +57,10 @@ ids! {
     FuncId,
     /// Index into [`crate::Module::externs`].
     ExternId,
+    /// Index into [`crate::Module::globals`].
+    GlobalId,
+    /// Index into [`crate::Module::extern_globals`].
+    ExternGlobalId,
     /// Index into [`crate::Function::blocks`]. Block 0 is always the entry.
     BlockId,
     /// Index into [`crate::Function::locals`]. Local 0 is always the return

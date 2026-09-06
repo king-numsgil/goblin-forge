@@ -10,10 +10,10 @@
 // module, which is the failure mode this whole arrangement exists to remove.
 
 /** Fingerprint of the wire format these bindings were generated from. */
-export const SCHEMA_FINGERPRINT = 0xfb0eb16471f939bbn;
+export const SCHEMA_FINGERPRINT = 0xbc0fe6c1155f7dcbn;
 
 /** The same value as hex, for comparing against the addon's report. */
-export const SCHEMA_FINGERPRINT_HEX = "fb0eb16471f939bb";
+export const SCHEMA_FINGERPRINT_HEX = "bc0fe6c1155f7dcb";
 
 // ---------------------------------------------------------------------------
 // postcard writer
@@ -290,12 +290,55 @@ export type Linkage =
   | "Internal"
   | "Export";
 
+export type ExternId = number & { readonly [GfIdBrand]: "ExternId" };
+export const ExternId = (raw: number): ExternId => raw as ExternId;
+
+export type FuncRef =
+  | { kind: "Local"; value: FuncId }
+  | { kind: "Extern"; value: ExternId }
+;
+
+export type GlobalId = number & { readonly [GfIdBrand]: "GlobalId" };
+export const GlobalId = (raw: number): GlobalId => raw as GlobalId;
+
+export type ExternGlobalId = number & { readonly [GfIdBrand]: "ExternGlobalId" };
+export const ExternGlobalId = (raw: number): ExternGlobalId => raw as ExternGlobalId;
+
+export type GlobalRef =
+  | { kind: "Local"; value: GlobalId }
+  | { kind: "Extern"; value: ExternGlobalId }
+;
+
+export type Const =
+  | { kind: "Unit" }
+  | { kind: "Bool"; value: boolean; ty: TyId }
+  | { kind: "Int"; bits: bigint; ty: TyId }
+  | { kind: "Float"; bits: bigint; ty: TyId }
+  | { kind: "Null"; value: TyId }
+  | { kind: "Str"; text: SymId; ty: TyId }
+  | { kind: "Func"; func: FuncRef; ty: TyId }
+  | { kind: "Global"; global: GlobalRef; ty: TyId }
+;
+
+export type GlobalInit =
+  | { kind: "Zero" }
+  | { kind: "Scalar"; value: Const }
+  | { kind: "SizeOf"; value: TyId }
+  | { kind: "AlignOf"; value: TyId }
+;
+
 export interface Global {
   name: SymId;
   ty: TyId;
   linkage: Linkage;
   mutable: boolean;
-  init: Uint8Array | null;
+  init: GlobalInit[];
+  span: Span;
+}
+
+export interface ExternGlobal {
+  name: SymId;
+  ty: TyId;
   span: Span;
 }
 
@@ -333,24 +376,6 @@ export interface Place {
   local: LocalId;
   projection: Projection[];
 }
-
-export type ExternId = number & { readonly [GfIdBrand]: "ExternId" };
-export const ExternId = (raw: number): ExternId => raw as ExternId;
-
-export type FuncRef =
-  | { kind: "Local"; value: FuncId }
-  | { kind: "Extern"; value: ExternId }
-;
-
-export type Const =
-  | { kind: "Unit" }
-  | { kind: "Bool"; value: boolean; ty: TyId }
-  | { kind: "Int"; bits: bigint; ty: TyId }
-  | { kind: "Float"; bits: bigint; ty: TyId }
-  | { kind: "Null"; value: TyId }
-  | { kind: "Str"; text: SymId; ty: TyId }
-  | { kind: "Func"; func: FuncRef; ty: TyId }
-;
 
 export type Operand =
   | { kind: "Copy"; value: Place }
@@ -519,6 +544,7 @@ export interface Module {
   sigs: Signature[];
   externs: ExternFunc[];
   globals: Global[];
+  externGlobals: ExternGlobal[];
   funcs: Function[];
 }
 
@@ -766,12 +792,134 @@ export function writeLinkage(w: Writer, v: Linkage): void {
   w.varint(LinkageIndex[v]);
 }
 
+export function writeExternId(w: Writer, v: ExternId): void {
+  w.varint(v);
+}
+
+export function writeFuncRef(w: Writer, v: FuncRef): void {
+  switch (v.kind) {
+    case "Local": {
+      w.varint(0);
+      writeFuncId(w, v.value);
+      break;
+    }
+    case "Extern": {
+      w.varint(1);
+      writeExternId(w, v.value);
+      break;
+    }
+  }
+}
+
+export function writeGlobalId(w: Writer, v: GlobalId): void {
+  w.varint(v);
+}
+
+export function writeExternGlobalId(w: Writer, v: ExternGlobalId): void {
+  w.varint(v);
+}
+
+export function writeGlobalRef(w: Writer, v: GlobalRef): void {
+  switch (v.kind) {
+    case "Local": {
+      w.varint(0);
+      writeGlobalId(w, v.value);
+      break;
+    }
+    case "Extern": {
+      w.varint(1);
+      writeExternGlobalId(w, v.value);
+      break;
+    }
+  }
+}
+
+export function writeConst(w: Writer, v: Const): void {
+  switch (v.kind) {
+    case "Unit": {
+      w.varint(0);
+      break;
+    }
+    case "Bool": {
+      w.varint(1);
+      w.bool(v.value);
+      writeTyId(w, v.ty);
+      break;
+    }
+    case "Int": {
+      w.varint(2);
+      w.varintBig(v.bits);
+      writeTyId(w, v.ty);
+      break;
+    }
+    case "Float": {
+      w.varint(3);
+      w.varintBig(v.bits);
+      writeTyId(w, v.ty);
+      break;
+    }
+    case "Null": {
+      w.varint(4);
+      writeTyId(w, v.value);
+      break;
+    }
+    case "Str": {
+      w.varint(5);
+      writeSymId(w, v.text);
+      writeTyId(w, v.ty);
+      break;
+    }
+    case "Func": {
+      w.varint(6);
+      writeFuncRef(w, v.func);
+      writeTyId(w, v.ty);
+      break;
+    }
+    case "Global": {
+      w.varint(7);
+      writeGlobalRef(w, v.global);
+      writeTyId(w, v.ty);
+      break;
+    }
+  }
+}
+
+export function writeGlobalInit(w: Writer, v: GlobalInit): void {
+  switch (v.kind) {
+    case "Zero": {
+      w.varint(0);
+      break;
+    }
+    case "Scalar": {
+      w.varint(1);
+      writeConst(w, v.value);
+      break;
+    }
+    case "SizeOf": {
+      w.varint(2);
+      writeTyId(w, v.value);
+      break;
+    }
+    case "AlignOf": {
+      w.varint(3);
+      writeTyId(w, v.value);
+      break;
+    }
+  }
+}
+
 export function writeGlobal(w: Writer, v: Global): void {
   writeSymId(w, v.name);
   writeTyId(w, v.ty);
   writeLinkage(w, v.linkage);
   w.bool(v.mutable);
-  if (v.init === null) { w.u8(0); } else { w.u8(1); w.bytes(v.init!); }
+  w.varint(v.init.length); for (const item of v.init) { writeGlobalInit(w, item); }
+  writeSpan(w, v.span);
+}
+
+export function writeExternGlobal(w: Writer, v: ExternGlobal): void {
+  writeSymId(w, v.name);
+  writeTyId(w, v.ty);
   writeSpan(w, v.span);
 }
 
@@ -837,69 +985,6 @@ export function writeProjection(w: Writer, v: Projection): void {
 export function writePlace(w: Writer, v: Place): void {
   writeLocalId(w, v.local);
   w.varint(v.projection.length); for (const item of v.projection) { writeProjection(w, item); }
-}
-
-export function writeExternId(w: Writer, v: ExternId): void {
-  w.varint(v);
-}
-
-export function writeFuncRef(w: Writer, v: FuncRef): void {
-  switch (v.kind) {
-    case "Local": {
-      w.varint(0);
-      writeFuncId(w, v.value);
-      break;
-    }
-    case "Extern": {
-      w.varint(1);
-      writeExternId(w, v.value);
-      break;
-    }
-  }
-}
-
-export function writeConst(w: Writer, v: Const): void {
-  switch (v.kind) {
-    case "Unit": {
-      w.varint(0);
-      break;
-    }
-    case "Bool": {
-      w.varint(1);
-      w.bool(v.value);
-      writeTyId(w, v.ty);
-      break;
-    }
-    case "Int": {
-      w.varint(2);
-      w.varintBig(v.bits);
-      writeTyId(w, v.ty);
-      break;
-    }
-    case "Float": {
-      w.varint(3);
-      w.varintBig(v.bits);
-      writeTyId(w, v.ty);
-      break;
-    }
-    case "Null": {
-      w.varint(4);
-      writeTyId(w, v.value);
-      break;
-    }
-    case "Str": {
-      w.varint(5);
-      writeSymId(w, v.text);
-      writeTyId(w, v.ty);
-      break;
-    }
-    case "Func": {
-      w.varint(6);
-      writeFuncRef(w, v.func);
-      writeTyId(w, v.ty);
-      break;
-    }
-  }
 }
 
 export function writeOperand(w: Writer, v: Operand): void {
@@ -1355,6 +1440,7 @@ export function writeModule(w: Writer, v: Module): void {
   w.varint(v.sigs.length); for (const item of v.sigs) { writeSignature(w, item); }
   w.varint(v.externs.length); for (const item of v.externs) { writeExternFunc(w, item); }
   w.varint(v.globals.length); for (const item of v.globals) { writeGlobal(w, item); }
+  w.varint(v.externGlobals.length); for (const item of v.externGlobals) { writeExternGlobal(w, item); }
   w.varint(v.funcs.length); for (const item of v.funcs) { writeFunction(w, item); }
 }
 

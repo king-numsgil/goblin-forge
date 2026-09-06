@@ -64,9 +64,17 @@ describe("the napi boundary", () => {
         expect(summary.funcCount).toBe(3);
         // Five blocks per function: entry, head, body, after-call, exit.
         expect(summary.blockCount).toBe(15);
-        // Only the first function is exported.
-        expect(summary.defines).toEqual(["work_0"]);
+        // Only the first function is exported — and the exported *global*, which
+        // is a symbol the linker can resolve for somebody else exactly as a
+        // function is. `summary.rs` has collected those since before anything
+        // emitted one; this is the first fixture that does.
+        expect(summary.defines).toEqual(["FIXTURE_SHARED", "work_0"]);
         // Read from the real call sites, not the declaration list.
+        //
+        // An *imported* global is missing from this list, and the fixture has one.
+        // That is undefined at link time just as an extern function is, so it
+        // belongs here — GLOBALS-PLAN stage 4, which owns the import path and has
+        // to change this line to land.
         expect(summary.requires).toEqual(["gf_print_i32"]);
     });
 

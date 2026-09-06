@@ -3,7 +3,7 @@
 use postcard_schema::Schema;
 use serde::{Deserialize, Serialize};
 
-use crate::body::{Function, Linkage};
+use crate::body::{Const, Function, Linkage};
 use crate::ids::{ClassId, ExternId, FuncId, InterfaceId, SigId, StructId, SymId, TyId};
 use crate::span::Span;
 use crate::ty::{ClassDef, InterfaceDef, Signature, StructDef, TyDef};
@@ -25,10 +25,70 @@ pub struct Global {
     pub ty: TyId,
     pub linkage: Linkage,
     pub mutable: bool,
-    /// Initial bytes, already laid out. `None` means zero-initialised.
-    pub init: Option<Vec<u8>>,
+    /// The value, as leaves the *backend* places.
+    ///
+    /// This used to be `Option<Vec<u8>>` — "initial bytes, already laid out" —
+    /// and that is the wrong side of the boundary. Filling it needs field
+    /// offsets, padding, `linalg`'s alignments and each enum's underlying width,
+    /// none of which the frontend computes: `requireKnownLayout` only asks
+    /// *whether* a layout is known. A second layout implementation in TypeScript
+    /// would have had to agree with this one forever.
+    ///
+    /// So the frontend folds *values* and the backend places them — the split
+    /// [`crate::Rvalue::SizeOf`] states, that only the backend lays types out.
+    ///
+    /// **The leaves are depth-first, and the type is the structure.** A struct of
+    /// two fields is two entries; a struct holding a three-element array is
+    /// three. Nothing here restates the shape, because the shape is already in
+    /// [`Global::ty`] and two descriptions of one shape are two things that can
+    /// disagree. It is also what this crate's header requires: a
+    /// `Vec<GlobalInit>` inside `GlobalInit` is a cyclic schema, and the
+    /// generated bindings have to be finite.
+    ///
+    /// A [`GlobalInit::Zero`] consumes the whole subtree at its position, so a
+    /// zeroed 4096-element array is one entry rather than 4096.
+    pub init: Vec<GlobalInit>,
     pub span: Span,
 }
+
+/// One leaf of a [`Global`]'s value, before layout.
+///
+/// Every variant is resolvable without running anything, which is the whole rule
+/// for a global here: C++'s constant initialisation, and no startup code ever.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Schema)]
+pub enum GlobalInit {
+    /// Every byte of the subtree at this position is zero, whatever its layout
+    /// turns out to be. What the old `init: None` meant, as a value rather than
+    /// as an absence — and the reason a big zeroed table is cheap on the wire.
+    Zero,
+    /// One scalar, boolean, enum member, pointer or function address.
+    Scalar(Const),
+    /// `sizeOf<T>()` in an initialiser, resolved at emission.
+    ///
+    /// A node rather than a number for the reason [`Global::init`] gives: the
+    /// frontend does not have one. It is also why `sizeOf<T>() * 2` does not
+    /// fold — there is deliberately no arithmetic here for the backend to do,
+    /// until something wants it.
+    SizeOf(TyId),
+    /// `alignOf<T>()`, the same way.
+    AlignOf(TyId),
+}
+
+/// A global this module reads but does not define: another Goblin module's
+/// `export const`.
+///
+/// [`ExternFunc`] for data, and it exists for the same reason — the symbol and
+/// its type are the only things the two sides share. There is no initialiser
+/// here on purpose: the defining module holds the value, and a consumer that
+/// could see it would be folding through a link boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Schema)]
+pub struct ExternGlobal {
+    /// The symbol as the linker sees it, already qualified by its module.
+    pub name: SymId,
+    pub ty: TyId,
+    pub span: Span,
+}
+
 
 /// One compilation unit's worth of MIR.
 ///
@@ -70,6 +130,9 @@ pub struct Module {
 
     pub externs: Vec<ExternFunc>,
     pub globals: Vec<Global>,
+    /// The globals this module reads and does not define, addressed by
+    /// [`crate::ids::ExternGlobalId`].
+    pub extern_globals: Vec<ExternGlobal>,
     pub funcs: Vec<Function>,
 }
 

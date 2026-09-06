@@ -72,6 +72,7 @@ fn zoo() -> Module {
         }],
         externs: Vec::new(),
         globals: Vec::new(),
+        extern_globals: Vec::new(),
         funcs: Vec::new(),
     };
 

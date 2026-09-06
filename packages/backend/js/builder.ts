@@ -18,12 +18,16 @@ import {
     type ClassDef,
     ClassId,
     type ExternFunc,
+    type ExternGlobal,
+    ExternGlobalId,
     ExternId,
     type FieldDef,
     FileId,
     FuncId,
     type Function as MirFunction,
     type Global,
+    GlobalId,
+    type GlobalInit,
     type InterfaceDef,
     InterfaceId,
     type InterfaceMethod,
@@ -101,6 +105,7 @@ export class ModuleBuilder {
     readonly #sigIndex = new Map<string, SigId>();
     readonly #externs: ExternFunc[] = [];
     readonly #globals: Global[] = [];
+    readonly #externGlobals: ExternGlobal[] = [];
     readonly #funcs: MirFunction[] = [];
 
     constructor(name: string) {
@@ -422,22 +427,43 @@ export class ModuleBuilder {
 
     // ---- declarations ------------------------------------------------------
 
+    /**
+     * A module-level constant, with its value as depth-first leaves.
+     *
+     * The leaves are values and never bytes: the backend places them, because
+     * only the backend lays types out. An empty list is a global that is entirely
+     * zero, which is also what one `Zero` leaf says — the shorter spelling for
+     * whichever reads better at the call site.
+     */
     global(options: {
         name: string;
         ty: TyId;
         linkage?: Linkage;
         mutable?: boolean;
-        init?: Uint8Array;
+        init?: readonly GlobalInit[];
         span?: Span;
-    }): void {
+    }): GlobalId {
+        const id = GlobalId(this.#globals.length);
         this.#globals.push({
             name: this.sym(options.name),
             ty: options.ty,
             linkage: options.linkage ?? "Internal",
             mutable: options.mutable ?? false,
-            init: options.init ?? null,
+            init: [...(options.init ?? [])],
             span: options.span ?? SYNTHETIC,
         });
+        return id;
+    }
+
+    /** A global another Goblin module defines and this one reads. */
+    externGlobal(options: { name: string; ty: TyId; span?: Span }): ExternGlobalId {
+        const id = ExternGlobalId(this.#externGlobals.length);
+        this.#externGlobals.push({
+            name: this.sym(options.name),
+            ty: options.ty,
+            span: options.span ?? SYNTHETIC,
+        });
+        return id;
     }
 
     /** Reserve a function id before its body exists, so calls can refer to it. */
@@ -486,6 +512,7 @@ export class ModuleBuilder {
             sigs: this.#sigs,
             externs: this.#externs,
             globals: this.#globals,
+            externGlobals: this.#externGlobals,
             funcs: this.#funcs,
         };
     }

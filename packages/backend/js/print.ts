@@ -18,6 +18,7 @@ import {
     type Callee,
     type Const,
     type Function as MirFunction,
+    type GlobalInit,
     type LocalDecl,
     type Module,
     type Operand,
@@ -67,6 +68,20 @@ export function printModule(module: Module, options: PrintOptions = {}): string 
         out.push(`extern fn ${sym(module, extern.name)}: ${signature(module, extern.sig)}  // ext${index}`);
     }
     if (module.externs.length > 0) {
+        out.push("");
+    }
+    for (const [index, extern] of module.externGlobals.entries()) {
+        out.push(`extern const ${sym(module, extern.name)}: ${ty(module, extern.ty)}  // eg${index}`);
+    }
+    for (const [index, global] of module.globals.entries()) {
+        const keyword = global.mutable ? "static" : "const";
+        const leaves = global.init.map((leaf) => globalInit(module, leaf)).join(", ");
+        out.push(
+            `${keyword} ${sym(module, global.name)}: ${ty(module, global.ty)} = ` +
+            `[${leaves}]  // g${index}`,
+        );
+    }
+    if (module.externGlobals.length > 0 || module.globals.length > 0) {
         out.push("");
     }
     for (const func of module.funcs) {
@@ -348,6 +363,27 @@ function constant(module: Module, value: Const): string {
             return value.func.kind === "Local"
                 ? sym(module, module.funcs[value.func.value]?.name ?? 0)
                 : sym(module, module.externs[value.func.value]?.name ?? 0);
+        // `&` because it is the address and not the value: reading the global is
+        // the `Deref` that follows, and a dump that hid the distinction would
+        // hide the whole mechanism.
+        case "Global":
+            return value.global.kind === "Local"
+                ? `&${sym(module, module.globals[value.global.value]?.name ?? 0)}`
+                : `&${sym(module, module.externGlobals[value.global.value]?.name ?? 0)}`;
+    }
+}
+
+/** One leaf of a global's initialiser. The type says where it lands. */
+function globalInit(module: Module, leaf: GlobalInit): string {
+    switch (leaf.kind) {
+        case "Zero":
+            return "zero";
+        case "Scalar":
+            return constant(module, leaf.value);
+        case "SizeOf":
+            return `sizeOf(${ty(module, leaf.value)})`;
+        case "AlignOf":
+            return `alignOf(${ty(module, leaf.value)})`;
     }
 }
 

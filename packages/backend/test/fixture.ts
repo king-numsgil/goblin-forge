@@ -36,6 +36,29 @@ export function buildFixture(functionCount: number): Module {
     const printSig = m.sig({params: [i32], ret: void_, abi: "C"});
     const print = m.extern({name: "gf_print_i32", sig: printSig});
 
+    // Module-level constants, one per initialiser shape, so that byte equality
+    // covers each of them rather than only the ones a first program happens to
+    // use. `PAIR` is the one that matters most: two leaves for two fields, which
+    // is where a length prefix that only works for a single element shows up.
+    const pair = m.ty({kind: "FixedArray", element: i32, length: 2n});
+    const table = m.global({
+        name: "FIXTURE_LIMIT",
+        ty: i32,
+        init: [{kind: "Scalar", value: {kind: "Int", bits: 7n, ty: i32}}],
+    });
+    m.global({
+        name: "FIXTURE_PAIR",
+        ty: pair,
+        init: [
+            {kind: "Scalar", value: {kind: "Int", bits: 1n, ty: i32}},
+            {kind: "SizeOf", value: i32},
+        ],
+    });
+    // Exported, and zero — which is both `Linkage::Export` on a global and the
+    // leaf that stands for a whole subtree.
+    m.global({name: "FIXTURE_SHARED", ty: pair, linkage: "Export", init: [{kind: "Zero"}]});
+    const imported = m.externGlobal({name: "other_module$CONST", ty: i32});
+
     const workSig = m.sig({params: [i32, ptrI32], ret: i32});
 
     for (let index = 0; index < functionCount; index += 1) {
@@ -64,6 +87,32 @@ export function buildFixture(functionCount: number): Module {
             place: place(counter),
             rvalue: {kind: "Use", value: int(0, i32)},
         });
+        // Reading a global: its *address* as a constant, then a `Deref` like any
+        // other pointer. Both `GlobalRef` variants appear, because a local one and
+        // an imported one are different slots on the wire.
+        for (const target of [
+            {kind: "Local", value: table} as const,
+            {kind: "Extern", value: imported} as const,
+        ]) {
+            const address = f.addLocal({ty: ptrI32, storage: "Temporary"});
+            f.push(entry, {kind: "StorageLive", value: address});
+            f.push(entry, {
+                kind: "Init",
+                place: place(address),
+                rvalue: {kind: "Use", value: {kind: "Const", value: {kind: "Global", global: target, ty: ptrI32}}},
+            });
+            f.push(entry, {
+                kind: "Assign",
+                place: place(counter),
+                rvalue: {
+                    kind: "Binary",
+                    op: "Add",
+                    lhs: copy(counter),
+                    rhs: {kind: "Copy", value: {local: address, projection: [{kind: "Deref"}]}},
+                },
+            });
+            f.push(entry, {kind: "StorageDead", value: address});
+        }
         f.seal(entry, {kind: "Goto", value: head});
 
         f.push(head, {kind: "StorageLive", value: keepGoing});

@@ -22,7 +22,8 @@ use postcard_schema::Schema;
 use serde::{Deserialize, Serialize};
 
 use crate::ids::{
-    BlockId, ClassId, ExternId, FieldId, FuncId, InterfaceId, LocalId, SigId, SymId, TyId,
+    BlockId, ClassId, ExternGlobalId, ExternId, FieldId, FuncId, GlobalId, InterfaceId, LocalId,
+    SigId, SymId, TyId,
 };
 use crate::span::Span;
 use crate::ty::StorageClass;
@@ -169,6 +170,24 @@ pub enum Const {
     /// under different conventions.
     Func {
         func: FuncRef,
+        ty: TyId,
+    },
+    /// The **address** of a module-level constant, as a `Pointer<T>`.
+    ///
+    /// A global is named this way rather than by a root variant on [`Place`], and
+    /// the two are indistinguishable in the object file — both emit one
+    /// `.rodata` symbol and the same `getelementptr`. What the address buys is
+    /// that nothing else has to change: a read is `Copy((*p)[i])`, an ordinary
+    /// projection off an ordinary local, and [`Place::storage_class`] already
+    /// answers `Borrowed` for anything behind a [`Projection::Deref`] — so drop
+    /// elaboration will not destroy a global without being told about globals at
+    /// all. Which is exactly right, and the rule that a wrong answer here would
+    /// have broken silently.
+    ///
+    /// The same shape [`Const::Str`] uses for static string data, and
+    /// [`Const::Func`] for a code address. GLOBALS-PLAN.
+    Global {
+        global: GlobalRef,
         ty: TyId,
     },
 }
@@ -554,6 +573,18 @@ pub enum FuncRef {
     Local(FuncId),
     /// Imported: another module, or a C library.
     Extern(ExternId),
+}
+
+/// A module-level constant being read: this module's, or one it imports.
+///
+/// [`FuncRef`] for data, down to the variant names, because it is the same
+/// question — is this symbol mine to define, or the linker's to find?
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Schema)]
+pub enum GlobalRef {
+    /// Defined in this module.
+    Local(GlobalId),
+    /// Imported: another Goblin module's `export const`.
+    Extern(ExternGlobalId),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Schema)]
