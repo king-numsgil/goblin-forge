@@ -79,7 +79,18 @@ import {
     TO_ARRAY,
     TRY_CAST,
 } from "./tables.ts";
-import { BOOL, type FnRecord, ISIZE, STRING, type Typed, typed, U64, USIZE, VOID } from "./types.ts";
+import {
+    BOOL,
+    type FnRecord,
+    type GlobalRecord,
+    ISIZE,
+    STRING,
+    type Typed,
+    typed,
+    U64,
+    USIZE,
+    VOID,
+} from "./types.ts";
 import { type Binding, bindingPlace, isCapture, type LoopFrame, type Scope, Scopes } from "./scopes.ts";
 import {
     behindOneIndirection,
@@ -1591,6 +1602,19 @@ export class BodyLowerer extends BoundaryLowerer {
         }
 
         if (ts.isPropertyAccessExpression(target)) {
+            // `C.n` — a static field. Before anything asks `C` for a value, because
+            // it has none: it is a class name. A plain `static` is writable and a
+            // `static readonly` is `TS2540` from tsc, so there is no rule here.
+            const staticField = this.#staticFieldRecord(target);
+            if (staticField !== undefined) {
+                if (staticField === "reported") {
+                    return undefined;
+                }
+                return {
+                    place: this.#globalPlace(target, staticField),
+                    type: staticField.type,
+                };
+            }
             // An accessor is a call to read and a call to write, not an address.
             // Updating one in place is a get, an operator and a set — a different
             // lowering from this one, and not written yet. Saying that is more use
@@ -1753,6 +1777,30 @@ export class BodyLowerer extends BoundaryLowerer {
      * owning field that value is destroyed before the new one lands.
      */
     #fieldAssignment(target: ts.PropertyAccessExpression, source: ts.Expression): void {
+        // `C.n = v` where `n` is a `static` field: a store through its address, and
+        // the only write to a global this language has. First for the reason the
+        // static accessor below is first — `C` is a class name and has no value.
+        const staticField = this.#staticFieldRecord(target);
+        if (staticField !== undefined) {
+            if (staticField === "reported") {
+                return;
+            }
+            const place = this.#globalPlace(target, staticField);
+            const value = this.expressionTyped(source, staticField.type);
+            if (value === undefined) {
+                return;
+            }
+            // `Assign`, not `Init`: the storage holds a value already — the folded
+            // one, or whatever a previous write left — so whatever is there is
+            // destroyed first. Which is nothing today, since only trivial types can
+            // be globals, and is the right node for the day that changes.
+            this.push({
+                kind: "Assign",
+                place,
+                rvalue: {kind: "Use", value: this.forStorage(value)},
+            });
+            return;
+        }
         // `C.x = v` where `x` is `static set x(v)`. First, because `C` is a class
         // name rather than an object and asking it for a value reports a name that
         // does not resolve.
@@ -2881,6 +2929,13 @@ export class BodyLowerer extends BoundaryLowerer {
         if (this.staticAt(expression) !== undefined) {
             return this.functionValue(expression, natural);
         }
+        // `C.n` — a static field, read through its address like any other global.
+        const staticField = this.#staticFieldRecord(expression);
+        if (staticField !== undefined) {
+            return staticField === "reported"
+                ? undefined
+                : this.#readGlobal(expression, staticField);
+        }
         // `ns.f` — a namespace-qualified function's address. Beside the static
         // case and for the same reason: `ns` is no more a value than `C` is, so
         // this has to come before anything asks it for one.
@@ -3168,11 +3223,23 @@ export class BodyLowerer extends BoundaryLowerer {
         if (record === "reported") {
             return undefined;
         }
+        return this.#readGlobal(expression, record);
+    }
+
+    /**
+     * The **place** a global's value occupies: its address, dereferenced.
+     *
+     * One local per read rather than one per constant, which LLVM removes at any
+     * optimisation level and which keeps this from needing a cache keyed by
+     * anything. A write goes through the same place, which is the whole reason it
+     * is a place and not a value.
+     */
+    #globalPlace(at: ts.Node, record: GlobalRecord): Place {
         const pointer: MachineType = {kind: "pointer", pointee: record.type};
         const address = this.f.addLocal({
-            ty: this.outer.tyOf(pointer, expression),
+            ty: this.outer.tyOf(pointer, at),
             storage: "Temporary",
-            span: this.outer.span(expression),
+            span: this.outer.span(at),
         });
         this.push({kind: "StorageLive", value: address});
         this.push({
@@ -3191,16 +3258,37 @@ export class BodyLowerer extends BoundaryLowerer {
                                 // `declare const` nothing reads costs no undefined
                                 // symbol — the rule an extern function follows.
                                 : {kind: "Extern", value: this.outer.externGlobalIdOf(record)},
-                        ty: this.outer.tyOf(pointer, expression),
+                        ty: this.outer.tyOf(pointer, at),
                     },
                 },
             },
         });
+        return {local: address, projection: [{kind: "Deref"}]};
+    }
+
+    /**
+     * The record behind `C.n`, or `undefined` if this is not a static field.
+     *
+     * The class model resolves the *name*; the global table holds the storage. Two
+     * lookups rather than one because they answer different questions: whether the
+     * program wrote a static field, and what this build folded it to.
+     */
+    #staticFieldRecord(
+        access: ts.PropertyAccessExpression,
+    ): GlobalRecord | "reported" | undefined {
+        const field = this.staticFieldAt(access);
+        if (field === undefined) {
+            return undefined;
+        }
+        const record = this.outer.globalFor(field.declaration, field.name);
+        // A field the class model knows and the global table does not is a fold that
+        // failed and reported, since collection walks the same map.
+        return record ?? "reported";
+    }
+
+    #readGlobal(at: ts.Node, record: GlobalRecord): Typed {
         return {
-            operand: {
-                kind: "Copy",
-                value: {local: address, projection: [{kind: "Deref"}]},
-            },
+            operand: {kind: "Copy", value: this.#globalPlace(at, record)},
             type: record.type,
         };
     }

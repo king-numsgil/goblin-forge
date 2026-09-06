@@ -103,6 +103,24 @@ export interface MethodTemplate {
     readonly isStatic: boolean;
 }
 
+/**
+ * A `static` field: storage that belongs to the class rather than to an object.
+ *
+ * It is a module-level constant with a longer name, so GLOBALS-PLAN owns what it
+ * can hold and how it is folded. What is class-specific is only the naming and
+ * the inheritance: `D.n` where `D extends C` is *the same variable* as `C.n`,
+ * which falls out of `owner` rather than being arranged.
+ */
+export interface StaticField {
+    readonly name: string;
+    readonly type: MachineType;
+    readonly declaration: ts.PropertyDeclaration;
+    /** The class that declared it, which is where the one variable lives. */
+    readonly owner: string;
+    /** `static readonly` — a constant. A plain `static` is writable. */
+    readonly isReadonly: boolean;
+}
+
 /** A method, with the slot it dispatches through. */
 export interface ClassMethod {
     readonly name: string;
@@ -178,6 +196,15 @@ export interface ClassInfo {
      */
     readonly staticGetters: ReadonlyMap<string, StaticMethod>;
     readonly staticSetters: ReadonlyMap<string, StaticMethod>;
+    /**
+     * Every `static` field, own and inherited, by name.
+     *
+     * Inherited the way a `static` method is — by name, with the storage staying
+     * where it was declared — so `D.n` and `C.n` are one variable and not two.
+     * That is what C++, TypeScript and Java all mean by a static, and a copy per
+     * derived class would be a silent difference rather than a visible one.
+     */
+    readonly staticFields: ReadonlyMap<string, StaticField>;
     /**
      * The fields this class declared as `constructor(private x: i32)`.
      *
@@ -369,6 +396,24 @@ export function collectClasses(
         // it, and `Box<i32>` and `Box<f64>` are two classes rather than one
         // with a variable in it.
         if (node.typeParameters !== undefined && node.typeParameters.length > 0) {
+            // A `static` field on one is refused **here**, once, at the declaration.
+            // Not where an instantiation is built: the mistake is a property of the
+            // declaration, so reporting it per instantiation says the same thing
+            // twice about one line and — because it would fail the build of each —
+            // buries it under everything that then could not resolve.
+            for (const member of node.members) {
+                if (
+                    ts.isPropertyDeclaration(member) &&
+                    isStatic(member) &&
+                    member.name !== undefined &&
+                    ts.isIdentifier(member.name)
+                ) {
+                    report.unsupported(
+                        member,
+                        `\`static ${member.name.text}\` on the generic class \`${name}\``,
+                    );
+                }
+            }
             generics.set(name, node);
             continue;
         }
@@ -459,6 +504,10 @@ export function buildClass(
 
     // -- fields ---------------------------------------------------------------
     const fields: ClassField[] = base ? [...base.fields] : [];
+    // Seeded from the base, for the reason the static *methods* are: a name is
+    // looked up at compile time and the storage stays where it was declared, so
+    // `Derived.n` is `Base.n` and there is one variable.
+    const staticFields = new Map<string, StaticField>(base?.staticFields);
     const ownFieldsAt = fields.length;
     for (const member of node.members) {
         // A parameter property declares a field where the constructor is written,
@@ -517,8 +566,39 @@ export function buildClass(
             return undefined;
         }
         if (isStatic(member)) {
-            report.unsupported(member, "a static field");
-            return undefined;
+            // A static on a *generic* class has nowhere to live: the value is the
+            // same for every instantiation, since a static may not mention `T`, but
+            // `Box.zero` has no syntax for saying which one and TypeScript never
+            // needed one. Already reported at the declaration, so this **skips** it
+            // rather than failing — an instantiation that stopped here would take
+            // every use of `Box<i32>` down with it over an unrelated line.
+            if (node.typeParameters && node.typeParameters.length > 0) {
+                continue;
+            }
+            const staticType = report.erase(member, checker.getTypeAtLocation(member));
+            if (staticType === undefined) {
+                return undefined;
+            }
+            if (member.initializer === undefined) {
+                report.refuse(
+                    member,
+                    `\`${name}.${member.name.text}\` has no value. A static field is one ` +
+                    "symbol in the object file and its bytes are decided at compile time, " +
+                    "so there is no later point at which one could be assigned.",
+                );
+                return undefined;
+            }
+            staticFields.set(member.name.text, {
+                name: member.name.text,
+                type: staticType,
+                declaration: member,
+                owner: name,
+                isReadonly:
+                    ts.getModifiers(member)?.some(
+                        (modifier) => modifier.kind === ts.SyntaxKind.ReadonlyKeyword,
+                    ) ?? false,
+            });
+            continue;
         }
         const type = report.erase(member, checker.getTypeAtLocation(member));
         if (type === undefined) {
@@ -817,6 +897,7 @@ export function buildClass(
         getters,
         setters,
         statics,
+        staticFields,
         staticGetters,
         staticSetters,
         parameterProperties,

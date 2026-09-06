@@ -350,6 +350,182 @@ describe("a constant some other build defines", () => {
     });
 });
 
+describe("`static` fields", () => {
+    test("a `static readonly` is a constant the class name reaches", async () => {
+        const result = await run(
+            "static-readonly",
+            `class Physics {
+         static readonly gravity: f64 = 9.81;
+         static readonly steps: i32 = 4;
+       }
+
+       export function main(): i32 {
+         console.log(\`\${Physics.gravity} \${Physics.steps}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("9.81 4\n");
+    });
+
+    test("a plain `static` is writable, and lives in `.data`", async () => {
+        // The one mutable global in the language. `.data` rather than `.rodata`,
+        // because writing to a read-only page is a fault rather than a store.
+        const {project, result} = await compileSource(
+            "static-mutable",
+            `class Counter {
+         static frames: u64 = 0;
+         static readonly limit: i32 = 60;
+       }
+
+       export function main(): i32 {
+         Counter.frames = 7;
+         Counter.frames = Counter.frames + 1;
+         Counter.frames += 2;
+         Counter.frames++;
+         console.log(\`\${Counter.frames} \${Counter.limit}\`);
+         return 0;
+       }\n`,
+            {emitIr: true},
+        );
+        expect(result.ok).toBe(true);
+
+        const ir = readFileSync(`${project.dir}/build/main.ll`, "utf8");
+        const frames = ir.split("\n").find((line) => line.includes("$Counter$frames = "));
+        const limit = ir.split("\n").find((line) => line.includes("$Counter$limit = "));
+        expect(frames).toContain("internal global i64 0");
+        expect(limit).toContain("internal constant i32 60");
+    });
+
+    test("every way of writing one works", async () => {
+        const result = await run(
+            "static-writes",
+            `class Counter {
+         static frames: u64 = 0;
+       }
+
+       export function main(): i32 {
+         Counter.frames = 7;
+         Counter.frames = Counter.frames + 1;
+         Counter.frames += 2;
+         Counter.frames++;
+         console.log(\`\${Counter.frames}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("11\n");
+    });
+
+    test("a derived class shares the variable, it does not copy it", async () => {
+        // What C++, TypeScript and Java all mean by a static: `D.n` *is* `C.n`. A
+        // copy per derived class would be a silent difference rather than a visible
+        // one, so this is asserted through a write on one name and a read on the
+        // other.
+        const result = await run(
+            "static-inherited",
+            `class Base {
+         static count: i32 = 0;
+       }
+       class Derived extends Base {}
+
+       export function main(): i32 {
+         Base.count = 5;
+         console.log(\`\${Derived.count}\`);
+         Derived.count = 9;
+         console.log(\`\${Base.count}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("5\n9\n");
+    });
+
+    test("writing a `static readonly` is tsc's refusal", async () => {
+        // Which is why the compiler has no rule about it: `readonly` is enforced
+        // where the program is type-checked, so there is nothing here to catch.
+        const {result} = await compileSource(
+            "static-readonly-write",
+            `class C {
+         static readonly n: i32 = 1;
+       }
+
+       export function main(): i32 {
+         C.n = 5;
+         return C.n;
+       }\n`,
+        );
+        expect(result.ok).toBe(false);
+        expect(errorCodes(result)).toContain("TS2540");
+    });
+
+    test("a static on a generic class is refused once, at the declaration", async () => {
+        // Reported where the mistake is rather than at each instantiation, and the
+        // instantiation still builds — otherwise one unrelated line takes every use
+        // of `Box<i32>` down with it.
+        const {result} = await compileSource(
+            "static-generic",
+            `class Box<T> {
+         static readonly zero: i32 = 0;
+         constructor(readonly v: T) {}
+       }
+
+       export function main(): i32 {
+         const b: Box<i32> = new Box<i32>(1);
+         return b.v;
+       }\n`,
+        );
+        expect(result.ok).toBe(false);
+        const refusals = result.diagnostics.filter((d) => d.severity === "error");
+        expect(refusals.length).toBe(1);
+        expect(refusals[0]?.code).toBe("GF0001");
+        expect(refusals[0]?.message).toContain("generic class `Box`");
+    });
+
+    test("the type rule is the same one a module constant gets", async () => {
+        await expectRejected(
+            "static-string",
+            `class C {
+         static readonly label: string = "sol";
+       }
+
+       export function main(): i32 {
+         console.log(C.label);
+         return 0;
+       }\n`,
+            "GF0008",
+        );
+    });
+
+    test("a static with no value is refused", async () => {
+        const {result} = await compileSource(
+            "static-no-value",
+            `class C {
+         static n: i32;
+       }
+
+       export function main(): i32 {
+         return C.n;
+       }\n`,
+        );
+        expect(result.ok).toBe(false);
+        expect(errorCodes(result)).toContain("GF0002");
+    });
+
+    test("a static field folds against a module constant", async () => {
+        const result = await run(
+            "static-from-const",
+            `const BASE: i32 = 10;
+
+       class C {
+         static readonly derived: i32 = BASE * 2;
+       }
+
+       export function main(): i32 {
+         return C.derived;
+       }\n`,
+        );
+        expect(result.exitCode).toBe(20);
+    });
+});
+
 describe("the rules", () => {
     test("a top-level `let` is a gap, and says which keyword to use", async () => {
         const diagnostic = await expectRejected(

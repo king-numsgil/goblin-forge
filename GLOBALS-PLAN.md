@@ -69,7 +69,7 @@ Each ends at a state where the four commands in `CLAUDE.md` are green.
       stage 2 — the on-demand fold that makes order irrelevant *is* the cycle
       check, so separating them would have meant writing it twice)*
 - [x] **Stage 4** — `export` and `import` *(done 2026-09-06)*
-- [ ] **Stage 5** — `static` fields
+- [x] **Stage 5** — `static` fields *(done 2026-09-06)*
 
 ### Stage 0 — the MIR and the wire format
 
@@ -245,9 +245,36 @@ covering both.
 ### Stage 5 — `static` fields
 
 `classes.ts`'s `isStatic` branch over property declarations, which is where
-`NOTES.md` has said "needs module-level storage the backend has never emitted"
+`NOTES.md` had said "needs module-level storage the backend has never emitted"
 since the beginning. A static is a global whose name is qualified by the class as
-well as the module. A static on a generic class stays refused.
+well as the module: `__gf_g$<tag>$C$n`, following the `C$method` shape a static
+*method* already uses.
+
+*Done.* Three things settled here rather than guessed:
+
+- **A plain `static` is writable and a `static readonly` is not.** This is the
+  first mutable global in the language, so a plain one lands in `.data` and a
+  `readonly` one in `.rodata` — asserted by reading both lines out of the `.ll`.
+  The write needs no rule of the compiler's: `readonly` is `TS2540` where the
+  program is type-checked, so there is nothing left here to catch. `=`, `+=` and
+  `++` all work, because they all go through `#targetPlace` and a global's place is
+  an ordinary `Deref` like everything else.
+- **A derived class shares the variable rather than copying it**, which is what
+  C++, TypeScript and Java all mean. It falls out of seeding the map from the base
+  — the record carries its `owner`, so `D.n` and `C.n` resolve to one symbol. The
+  test writes through one name and reads through the other, because a copy would be
+  a silent difference rather than a visible one.
+- **A static on a generic class is refused once, at the declaration.** The first
+  attempt put the check where an instantiation is built, which reported the same
+  line once per instantiation *and* failed each build — five diagnostics for one
+  mistake, four of them about things that then could not resolve. It is now
+  reported where the generic is set aside, and the instantiation skips the field
+  and builds.
+
+A `static` with no value is `GF0002` rather than `GF0007`: TypeScript allows an
+uninitialised static and this language cannot have one, which is exactly what that
+code says. The `const` spelling of the same mistake is unreachable, because tsc
+requires an initialiser on a `const` itself.
 
 ## Codes
 

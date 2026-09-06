@@ -210,7 +210,9 @@ backend failure:
 | `Reference<T>` for anything but a class or a contract | `checker/src/types.ts`, the `isReferenceType` branch | later |
 | an interface mixing methods and data | `checker/src/types.ts`, `contractOf` — a rule, not a gap | — |
 | writing *through* a `Pointer<Pointer<T>>` for a primitive `T` — `cells[i] = p` | tsc, not the compiler. `Pointer<Pointer<u8>>` is `CorePointer<u8> & CorePointer<CorePointer<u8>>`, and the two index signatures merge to `u8 & CorePointer<u8>`, which nothing produces. Reading is fine, and `Pointer<CString>` is the spelling for a `char **` that has to be written | later |
-| static **fields** | `classes.ts`, the `isStatic` branch over property declarations — needs module-level storage the backend has never emitted; see below | later |
+| a `static` field on a **generic** class | `classes.ts`, where a generic is set aside. The value would be the same for every instantiation — a static may not mention `T` — but `Box.zero` has no syntax for saying which one, and TypeScript never needed one. The same refusal a static *method* on a generic gets | later |
+| a **`string`** or **`T[]`** module-level constant | `lower/module.ts`, `#globalTypeAllowed` — `GF0008`. Both are laid out statically by the runtime already, so what is missing is the rule that a global is *never destroyed* rather than the layout. GLOBALS-PLAN | later |
+| a **function's address** in a constant — `fixedArrayOf(f, g)` | `lower/fold.ts`, the pointer arm. `Const::Func` is a leaf the backend already writes; the only obstacle is that globals are folded before functions are declared, so the fold cannot resolve a `FuncId` yet. Moving the fold after the declaration loop is the whole change | later |
 | **escaping closures — `HeapFn<F>`** | nothing declares the type. DECISIONS §18 step 2: captures by move into an owning environment, reusing `GF0235` for contention. Not started, and deliberately after `LocalFn` | later |
 | **`RefCount<T>`** | nothing declares the type. DECISIONS §18 step 3, and its own feature rather than part of closures — shared ownership does not exist anywhere in the value model yet | later |
 | optional/rest/defaulted/destructured parameters | `lower/module.ts`, `#signature`; `classes.ts`, `#classFnParams` | later |
@@ -236,14 +238,23 @@ backend failure:
 `Ref` for every `this`, every method receiver and every `p.deref()`, and an
 `AddrOf` for `p.offset(n)`.
 
-**Static fields need a piece the backend does not have.** `Module::globals` and
-`Global` exist in the MIR and nothing reads them: `crates/goblin-codegen` never
-emits a data object, and there is no way to *name* one from a `Place`, whose
-root is always a local. So a `static count: i32` needs a MIR change (a global
-place root, and therefore a new wire-format fingerprint), data emission in the
-codegen, and an answer for initialisation order when the initialiser is not a
-constant. Static *methods* and static *accessors* need none of that, which is
-why they are done and this is not.
+**Module-level constants are built, and a `static` field is one of them.**
+GLOBALS-PLAN is the plan and the record. The short version of how it works, since
+this section used to say it was impossible:
+
+A global is named by its **address**, as a `Const::Global` — not by a root variant
+on `Place`, which is what this note predicted would be needed. Both emit the same
+`.rodata` symbol and the same `getelementptr`; the address changes nothing else,
+and `Place::storage_class` already answers `Borrowed` behind a `Deref`, so drop
+elaboration never had to learn that globals exist.
+
+The value crosses as **depth-first leaves** the backend places, because the
+frontend has no layout and a second layout engine in TypeScript would be a second
+opinion about padding forever. There is no initialisation order to get wrong: the
+rule is C++'s constant initialisation, so nothing runs before `main` at all.
+
+A plain `static` field is the one **writable** global, in `.data`. Everything else
+is `.rodata`.
 
 **`Reference<T>` for a struct is the next real gap in the value model.** Today
 every struct parameter copies and there is no way to say otherwise. Erasing it

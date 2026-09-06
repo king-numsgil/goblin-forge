@@ -132,6 +132,8 @@ export type GlobalRecord =
           readonly symbol: string;
           readonly type: MachineType;
           readonly exported: boolean;
+          /** A plain `static` field. Everything else here is read-only. */
+          readonly mutable: boolean;
           readonly leaves: readonly GlobalInit[];
           /**
            * The value, when it is a scalar this compiler holds — which is what

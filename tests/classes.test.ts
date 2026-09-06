@@ -364,13 +364,17 @@ describe("classes: what is rejected", () => {
         expect(diagnostic.message).toContain("shadows");
     });
 
-    test("a static member", async () => {
-        await expectRejected(
+    test("a static member with no value", async () => {
+        // A static field exists now, and this is the shape that cannot: TypeScript
+        // allows an uninitialised one, and here the bytes are decided at compile
+        // time — so there is no later point at which a value could arrive.
+        const diagnostic = await expectRejected(
             "class-static",
             `class A { static count: i32; }
        export function main(): i32 { return 0; }\n`,
-            "GF0001",
+            "GF0002",
         );
+        expect(diagnostic.message).toContain("compile time");
     });
 
     test("a class laid out inside itself", async () => {
@@ -1632,21 +1636,21 @@ describe("class members the compiler does not have yet", () => {
         expect(result.exitCode).toBe(1);
     });
 
-    test("a `static` field is still GF0001", async () => {
-        // A static *method* is a function with a qualified name and needs nowhere
-        // to live. A static field is a global, and module-level constants exist
-        // now — so what is missing is not the storage but the *naming*: a static is
-        // `C.n`, which needs a symbol spelling and an answer for a static on a
-        // generic class. GLOBALS-PLAN stage 5.
-        await expectRejected(
+    test("a `static` field is storage that belongs to the class", async () => {
+        // It used to be `GF0001`. A static field is a module-level constant with a
+        // longer name, so `tests/globals.test.ts` is where the rest of it lives —
+        // what is here is that the class syntax reaches it at all.
+        const result = await run(
             "class-static-field",
-            `class C { static n: i32 = 1; }
+            `class C {
+         static readonly n: i32 = 41;
+       }
 
        export function main(): i32 {
-         return 0;
+         return C.n + 1;
        }\n`,
-            "GF0001",
         );
+        expect(result.exitCode).toBe(42);
     });
 
     test("an `abstract` method is GF0001, because it has no body", async () => {

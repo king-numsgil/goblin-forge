@@ -92,11 +92,24 @@ import { capturedNames, thisParameterOf, usesThis } from "./closures.ts";
  */
 const MAX_INSTANTIATION_DEPTH = 64;
 
-/** A top-level `const` that has been seen and not yet folded. */
+/**
+ * A constant that has been seen and not yet folded.
+ *
+ * A top-level `const` and a `static` field are both this: the difference between
+ * them is two strings and a flag, which is why they share one table and one fold
+ * rather than having a path each.
+ */
 interface PendingGlobal {
-    readonly declaration: ts.VariableDeclaration;
-    readonly statement: ts.VariableStatement;
+    /** The node holding the initialiser, and the span. */
+    readonly declaration: ts.VariableDeclaration | ts.PropertyDeclaration;
+    /** As written, for diagnostics: `LIMIT`, or `C.n`. */
     readonly name: string;
+    /** The symbol's tail, before the module tag: `LIMIT`, or `C$n`. */
+    readonly symbol: string;
+    readonly type: MachineType;
+    /** A plain `static` is writable; a `const` and a `static readonly` are not. */
+    readonly mutable: boolean;
+    readonly exported: boolean;
 }
 
 /**
@@ -1040,6 +1053,20 @@ export class Lowerer {
         // is forced below so that a constant nothing reads is still checked, the
         // way an unused enum member is.
         this.#collectGlobals(sources);
+        // A `static` field is the same storage under a longer name, so it joins the
+        // same table. After the classes, because that is where they were collected.
+        for (const info of this.#classes.values()) {
+            for (const field of info.staticFields.values()) {
+                this.#pendingGlobals.set(this.#keyOf(field.declaration, field.name), {
+                    declaration: field.declaration,
+                    name: `${field.owner}.${field.name}`,
+                    symbol: `${field.owner}$${field.name}`,
+                    type: field.type,
+                    mutable: !field.isReadonly,
+                    exported: false,
+                });
+            }
+        }
         for (const key of [...this.#pendingGlobals.keys()]) {
             this.#globalRecord(key);
         }
@@ -2820,10 +2847,30 @@ export class Lowerer {
                     );
                     continue;
                 }
-                this.#pendingGlobals.set(this.#keyOf(declaration, declaration.name.text), {
+                const type = this.erase(
+                    declaration.type ?? declaration,
+                    this.#checker.getTypeAtLocation(declaration.type ?? declaration),
+                    NO_BINDINGS,
+                );
+                const key = this.#keyOf(declaration, declaration.name.text);
+                if (type === undefined) {
+                    this.#failedGlobals.add(key);
+                    continue;
+                }
+                if (!this.#globalTypeAllowed(type, declaration.type ?? declaration, type)) {
+                    this.#failedGlobals.add(key);
+                    continue;
+                }
+                this.#pendingGlobals.set(key, {
                     declaration,
-                    statement,
                     name: declaration.name.text,
+                    symbol: declaration.name.text,
+                    type,
+                    mutable: false,
+                    exported:
+                        statement.modifiers?.some(
+                            (m) => m.kind === ts.SyntaxKind.ExportKeyword,
+                        ) ?? false,
                 });
             }
         }
@@ -2940,27 +2987,19 @@ export class Lowerer {
     }
 
     #foldGlobal(pending: PendingGlobal): GlobalRecord | undefined {
-        const {declaration, statement, name} = pending;
-        const type = this.erase(
-            declaration.type ?? declaration,
-            this.#checker.getTypeAtLocation(declaration.type ?? declaration),
-            NO_BINDINGS,
-        );
-        if (type === undefined) {
-            return undefined;
-        }
-        if (!this.#globalTypeAllowed(type, declaration.type ?? declaration, type)) {
+        const {declaration, name, type, mutable, exported} = pending;
+        const initializer = declaration.initializer;
+        if (initializer === undefined) {
+            // Both collectors check for this, so reaching it means one stopped.
             return undefined;
         }
 
-        const folded = this.#folder.fold(declaration.initializer!, type);
+        const folded = this.#folder.fold(initializer, type);
         if (folded === undefined) {
             return undefined;
         }
 
-        const exported =
-            statement.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword) ?? false;
-        const symbol = this.#globalSymbolOf(declaration, name);
+        const symbol = this.#globalSymbolOf(declaration, pending.symbol);
         const id = this.#mir.global({
             name: symbol,
             ty: this.tyOf(type, declaration),
@@ -2969,6 +3008,10 @@ export class Lowerer {
             // C ABI contract, and a constant's is not — so two modules may both
             // export `LIMIT` and neither has to know about the other.
             linkage: exported ? "Export" : "Internal",
+            // A plain `static` field is the one writable one, so it lands in `.data`
+            // rather than `.rodata`. A `const` never does: there is no syntax for
+            // writing one, so nothing would be able to reach the storage.
+            mutable,
             init: folded.leaves,
             span: this.span(declaration),
         });
@@ -2979,6 +3022,7 @@ export class Lowerer {
             symbol,
             type,
             exported,
+            mutable,
             leaves: folded.leaves,
             scalar: folded.scalar,
         };
@@ -3051,6 +3095,20 @@ export class Lowerer {
      * nothing per import. The same fact that makes a named and a namespaced call
      * agree.
      */
+    /**
+     * The record for a declaration this build already collected.
+     *
+     * How a `static` field is reached: the class model hands over the declaration,
+     * and this is the storage. Folding it here if it has not been folded yet is what
+     * lets a `static` read a module constant and the other way round.
+     */
+    globalFor(
+        declaration: ts.VariableDeclaration | ts.PropertyDeclaration,
+        name: string,
+    ): GlobalRecord | "reported" | undefined {
+        return this.#globalRecord(this.#keyOf(declaration, name));
+    }
+
     globalAt(expression: ts.Identifier): GlobalRecord | "reported" | undefined {
         const declaration = this.#globalDeclarationAt(expression);
         if (declaration === undefined) {

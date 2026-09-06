@@ -31,7 +31,7 @@ import {
     sameType,
 } from "@goblin-forge/checker";
 import ts from "typescript";
-import type { ClassInfo, StaticMethod } from "../classes.ts";
+import type { ClassInfo, StaticField, StaticMethod } from "../classes.ts";
 import {
     ALLOC,
     ALLOC_ARRAY,
@@ -374,6 +374,13 @@ export abstract class WidthPass extends Emitter {
         if (this.staticAt(expression) !== undefined) {
             return this.#erasedWidth(expression);
         }
+        // `C.n` — a static field. Beside the static method for the same reason, and
+        // its type is the declared one rather than tsc's view of the access, so an
+        // inherited name gets the declaring class's answer.
+        const staticField = this.staticFieldAt(expression);
+        if (staticField !== undefined) {
+            return typed(staticField.type);
+        }
 
         // `ns.f` as a value — a namespace-qualified function's address, which is
         // the same code address the bare name gives and therefore the same
@@ -690,6 +697,21 @@ export abstract class WidthPass extends Emitter {
         }
         const info = this.outer.classInfo(access.expression.text);
         return info?.statics.get(access.name.text);
+    }
+
+    /**
+     * `C.n` where `n` is a `static` field.
+     *
+     * From the name, for {@link WidthPass.staticAt}'s reason. Inherited names
+     * resolve here too and land on the declaring class's record, so `D.n` and
+     * `C.n` are one variable — the map was seeded from the base.
+     */
+    protected staticFieldAt(access: ts.PropertyAccessExpression): StaticField | undefined {
+        if (!ts.isIdentifier(access.expression)) {
+            return undefined;
+        }
+        const info = this.outer.classInfo(access.expression.text);
+        return info?.staticFields.get(access.name.text);
     }
 
     /**
