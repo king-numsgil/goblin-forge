@@ -151,6 +151,17 @@ export abstract class WidthPass extends Emitter {
         if (ts.isIdentifier(expression)) {
             const binding = this.scopes.lookup(expression.text);
             if (binding === undefined) {
+                // A module-level constant. Before the function paths because a
+                // constant is not one, and before the refusals below because it is
+                // a name the scope stack legitimately does not know — like a
+                // top-level function, and for the same reason.
+                const global = this.outer.globalAt(expression);
+                if (global === "reported") {
+                    return ERROR;
+                }
+                if (global !== undefined) {
+                    return typed(global.type);
+                }
                 // A function named rather than called: its address, typed by tsc as a
                 // function type, which erasure turns into a `fnptr`.
                 if (this.outer.functionValueAt(expression) !== undefined) {

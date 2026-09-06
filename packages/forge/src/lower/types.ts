@@ -5,8 +5,11 @@
  */
 
 import {
+    type ExternGlobalId,
     type FuncId,
     type FunctionBuilder,
+    type GlobalId,
+    type GlobalInit,
     LocalId,
     type Module as MirModule,
     type Operand,
@@ -16,6 +19,7 @@ import {
 import type { Diagnostic, MachineType, Substitution } from "@goblin-forge/checker";
 import ts from "typescript";
 import type { ClassInfo, MethodBody } from "../classes.ts";
+import type { Folded } from "./fold.ts";
 import type { Binding } from "./scopes.ts";
 
 export interface LowerResult {
@@ -109,6 +113,40 @@ export interface LiftedClosure {
      */
     readonly env: { readonly ty: TyId; readonly pointer: TyId } | undefined;
 }
+
+/**
+ * A module-level constant, and where its value came from.
+ *
+ * `defined` is one this build folded and emits; `imported` is a `declare const`,
+ * an extern data symbol some other library defines — the same split
+ * {@link FnRecord} makes, for the same reason. An imported one carries no value,
+ * and deliberately: what this side has is a symbol the linker resolves, so
+ * folding *through* one would be reading a value that does not exist yet.
+ */
+export type GlobalRecord =
+    | {
+          readonly kind: "defined";
+          readonly id: GlobalId;
+          /** The name as written, before any qualification. */
+          readonly name: string;
+          readonly symbol: string;
+          readonly type: MachineType;
+          readonly exported: boolean;
+          readonly leaves: readonly GlobalInit[];
+          /**
+           * The value, when it is a scalar this compiler holds — which is what
+           * another fold can read. Absent for an aggregate and for a `sizeOf`,
+           * so those may be copied whole and not used in arithmetic.
+           */
+          readonly scalar: Folded | undefined;
+      }
+    | {
+          readonly kind: "imported";
+          readonly id: ExternGlobalId;
+          readonly name: string;
+          readonly symbol: string;
+          readonly type: MachineType;
+      };
 
 /**
  * A function the module can call.

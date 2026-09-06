@@ -113,6 +113,46 @@ export const CODES = {
             "link step itself performs.",
     },
 
+    GF0007: {
+        title: "a module-level constant's value is not known at compile time",
+        explanation:
+            "A `const` at module scope is one symbol in the object file, and its bytes " +
+            "are decided while the program is compiled. There is no code that runs " +
+            "before `main` for an initialiser to be worked out in — this language has " +
+            "no static constructors, deliberately, because their order across modules " +
+            "is the class of bug they are famous for.\n\n" +
+            "So the value has to fold: a literal, an enum member, arithmetic over " +
+            "those, `sizeOf<T>()` or `alignOf<T>()`, or another module-level constant " +
+            "of the same module. A call does not fold, and neither does anything that " +
+            "reads memory.\n\n" +
+            "`sizeOf<T>()` is resolved by the backend rather than by the frontend, " +
+            "which has no layout — so it is a value this compiler does not hold, and " +
+            "`sizeOf<T>() * 2` is refused for that reason rather than because " +
+            "multiplication is hard. An imported constant is refused for the same " +
+            "shape of reason: what this module has is a symbol the linker resolves, " +
+            "and folding needs the number.\n\n" +
+            "A constant that reads another one is a *compile-time* dependency and " +
+            "nothing survives to run time, so the order they are written in does not " +
+            "matter. A cycle among them has no value to fold to, which is `GF0008`.",
+    },
+    GF0008: {
+        title: "this cannot be a module-level constant",
+        explanation:
+            "Either the type cannot be one, or the constant is defined in terms of " +
+            "itself.\n\n" +
+            "A module-level constant's value is bytes decided at compile time and " +
+            "released by nobody, so the type has to be one that *is* its bytes: a " +
+            "scalar, a `boolean`, an enum, a pointer, a function pointer, a struct of " +
+            "those, or a `FixedArray` of those. A `string` and a `T[]` own a heap " +
+            "buffer, and owning means a scope has to release it — which needs code to " +
+            "run, and nothing runs before `main`. That is a gap rather than a " +
+            "permanent rule: both are laid out statically by the runtime already, so " +
+            "this code goes away when they land rather than being relaxed.\n\n" +
+            "A cycle — `const A = B; const B = A` — is the other half. Written order " +
+            "never matters between constants, so this is not an ordering complaint: " +
+            "there is no value for either of them to have.",
+    },
+
     // -- Widths and arithmetic ----------------------------------------------
     GF0160: {
         title: "implicit narrowing",

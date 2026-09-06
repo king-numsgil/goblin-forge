@@ -56,6 +56,7 @@ import {
     type FnSignature,
     type FnTemplate,
     type GenericUse,
+    type GlobalRecord,
     type LiftedClosure,
     type LowerResult,
     type PendingInstantiation,
@@ -69,6 +70,7 @@ import {
     typeParameterSymbolsOf,
 } from "./generics.ts";
 import { type Binding, Scopes } from "./scopes.ts";
+import { ConstantFolder, type FoldedInit } from "./fold.ts";
 import {
     behindOneIndirection,
     describe,
@@ -88,6 +90,13 @@ import { capturedNames, thisParameterOf, usesThis } from "./closures.ts";
  * nothing about which program did it.
  */
 const MAX_INSTANTIATION_DEPTH = 64;
+
+/** A top-level `const` that has been seen and not yet folded. */
+interface PendingGlobal {
+    readonly declaration: ts.VariableDeclaration;
+    readonly statement: ts.VariableStatement;
+    readonly name: string;
+}
 
 /**
  * A path in the one shape two of them can be compared in.
@@ -109,6 +118,22 @@ export class Lowerer {
     readonly #requireMain: boolean;
     readonly #root: string;
     readonly #entry: string;
+    /** Module-level constants, once folded. GLOBALS-PLAN. */
+    readonly #globals = new Map<string, GlobalRecord>();
+    /** The declarations, before folding, so that written order does not matter. */
+    readonly #pendingGlobals = new Map<string, PendingGlobal>();
+    /** The fold in progress, which is how a cycle is seen. */
+    readonly #foldingGlobals = new Set<string>();
+    /**
+     * Constants that failed to fold, so a second reader is not told twice.
+     *
+     * A `const` read from four places whose value does not fold is one mistake,
+     * and four copies of the same diagnostic is what the reader has to wade
+     * through to find it.
+     */
+    readonly #failedGlobals = new Set<string>();
+    readonly #folder: ConstantFolder;
+
     #classes = new Map<string, ClassInfo>();
     /**
      * Generic class declarations, by their bare name — `Box`, not `Box<i32>`.
@@ -236,6 +261,52 @@ export class Lowerer {
         this.#requireMain = requireMain;
         this.#root = root.replaceAll("\\", "/");
         this.#entry = entry.replaceAll("\\", "/");
+        // The folder is given callbacks rather than the lowerer, so that what it
+        // may ask is written down: types, enum members, other constants, and a
+        // diagnostic. Nothing else about lowering is reachable from it.
+        this.#folder = new ConstantFolder(
+            {
+                tyOf: (type, at) => this.tyOf(type, at),
+                enumMemberAt: (expression) => this.enumMemberAt(expression),
+                globalAt: (expression) => this.#foldOperand(expression),
+                prelude: (name) => !this.shadowsPrelude(name),
+                erase: (at, type) => this.erase(at, type, NO_BINDINGS),
+                checker: this.#checker,
+                error: (node, code, message) => this.error(node, code, message),
+            },
+            (type) => (type.kind === "struct" && !type.union ? type.fields : undefined),
+        );
+    }
+
+    /**
+     * What another constant is worth, for a fold that reads one.
+     *
+     * The three answers that are not a value are each a different diagnostic at
+     * the fold site, which is why this reports which one it is rather than just
+     * failing: a name that is not a constant, one that is imported and therefore
+     * has no value here, and one already being folded — a cycle, reported by
+     * {@link Lowerer.#globalRecord} rather than twice.
+     */
+    #foldOperand(expression: ts.Identifier): FoldedInit | "not-a-global" | "forward" | "imported" {
+        const declaration = this.#globalDeclarationAt(expression);
+        if (declaration === undefined) {
+            return "not-a-global";
+        }
+        const key = this.#keyOf(declaration, declaration.name.getText());
+        if (!this.#pendingGlobals.has(key) && !this.#globals.has(key)) {
+            return "not-a-global";
+        }
+        const record = this.#globalRecord(key);
+        if (record === undefined) {
+            return "not-a-global";
+        }
+        if (record === "reported") {
+            return "forward";
+        }
+        if (record.kind === "imported") {
+            return "imported";
+        }
+        return {leaves: record.leaves, ...(record.scalar !== undefined ? {scalar: record.scalar} : {})};
     }
 
     get mir(): ModuleBuilder {
@@ -959,6 +1030,16 @@ export class Lowerer {
         // may take one as a parameter, and because a class's methods have to exist
         // as functions before anything can put them in a vtable.
         const classBodies = this.#declareClasses();
+
+        // Module-level constants are *noted* before any of them is folded, so that
+        // `const B: i32 = A + 1` does not depend on where `A` was written — nothing
+        // else in this language does. Folding then happens on demand, and every one
+        // is forced below so that a constant nothing reads is still checked, the
+        // way an unused enum member is.
+        this.#collectGlobals(sources);
+        for (const key of [...this.#pendingGlobals.keys()]) {
+            this.#globalRecord(key);
+        }
 
         // Two passes: declare every function before lowering any body, so a call
         // to something defined further down the file resolves.
@@ -2672,6 +2753,249 @@ export class Lowerer {
         return builder;
     }
 
+    // -- module-level constants (GLOBALS-PLAN) --------------------------------
+
+    /**
+     * Note every top-level `const`, before anything is folded.
+     *
+     * Two passes, for the reason functions have two: `const B: i32 = A + 1` must
+     * not depend on where `A` was written, because nothing else in this language
+     * does. Folding on demand from here is also what makes a cycle detectable —
+     * ordering and cycles are one mechanism, not two.
+     *
+     * The refusals that belong here rather than at the fold are the ones about the
+     * *declaration*: a `let`, several declarators, a pattern. Each is a gap with
+     * its own message rather than the statement being called unsupported.
+     */
+    #collectGlobals(sources: readonly ts.SourceFile[]): void {
+        for (const source of sources) {
+            for (const statement of source.statements) {
+                if (!ts.isVariableStatement(statement)) {
+                    continue;
+                }
+                const list = statement.declarationList;
+                if ((list.flags & ts.NodeFlags.Const) === 0) {
+                    this.unsupported(
+                        statement,
+                        list.flags & ts.NodeFlags.Let
+                            ? "a top-level `let` (a module-level constant is `const`)"
+                            : "a top-level `var`",
+                    );
+                    continue;
+                }
+                if (list.declarations.length !== 1) {
+                    this.unsupported(statement, "several declarators in one top-level `const`");
+                    continue;
+                }
+                const declaration = list.declarations[0]!;
+                if (!ts.isIdentifier(declaration.name)) {
+                    this.unsupported(statement, "a destructuring pattern at the top level");
+                    continue;
+                }
+                if (declaration.initializer === undefined) {
+                    this.error(
+                        declaration,
+                        "GF0007",
+                        "a module-level constant has to be given its value here: there is " +
+                        "no later point at which one could be assigned, because nothing " +
+                        "runs before `main`.",
+                    );
+                    continue;
+                }
+                this.#pendingGlobals.set(this.#keyOf(declaration, declaration.name.text), {
+                    declaration,
+                    statement,
+                    name: declaration.name.text,
+                });
+            }
+        }
+    }
+
+    /**
+     * The record for one top-level `const`, folding it the first time it is asked
+     * for.
+     *
+     * Memoised on the way *out* and guarded on the way in, which is what turns
+     * "reads another global" into a compile-time dependency graph with cycle
+     * detection rather than an initialisation order.
+     */
+    #globalRecord(key: string): GlobalRecord | "reported" | undefined {
+        const known = this.#globals.get(key);
+        if (known !== undefined) {
+            return known;
+        }
+        const pending = this.#pendingGlobals.get(key);
+        if (pending === undefined) {
+            return undefined;
+        }
+        if (this.#foldingGlobals.has(key)) {
+            // Every constant on the cycle is refused, and each one names itself,
+            // because there is no principled way to pick which link is the mistake.
+            this.error(
+                pending.declaration,
+                "GF0008",
+                `\`${pending.name}\` is defined in terms of itself, directly or through ` +
+                "other constants. A module-level constant is folded at compile time, so " +
+                "a cycle has no value to fold to rather than merely no order to run in.",
+            );
+            return "reported";
+        }
+        if (this.#failedGlobals.has(key)) {
+            return "reported";
+        }
+
+        this.#foldingGlobals.add(key);
+        const record = this.#foldGlobal(pending);
+        this.#foldingGlobals.delete(key);
+
+        if (record === undefined) {
+            this.#failedGlobals.add(key);
+            return "reported";
+        }
+        this.#globals.set(key, record);
+        return record;
+    }
+
+    #foldGlobal(pending: PendingGlobal): GlobalRecord | undefined {
+        const {declaration, statement, name} = pending;
+        const type = this.erase(
+            declaration.type ?? declaration,
+            this.#checker.getTypeAtLocation(declaration.type ?? declaration),
+            NO_BINDINGS,
+        );
+        if (type === undefined) {
+            return undefined;
+        }
+        if (!this.#globalTypeAllowed(type, declaration.type ?? declaration, type)) {
+            return undefined;
+        }
+
+        const folded = this.#folder.fold(declaration.initializer!, type);
+        if (folded === undefined) {
+            return undefined;
+        }
+
+        const exported =
+            statement.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword) ?? false;
+        const symbol = this.#globalSymbolOf(declaration, name);
+        const id = this.#mir.global({
+            name: symbol,
+            ty: this.tyOf(type, declaration),
+            // Qualified whether or not it is exported, which is where a global
+            // parts company with a function: an exported function's bare name is a
+            // C ABI contract, and a constant's is not — so two modules may both
+            // export `LIMIT` and neither has to know about the other.
+            linkage: exported ? "Export" : "Internal",
+            init: folded.leaves,
+            span: this.span(declaration),
+        });
+        return {
+            kind: "defined",
+            id,
+            name,
+            symbol,
+            type,
+            exported,
+            leaves: folded.leaves,
+            scalar: folded.scalar,
+        };
+    }
+
+    /**
+     * Whether a type is one a module-level constant can hold — `GF0008` if not.
+     *
+     * The rule is that the whole value has to be expressible as bytes decided at
+     * compile time. A `string` and a `T[]` own a heap buffer, so neither can be:
+     * that is a *planned widening* rather than a permanent rule, and the code goes
+     * away when it lands rather than being relaxed.
+     *
+     * `outer` is the type the diagnostic names, so that a bad field reports the
+     * constant's type and points at the field.
+     */
+    #globalTypeAllowed(type: MachineType, at: ts.Node, outer: MachineType): boolean {
+        switch (type.kind) {
+            case "scalar":
+            case "bool":
+            case "pointer":
+            case "fnptr":
+                return true;
+            case "fixedArray":
+                return this.#globalTypeAllowed(type.element, at, outer);
+            case "struct":
+                return type.fields.every((field) =>
+                    this.#globalTypeAllowed(field.type, at, outer),
+                );
+            default: {
+                const what =
+                    type === outer
+                        ? `a \`${renderType(type)}\``
+                        : `a \`${renderType(outer)}\`, which holds a \`${renderType(type)}\`,`;
+                this.error(
+                    at,
+                    "GF0008",
+                    `${what} cannot be a module-level constant. Its value would have to be ` +
+                    "bytes decided at compile time, and this owns something a scope has to " +
+                    "release — so it needs code to run before `main`, and nothing does.",
+                );
+                return false;
+            }
+        }
+    }
+
+    /**
+     * The symbol a module-level constant is emitted under.
+     *
+     * Always qualified by its module, which is the one place this differs from
+     * {@link Lowerer.#symbolOf}: an exported *function* keeps its bare name
+     * because that is a C ABI contract and a header declares it, and a constant
+     * has no such contract to keep. So two modules may each export `LIMIT`.
+     *
+     * The `__gf_g$` prefix groups them in a symbol table the way `__gf_vt$` groups
+     * vtables, and the written name is still the tail of it — a disassembly says
+     * `__gf_g$1f3a9c02$LIMIT`, which needs no quoting and reads as itself.
+     */
+    #globalSymbolOf(node: ts.Node, name: string): string {
+        const tag = moduleTag(this.#relative(node.getSourceFile().fileName));
+        return `__gf_g$${tag}$${name}`;
+    }
+
+    /**
+     * The constant a name refers to, if it is one.
+     *
+     * An import resolves to the *exported declaration's* own symbol, so a name
+     * imported from another file of this program lands on one record and reads the
+     * same object — there is nothing per import to reconcile because there is
+     * nothing per import. The same fact that makes a named and a namespaced call
+     * agree.
+     */
+    globalAt(expression: ts.Identifier): GlobalRecord | "reported" | undefined {
+        const declaration = this.#globalDeclarationAt(expression);
+        if (declaration === undefined) {
+            return undefined;
+        }
+        return this.#globalRecord(this.#keyOf(declaration, declaration.name.getText()));
+    }
+
+    #globalDeclarationAt(expression: ts.Identifier): ts.VariableDeclaration | undefined {
+        let symbol = this.#checker.getSymbolAtLocation(expression);
+        if (symbol === undefined) {
+            return undefined;
+        }
+        if ((symbol.flags & ts.SymbolFlags.Alias) !== 0) {
+            symbol = this.#checker.getAliasedSymbol(symbol);
+        }
+        const declaration = symbol.valueDeclaration ?? symbol.declarations?.[0];
+        if (
+            declaration === undefined ||
+            !ts.isVariableDeclaration(declaration) ||
+            !ts.isIdentifier(declaration.name) ||
+            !ts.isSourceFile(declaration.parent.parent.parent)
+        ) {
+            return undefined;
+        }
+        return declaration;
+    }
+
     #declare(
         statement: ts.Statement,
     ): { node: ts.FunctionDeclaration; builder: FunctionBuilder } | undefined {
@@ -2707,6 +3031,12 @@ export class Lowerer {
         // Handled by `#declareClasses`, which ran before this and needed to: a
         // function here may take a class as a parameter.
         if (ts.isClassDeclaration(statement)) {
+            return undefined;
+        }
+        // Handled by `#collectGlobals` and folded before this, for the reason the
+        // classes are: a body lowered below may read one, and it has to exist by
+        // then. Anything wrong with it has already been reported there.
+        if (ts.isVariableStatement(statement)) {
             return undefined;
         }
         if (!ts.isFunctionDeclaration(statement)) {

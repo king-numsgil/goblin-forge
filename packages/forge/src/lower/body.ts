@@ -2360,6 +2360,10 @@ export class BodyLowerer extends BoundaryLowerer {
         if (ts.isIdentifier(expression)) {
             const binding = this.scopes.lookup(expression.text);
             if (binding === undefined) {
+                const global = this.#globalValue(expression);
+                if (global !== "not-a-global") {
+                    return global;
+                }
                 return this.functionValue(expression, natural);
             }
             if (this.#readMoved(expression, binding.local, expression.text)) {
@@ -3142,6 +3146,62 @@ export class BodyLowerer extends BoundaryLowerer {
      * aggregate literal is materialised into a temporary before anything reaches
      * into it.
      */
+    /**
+     * A module-level constant, read.
+     *
+     * The constant's **address** is the operand, materialised into a temporary,
+     * and everything after that is an ordinary `Deref`. So `TABLE[3]` is a
+     * projection off a local that happens to hold a symbol's address, and
+     * indexing, field access and decay to a `Pointer<T>` all work through the
+     * paths that already exist rather than through anything about globals.
+     *
+     * `Copy` of the dereferenced place, which is what a binding read is too: the
+     * value is read and the constant is not consumed. It cannot be — nobody owns
+     * it, which is exactly what `Place::storage_class` derives from the `Deref`
+     * without being told that globals exist.
+     */
+    #globalValue(expression: ts.Identifier): Typed | undefined | "not-a-global" {
+        const record = this.outer.globalAt(expression);
+        if (record === undefined) {
+            return "not-a-global";
+        }
+        if (record === "reported") {
+            return undefined;
+        }
+        const pointer: MachineType = {kind: "pointer", pointee: record.type};
+        const address = this.f.addLocal({
+            ty: this.outer.tyOf(pointer, expression),
+            storage: "Temporary",
+            span: this.outer.span(expression),
+        });
+        this.push({kind: "StorageLive", value: address});
+        this.push({
+            kind: "Init",
+            place: placeOf(address),
+            rvalue: {
+                kind: "Use",
+                value: {
+                    kind: "Const",
+                    value: {
+                        kind: "Global",
+                        global:
+                            record.kind === "defined"
+                                ? {kind: "Local", value: record.id}
+                                : {kind: "Extern", value: record.id},
+                        ty: this.outer.tyOf(pointer, expression),
+                    },
+                },
+            },
+        });
+        return {
+            operand: {
+                kind: "Copy",
+                value: {local: address, projection: [{kind: "Deref"}]},
+            },
+            type: record.type,
+        };
+    }
+
     protected override placeOfSubject(at: ts.Node, subject: Typed): Place | undefined {
         if (subject.operand.kind === "Const") {
             this.outer.unsupported(at, "reaching into a constant");

@@ -141,6 +141,35 @@ describe("codes raised by a program", () => {
         }
     });
 
+    test("GF0007 — a module-level constant whose value does not fold", async () => {
+        await expectRejected(
+            "diag-0007",
+            `function compute(): i32 {
+         return 7;
+       }
+
+       const N: i32 = compute();
+
+       export function main(): i32 {
+         return N;
+       }\n`,
+            "GF0007",
+        );
+    });
+
+    test("GF0008 — a type that cannot be a module-level constant", async () => {
+        await expectRejected(
+            "diag-0008",
+            `const NAME: string = "sol";
+
+       export function main(): i32 {
+         console.log(NAME);
+         return 0;
+       }\n`,
+            "GF0008",
+        );
+    });
+
     test("GF0160 — arithmetic narrowing into a declared width", async () => {
         await expectRejected(
             "diag-0160",

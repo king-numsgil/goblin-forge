@@ -349,17 +349,27 @@ describe("import and export forms", () => {
         expect(result.exitCode).toBe(37);
     });
 
-    test("an exported `const` is GF0001, as a top-level binding is anywhere", async () => {
-        await expectRejected(
+    test("an exported `const` is a module-level constant, read across the boundary", async () => {
+        // It used to be `GF0001`. An import resolves to the *exported declaration's*
+        // own symbol, so both files land on one record and read one object — the same
+        // fact that makes a named and a namespaced call reach one function.
+        const result = await run(
             "mod-const-export",
-            `import { N } from "./consts.ts";
+            `import { N, TABLE } from "./consts.ts";
 
        export function main(): i32 {
-         return N;
+         console.log(\`\${N} \${TABLE[1]}\`);
+         return 0;
        }\n`,
-            "GF0001",
-            {files: {"consts.ts": `export const N: i32 = 5;\n`}},
+            {
+                files: {
+                    "consts.ts":
+                        `export const N: i32 = 5;\n` +
+                        `export const TABLE: FixedArray<i32, 2> = fixedArrayOf(6, 7);\n`,
+                },
+            },
         );
+        expect(result.stdout).toBe("5 7\n");
     });
 });
 

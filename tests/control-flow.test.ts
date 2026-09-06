@@ -226,7 +226,10 @@ describe("statements the language does not have yet", () => {
 
 describe("declarations the language does not have yet", () => {
     const cases: [string, string][] = [
-        ["a top-level `const`", "const N: i32 = 5;\n"],
+        // A top-level `const` is no longer here: it is a module-level constant now,
+        // and `tests/globals.test.ts` is where that lives. A `let` stays, because
+        // `const` is the only spelling — a mutable global would need `.data` and a
+        // story about who may write it that this language has not told.
         ["a top-level `let`", "let N: i32 = 5;\n"],
         ["a top-level statement", "console.log(\"x\");\n"],
         // An `enum` *is* implemented — see `tests/enums.test.ts`. A namespace is
@@ -242,8 +245,6 @@ describe("declarations the language does not have yet", () => {
             "a generic base class",
             "class Box<T> { constructor(readonly v: T) {} }\nclass IntBox extends Box<i32> {}\n",
         ],
-        ["an arrow function", "const f = (a: i32): i32 => a;\n"],
-        ["a function expression", "const f = function (a: i32): i32 { return a; };\n"],
         ["a class expression", "const C = class { };\n"],
         ["a defaulted parameter", "function f(a: i32 = 1): i32 { return a; }\n"],
         ["an optional parameter", "function f(a?: i32): i32 { return 0; }\n"],
@@ -258,6 +259,26 @@ describe("declarations the language does not have yet", () => {
                 `${prelude}export function main(): i32 {\n  return 0;\n}\n`,
                 "GF0001",
             );
+        });
+    }
+
+    // A top-level function *value* changed code rather than becoming legal, and it
+    // is worth having its own test rather than a row: the refusal is now about the
+    // constant and not about the arrow, so the message names the address rather
+    // than the syntax. An arrow inside a function body is a `LocalFn` and works —
+    // `tests/closures.test.ts` — which is exactly why "an arrow function is not
+    // supported" would be the wrong thing to assert here now.
+    for (const [what, prelude] of [
+        ["an arrow function", "const f = (a: i32): i32 => a;\n"],
+        ["a function expression", "const f = function (a: i32): i32 { return a; };\n"],
+    ] as [string, string][]) {
+        test(`${what} at the top level is GF0007`, async () => {
+            const diagnostic = await expectRejected(
+                `cf-global-${what.replace(/[^a-z]+/gi, "")}`,
+                `${prelude}export function main(): i32 {\n  return 0;\n}\n`,
+                "GF0007",
+            );
+            expect(diagnostic.message).toContain("address");
         });
     }
 

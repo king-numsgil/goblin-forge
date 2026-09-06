@@ -1634,8 +1634,10 @@ describe("class members the compiler does not have yet", () => {
 
     test("a `static` field is still GF0001", async () => {
         // A static *method* is a function with a qualified name and needs nowhere
-        // to live. A static field is a global, and there are no globals yet — a
-        // top-level `const` is `GF0001` too.
+        // to live. A static field is a global, and module-level constants exist
+        // now — so what is missing is not the storage but the *naming*: a static is
+        // `C.n`, which needs a symbol spelling and an answer for a static on a
+        // generic class. GLOBALS-PLAN stage 5.
         await expectRejected(
             "class-static-field",
             `class C { static n: i32 = 1; }
