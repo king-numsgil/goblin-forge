@@ -49,6 +49,31 @@ const SHIPPED = {
     runtimeCrate: "native",
 } as const satisfies Record<keyof RuntimeFiles, string>;
 
+/**
+ * The language reference, shipped beside the bundle.
+ *
+ * Deliberately **not** a `RuntimeFiles` member. Every one of those exists because
+ * the *compiler* reads it — even `stdLibrary`, which is there so the lowerer can
+ * recognise the directory — and this is for whoever writes the code, or the agent
+ * helping them. Putting it in that interface would make "where the compiler looks
+ * for what it needs" mean something looser.
+ *
+ * It is copied and checked all the same, because a package whose reference is
+ * missing is the same silent gap `SHIPPED` exists to close.
+ */
+const REFERENCE = "LANGUAGE.md";
+
+/**
+ * The token the reference's heading carries in place of a version.
+ *
+ * Substituted here rather than written into the file, for the reason
+ * `dist/package.json` is generated: the copy that used to sit in `dist` by hand was
+ * still claiming `0.1.0` after two releases, and `dist` is gitignored so no diff
+ * showed it. A version in a document goes stale the same way and is read by more
+ * people.
+ */
+const VERSION_TOKEN = "{{VERSION}}";
+
 const dist = "./dist";
 const backendDir = "../backend";
 const runtimeDir = "../runtime";
@@ -123,6 +148,29 @@ for (const addon of addons) {
 await copyFile(join(runtimeDir, "global.d.ts"), join(dist, SHIPPED.globalDeclarations));
 await copyFile(join(runtimeDir, "tsconfig.base.json"), join(dist, SHIPPED.tsconfigBase));
 
+// The reference, with the version filled in. Refusing to ship it without the token
+// is the half that matters: a document that quietly stopped being substituted would
+// be a document claiming an old version, which is worse than one claiming none.
+// Existence first, because reading a file that is not there throws out of Bun with
+// a stack trace and no mention of what was wanted — the shape of failure this whole
+// file is a reaction to.
+if (!existsSync(`./${REFERENCE}`)) {
+    console.error(
+        `packages/forge/${REFERENCE} is missing. It is the language reference the ` +
+        "package ships; put it back or remove the copy step.",
+    );
+    process.exit(1);
+}
+const reference = await Bun.file(`./${REFERENCE}`).text();
+if (!reference.includes(VERSION_TOKEN)) {
+    console.error(
+        `packages/forge/${REFERENCE} has no \`${VERSION_TOKEN}\` in it. The version is ` +
+        "substituted at package time; a hand-written one goes stale on the next release.",
+    );
+    process.exit(1);
+}
+await Bun.write(join(dist, REFERENCE), reference.replaceAll(VERSION_TOKEN, version));
+
 // The std modules that are real Goblin source, beside the tsconfig base whose
 // `paths` entry names them — `"std/collection": ["./std/collection.ts"]` is
 // resolved relative to the config, so the two have to travel together.
@@ -157,6 +205,13 @@ if (absent.length > 0) {
     for (const [member, name] of absent) {
         console.error(`${dist}/${name} is missing — \`${member}\` would resolve to nothing.`);
     }
+    process.exit(1);
+}
+// Checked beside them rather than with them, because what goes wrong is different:
+// nothing *resolves* to the reference, so a missing one is a package that documents
+// nothing rather than a build that fails somewhere else.
+if (!existsSync(join(dist, REFERENCE))) {
+    console.error(`${dist}/${REFERENCE} is missing — the package would ship no reference.`);
     process.exit(1);
 }
 
