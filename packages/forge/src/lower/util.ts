@@ -136,9 +136,39 @@ export function isStaticMember(member: ts.ClassElement): boolean {
     );
 }
 
+/**
+ * The name of each syntax kind, avoiding the aliases.
+ *
+ * `ts.SyntaxKind[kind]` is the wrong question to ask, because the enum holds
+ * range markers as well as names — `FirstStatement` *is* `VariableStatement`,
+ * `FirstNode` is `QualifiedName` — and a reverse mapping keeps whichever name
+ * was declared last, which is the marker. So a top-level `const` used to refuse
+ * itself as "a first statement", naming a boundary of tsc's enum rather than
+ * anything the author wrote.
+ *
+ * The remaining collisions are deprecated spellings of a kind that was renamed
+ * (`AssertClause` for `ImportAttributes`, `JSDocComment` for `JSDoc`), and there
+ * the *first* is the current one — hence keeping the earliest rather than the
+ * latest.
+ */
+const KIND_NAMES: ReadonlyMap<ts.SyntaxKind, string> = (() => {
+    const names = new Map<ts.SyntaxKind, string>();
+    for (const [name, kind] of Object.entries(ts.SyntaxKind)) {
+        if (typeof kind !== "number" || /^(?:First|Last)/.test(name) || names.has(kind)) {
+            continue;
+        }
+        names.set(kind, name);
+    }
+    return names;
+})();
+
 export function describe(node: ts.Node): string {
-    const name = ts.SyntaxKind[node.kind];
-    return `a ${name.replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase()}`;
+    const name = KIND_NAMES.get(node.kind) ?? "unknown";
+    const words = name.replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase();
+    // "an expression statement", "an if statement". The five vowels are enough:
+    // every name here is a TypeScript syntax kind, so there is no `hour` and no
+    // `union` for the rule to be wrong about.
+    return `${/^[aeiou]/.test(words) ? "an" : "a"} ${words}`;
 }
 
 /**
