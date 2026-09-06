@@ -62,7 +62,7 @@ than being a rule.
 Each ends at a state where the four commands in `CLAUDE.md` are green.
 
 - [x] **Stage 0** — the MIR and the wire format *(done 2026-09-06)*
-- [ ] **Stage 1** — codegen: data emission, and the address constant
+- [x] **Stage 1** — codegen: data emission, and the address constant *(done 2026-09-06)*
 - [ ] **Stage 2** — the frontend: declaring and reading a module-private `const`
 - [ ] **Stage 3** — reading another global, and cycles
 - [ ] **Stage 4** — `export` and `import`
@@ -114,20 +114,44 @@ the compiler being wrong rather than a program being wrong.
 reader of `Module::globals` in the tree is `summary.rs`, which lists exported
 ones as linker-visible symbols.
 
-A **typed** LLVM initialiser rather than a byte array, because the codegen
-already renders an LLVM type for every `TyId` and a typed one gets padding and
-alignment from the type instead of needing them restated: `@g = internal
-constant %struct.P { i32 1, i32 2 }`. `Zero` is `zeroinitializer`; `SizeOf` and
-`AlignOf` are resolved from the layout engine at emission and become integer
-literals. `Const::Global` is the symbol's address, which under opaque pointers is
-the symbol itself.
+A **typed** LLVM initialiser rather than a byte array. `Zero` is
+`zeroinitializer`; `SizeOf` and `AlignOf` are resolved from the layout engine at
+emission and become integer literals. `Const::Global` is the symbol's address,
+which under opaque pointers is the symbol itself.
 
-An `ExternGlobal` is a declaration — `@sym = external constant T` — and nothing
-else.
+An `ExternGlobal` is a declaration and nothing else.
 
-**Checkpoint:** `crates/goblin-codegen/tests/llvm_data.rs` grows a case per
-initialiser shape over a hand-built module, asserting the rendered object and
-that an indexed read GEPs the global rather than a stack copy.
+**Checkpoint:** a case per initialiser shape over a hand-built module, asserting
+the rendered object and that an indexed read GEPs the global rather than a stack
+copy.
+
+*Done*, in `crates/goblin-codegen/tests/llvm_globals.rs` — its own file rather
+than in `llvm_data.rs`, which is LLVM-PORT stage 2's subject. Four things worth
+recording:
+
+- **The plan's reason for a typed initialiser was wrong, and the conclusion
+  survived it.** "A typed one gets padding and alignment from the type" is not how
+  this backend works: `ty.rs` renders every aggregate *packed* with padding spelled
+  out as `[N x i8]`, precisely so `Layouts` stays the only answer to where a field
+  sits. So a typed initialiser is right for a different reason — it has to match
+  that element sequence exactly — and it carries an explicit `align` like
+  everything else here.
+- **The element walk is now shared.** `ty::elements` was extracted from
+  `Types::body`, and the type and the initialiser are two renderings of one walk.
+  Two walks reading the same offsets would have agreed for a while; an initialiser
+  one element out of step writes a field's bytes into the padding and compiles
+  cleanly, which is why `PADDED` is the fixture the test leans on.
+- **`external global`, not `external constant`.** `ExternGlobal` carries no
+  mutability, so `constant` would be a promise this side cannot check — and reads
+  are identical either way.
+- **The leaf-count guard panics rather than returning an error**, which is the
+  house rule, and the test asserts the panic. A returned diagnostic here is
+  exactly the shape `CLAUDE.md` forbids: a test could not tell it from the
+  compiler correctly rejecting a program.
+
+A **run-time** proof is deliberately not here. Reading a global end to end wants
+real source, a real binary and real output, which is stage 2's harness test — a
+better version of the same check than a hand-written IR probe.
 
 ### Stage 2 — the frontend: declaring and reading a module-private `const`
 

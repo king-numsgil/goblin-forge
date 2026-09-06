@@ -83,6 +83,17 @@ impl Globals {
         &self.lines
     }
 
+    /// A line built elsewhere, for an object whose shape is a *user type*'s
+    /// rather than one of the runtime's agreed layouts.
+    ///
+    /// Everything else here writes its own line because the shape is this file's
+    /// to know. A module-level constant's is not: it is whatever `ty.rs` renders
+    /// for that type, so `global.rs` builds the line and this only orders it
+    /// among the rest.
+    pub fn define(&mut self, line: String) {
+        self.lines.push(line);
+    }
+
     /// An object made of machine words, some of them addresses.
     ///
     /// `internal` rather than `private`: Cranelift declares these

@@ -1352,23 +1352,19 @@ impl<'a, 'm> Emitter<'a, 'm> {
                 let symbol = self.func_symbol(func)?;
                 Some(Val::new("ptr", format!("@{}", ident(&symbol))))
             }
-            // GLOBALS-PLAN stage 1. The node exists and the frontend does not
-            // emit one yet, so reaching this is the compiler being wrong rather
-            // than a program being wrong — which is what an internal error is
-            // for, and why it is not a politely returned diagnostic.
+            // The address, and nothing loaded: the `Deref` that follows is what
+            // reads it. Under opaque pointers the symbol *is* the address, so
+            // there is no instruction here at all — a global read costs a
+            // `getelementptr` at the projection and not one before it.
             Const::Global { global, .. } => {
-                internal_error!("{global:?} has no data object yet")
+                let symbol = crate::llvm::global::symbol_of(self.symbols, global)?;
+                Some(Val::new("ptr", format!("@{}", ident(&symbol))))
             }
         })
     }
 
     fn func_symbol(&self, func: &FuncRef) -> Result<String> {
-        let name = match func {
-            FuncRef::Local(id) => self.symbols.defined.get(id.index()),
-            FuncRef::Extern(id) => self.symbols.imported.get(id.index()),
-        };
-        name.cloned()
-            .ok_or_else(|| InternalError::new(format!("{func:?} is not in the module")))
+        symbol_of(self.symbols, func)
     }
 
     fn binary(&mut self, op: BinOp, lhs: &Operand, rhs: &Operand, ty: TyId) -> Result<Val> {
@@ -2074,8 +2070,21 @@ fn int_bits(ty: &str) -> Result<u32> {
     }
 }
 
+/// The symbol a [`FuncRef`] names.
+///
+/// A free function as well as a method, because a constant initialiser in static
+/// data holds a function's address too and has no `Emitter` to ask.
+pub(crate) fn symbol_of(symbols: &Symbols, func: &FuncRef) -> Result<String> {
+    let name = match func {
+        FuncRef::Local(id) => symbols.defined.get(id.index()),
+        FuncRef::Extern(id) => symbols.imported.get(id.index()),
+    };
+    name.cloned()
+        .ok_or_else(|| InternalError::new(format!("{func:?} is not in the module")))
+}
+
 /// A bit pattern as LLVM wants it written: signed types get the negative form.
-fn sign_extend(bits: u64, width: u32) -> i64 {
+pub(crate) fn sign_extend(bits: u64, width: u32) -> i64 {
     if width >= 64 {
         return bits as i64;
     }
@@ -2083,7 +2092,7 @@ fn sign_extend(bits: u64, width: u32) -> i64 {
     ((bits << shift) as i64) >> shift
 }
 
-fn truncate(bits: u64, width: u32) -> u64 {
+pub(crate) fn truncate(bits: u64, width: u32) -> u64 {
     if width >= 64 {
         return bits;
     }

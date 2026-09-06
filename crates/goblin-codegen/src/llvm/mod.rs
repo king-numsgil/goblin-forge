@@ -17,6 +17,7 @@ pub mod data;
 pub mod debug;
 pub mod driver;
 pub mod func;
+pub mod global;
 pub mod sig;
 pub mod ty;
 pub mod vtable;
@@ -63,14 +64,18 @@ impl Literals {
     }
 }
 
-/// Every function's linker-visible name, by id.
+/// Every function's and global's linker-visible name, by id.
 ///
-/// Resolved once so a call site is an index rather than a search, and so the
-/// name a vtable slot holds and the name a direct call emits cannot disagree.
+/// Resolved once so a use site is an index rather than a search, and so the name
+/// a vtable slot holds and the name a direct call emits cannot disagree. The two
+/// pairs are separate tables because the ids are: a `FuncId` and a `GlobalId` are
+/// both indices from zero into different things.
 #[derive(Default)]
 pub struct Symbols {
     pub defined: Vec<String>,
     pub imported: Vec<String>,
+    pub globals: Vec<String>,
+    pub imported_globals: Vec<String>,
 }
 
 /// What one module's IR text declares.
@@ -147,11 +152,40 @@ pub fn emit_module(
         }
     }
 
+    // Named before anything is emitted, for the reason the functions are: a
+    // constant's initialiser may hold a function's address, and a body reads a
+    // global by name.
+    for (index, global) in module.globals.iter().enumerate() {
+        let Some(symbol) = module.sym(global.name) else {
+            return Err(InternalError::new(format!("global {index} has no name")));
+        };
+        symbols.globals.push(symbol.to_owned());
+        if global.linkage == Linkage::Export {
+            defines.push(symbol.to_owned());
+        }
+    }
+    for (index, import) in module.extern_globals.iter().enumerate() {
+        let Some(symbol) = module.sym(import.name) else {
+            return Err(InternalError::new(format!(
+                "imported global {index} has no name"
+            )));
+        };
+        symbols.imported_globals.push(symbol.to_owned());
+        requires.push(symbol.to_owned());
+    }
+
     // After the functions are named, because a vtable slot holds a function
     // address — and before the text is assembled, because emitting the tables
     // is what discovers the names they refer to.
     let mut globals = Globals::new();
     let classes = crate::llvm::vtable::emit(module, &mut globals, target)?;
+    declarations.extend(global::emit(
+        module,
+        &mut globals,
+        &mut types,
+        &mut layouts,
+        &symbols,
+    )?);
     let mut debug = debug::Debug::new(module, windows, debug_info);
 
     // Bodies last: emitting one can discover a string literal, a named type or
