@@ -102,12 +102,23 @@ await Bun.write(
     `${JSON.stringify({name, version, license, type: "module", main: "./index.js", types: "./index.d.ts"}, null, 4)}\n`,
 );
 
-const addon = (await readdir(backendDir)).find((file) => file.endsWith(".node"));
-if (addon === undefined) {
+// **Every** addon, not the first one found. Two of them side by side is the
+// feature this file's header describes — napi picks by triple at load time, so one
+// package serves both machines — and `find` picked whichever sorted first, which
+// on Windows is the *Linux* one. So a Windows package shipped no Windows addon,
+// and a Linux addon dropped in beside it was overwritten by whatever
+// `packages/backend` happened to hold.
+//
+// The same mistake `packages/cli/build.ts` had at 0.3.0, in its sibling, found
+// the same way: by a release that had one stale artefact in it.
+const addons = (await readdir(backendDir)).filter((file) => file.endsWith(".node"));
+if (addons.length === 0) {
     console.error("no built addon in packages/backend. Run `bun run build:backend` first.");
     process.exit(1);
 }
-await copyFile(join(backendDir, addon), join(dist, addon));
+for (const addon of addons) {
+    await copyFile(join(backendDir, addon), join(dist, addon));
+}
 
 await copyFile(join(runtimeDir, "global.d.ts"), join(dist, SHIPPED.globalDeclarations));
 await copyFile(join(runtimeDir, "tsconfig.base.json"), join(dist, SHIPPED.tsconfigBase));
@@ -149,4 +160,6 @@ if (absent.length > 0) {
     process.exit(1);
 }
 
-console.log(`packaged ${dist} (addon: ${addon})`);
+// Every addon named, because "which addons did this package get" is the question a
+// release has to answer and the one a single name answered wrongly.
+console.log(`packaged ${dist} (addons: ${addons.join(", ")})`);
