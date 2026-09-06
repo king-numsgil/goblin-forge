@@ -57,6 +57,7 @@ import {
     EQUALS_METHOD,
     EQUALS_OF,
     FIXED_ARRAY,
+    FIXED_ARRAY_OF,
     FNV_OFFSET_BASIS,
     FNV_PRIME,
     HASH_METHOD,
@@ -75,6 +76,7 @@ import {
     STRING_FROM_BYTES,
     STRING_FROM_CSTRING,
     TAKE,
+    TO_ARRAY,
     TRY_CAST,
 } from "./tables.ts";
 import { BOOL, type FnRecord, ISIZE, STRING, type Typed, typed, U64, USIZE, VOID } from "./types.ts";
@@ -3554,6 +3556,9 @@ export class BodyLowerer extends BoundaryLowerer {
         if (name === FIXED_ARRAY) {
             return this.fixedArray(expression, natural);
         }
+        if (name === FIXED_ARRAY_OF) {
+            return this.fixedArrayOf(expression, natural);
+        }
         if (name === TRY_CAST) {
             return this.tryCast(expression);
         }
@@ -4576,6 +4581,25 @@ export class BodyLowerer extends BoundaryLowerer {
                 default:
                     this.outer.unsupported(expression, `\`${access.name.text}\` on an array`);
                     return undefined;
+            }
+        }
+
+        // `buf.toArray()`. The **name** is tested before the receiver, so that
+        // every other method on a fixed array keeps whatever path it has today:
+        // `free` and `deref` are inherited from `CorePointer` and belong to the
+        // pointer branch above, not here. The width pass tests it in the same
+        // order for the same reason.
+        if (access.name.text === TO_ARRAY) {
+            // The erased type, not the lowered value's, so both passes compute the
+            // result from the same source — and so there is no second narrowing
+            // here that could fail without saying anything.
+            const fixed = this.tryErase(access.expression);
+            if (fixed?.kind === "fixedArray") {
+                const subject = this.value(access.expression, undefined);
+                if (subject === undefined) {
+                    return undefined;
+                }
+                return this.fixedArrayToArray(expression, subject, fixed);
             }
         }
 

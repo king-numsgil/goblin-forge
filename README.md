@@ -721,16 +721,29 @@ there keeps C's struct-of-callbacks a plain struct.
 const buf: FixedArray<u8, 128> = fixedArray(128, 0);
 buf[0] = 1;
 
+// the same, from the elements written out — C's `T x[] = {…}`
+const m: FixedArray<f64, 4> = fixedArrayOf(1, 0, 0, 1);
+
 // owning and growable — this language's std::vector
 const xs: i32[] = [1, 2, 3];
 xs.push(4);
 const ys = xs;          // a copy: a second buffer, not a second name
 const last = xs.pop();
+
+// inline to owning, copied — the conversion is written, because it allocates
+const zs: f64[] = m.toArray();
 ```
 
 A `FixedArray<T, N>` **is** the bytes rather than a pointer to them, so as a
 struct field it occupies its whole layout. `T[]` — the same type as `Array<T>` —
 is a handle to elements it owns, so it can grow and copying one allocates.
+
+The two do not convert by assignment, in either direction, and `toArray()` is
+why: it allocates a buffer and copies every element into it, which is not
+something an `=` should do quietly. `= [1, 2, 3, 4]` against a `FixedArray`
+annotation is a tsc error rather than a gap — see DECISIONS §33 for why it has to
+be, since the way to allow it is also the way to make `xs.free()` legal on a
+vector.
 
 Copying copies every element with **that element's** own copy operation: a
 `string[]` deep-copies its strings, an `i32[]` is a single `memcpy`. An empty

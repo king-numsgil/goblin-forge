@@ -335,6 +335,11 @@ describe("fixed array edges", () => {
         // pass has no width for a `FixedArray` fill, so the inner call is rejected
         // before the outer one is considered. There is no other spelling for a
         // two-dimensional array today.
+        //
+        // `fixedArrayOf` does not lift this, and it is worth not re-trying: the
+        // outer call is inferred first, so the inner ones have no element type to
+        // take and come out as `FixedArray<unknown, 2>` — the same missing
+        // inference site DECISIONS §33 measures, one level down.
         await expectRejected(
             "array-nested",
             `export function main(): i32 {
@@ -342,6 +347,283 @@ describe("fixed array edges", () => {
          return cast<i32>(a[1][1]);
        }\n`,
             "GF0161",
+        );
+    });
+});
+
+describe("`fixedArrayOf`, the elements written out", () => {
+    test("each element is its own value", async () => {
+        const result = await run(
+            "array-of-values",
+            `export function main(): i32 {
+         const buf: FixedArray<i32, 4> = fixedArrayOf(10, 20, 30, 40);
+         console.log(\`\${buf[0]} \${buf[3]} \${buf.length}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("10 40 4\n");
+    });
+
+    test("the element type comes from the annotation, and has to", async () => {
+        // Not just the *width*: the element type itself. `fixedArray(2, fill)`
+        // infers `T` from the fill, which is an ordinary parameter of type `T`;
+        // `fixedArrayOf`'s values appear only inside the inferred tuple, which
+        // gives `T` no inference site of its own, so with nothing to take it from
+        // it is `unknown`. Three declaration shapes were measured and none of them
+        // infers it — DECISIONS §33.
+        const {result} = await compileSource(
+            "array-of-no-context",
+            `export function main(): i32 {
+         const a: string = "x" + "y";
+         const xs: string[] = fixedArrayOf(a, a).toArray();
+         return cast<i32>(xs.length);
+       }\n`,
+        );
+        expect(result.ok).toBe(false);
+        expect(errorCodes(result)).toContain("TS2322");
+    });
+
+    test("the width comes from the annotation, as it does for `fixedArray`", async () => {
+        // Every literal here is a plain `number`; `f64` is written once, on the
+        // binding. The fractional element is the observation that makes it a real
+        // check — at an integer width it would not survive the range check.
+        const result = await run(
+            "array-of-width",
+            `export function main(): i32 {
+         const m: FixedArray<f64, 3> = fixedArrayOf(1, 0.5, 2);
+         console.log(\`\${m[1]}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("0.5\n");
+    });
+
+    test("an owning element is stored once, not cloned and abandoned", async () => {
+        // Three heap strings into three slots, and the live-allocation check on
+        // every `run` is the assertion that matters: `forStorage` moves each
+        // temporary into its slot, where `fixedArray`'s `repeatable` fill would
+        // have cloned it and left the original to the full-expression.
+        const result = await run(
+            "array-of-strings",
+            `export function main(): i32 {
+         const names: FixedArray<string, 3> = fixedArrayOf("a" + "b", "c" + "d", "e" + "f");
+         console.log(\`\${names[0]} \${names[1]} \${names[2]}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("ab cd ef\n");
+    });
+
+    test("a computed element is evaluated where it is written", async () => {
+        const result = await run(
+            "array-of-computed",
+            `function twice(n: i32): i32 {
+         return n * 2;
+       }
+
+       export function main(): i32 {
+         let seed: i32 = 3;
+         const buf: FixedArray<i32, 3> = fixedArrayOf(twice(seed), seed + 1, seed);
+         console.log(\`\${buf[0]} \${buf[1]} \${buf[2]}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("6 4 3\n");
+    });
+
+    test("it is still a value: a second binding copies", async () => {
+        const result = await run(
+            "array-of-value-semantics",
+            `export function main(): i32 {
+         const a: FixedArray<i32, 2> = fixedArrayOf(1, 2);
+         const b: FixedArray<i32, 2> = a;
+         b[0] = 99;
+         console.log(\`\${a[0]} \${b[0]}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("1 99\n");
+    });
+
+    test("the wrong number of values is tsc's error, naming both counts", async () => {
+        // The length is a literal type read off the argument list, so this needs
+        // no rule of the compiler's: `3` is not assignable to `4`.
+        const {result} = await compileSource(
+            "array-of-miscount",
+            `export function main(): i32 {
+         const buf: FixedArray<i32, 4> = fixedArrayOf(1, 2, 3);
+         return buf[0];
+       }\n`,
+        );
+        expect(result.ok).toBe(false);
+        expect(errorCodes(result)).toContain("TS2322");
+    });
+
+    test("no values at all is the zero-length array", async () => {
+        const result = await run(
+            "array-of-empty",
+            `export function main(): i32 {
+         const buf: FixedArray<i32, 0> = fixedArrayOf();
+         return cast<i32>(buf.length);
+       }\n`,
+        );
+        expect(result.exitCode).toBe(0);
+    });
+});
+
+describe("`toArray`, the copy into a `T[]`", () => {
+    test("the elements arrive, and the result is a real vector", async () => {
+        const result = await run(
+            "to-array-basic",
+            `export function main(): i32 {
+         const buf: FixedArray<i32, 4> = fixedArrayOf(1, 2, 3, 4);
+         const xs: i32[] = buf.toArray();
+         xs.push(5);
+         console.log(\`\${xs.length} \${xs[0]} \${xs[3]} \${xs[4]}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("5 1 4 5\n");
+    });
+
+    test("the buffer is exactly as long as the array, with no slack", async () => {
+        // One allocation of `N`, which is what the array-literal path promises and
+        // what this reuses. A doubling `push` would have made it 8.
+        const result = await run(
+            "to-array-capacity",
+            `export function main(): i32 {
+         const buf: FixedArray<i32, 3> = fixedArrayOf(1, 2, 3);
+         const xs: i32[] = buf.toArray();
+         console.log(\`\${xs.length} \${xs.capacity}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("3 3\n");
+    });
+
+    test("it copies: writing the vector leaves the fixed array alone", async () => {
+        const result = await run(
+            "to-array-independent",
+            `export function main(): i32 {
+         const buf: FixedArray<i32, 2> = fixedArrayOf(7, 8);
+         const xs: i32[] = buf.toArray();
+         xs[0] = 99;
+         console.log(\`\${buf[0]} \${xs[0]}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("7 99\n");
+    });
+
+    test("an owning element is cloned, and the source still owns its own", async () => {
+        // The case the whole design rests on: three strings in, six live strings
+        // between the two values, and every one released. Reading the fixed array
+        // *after* the conversion is what proves this is a read and not a `take` —
+        // and the live-allocation check proves neither buffer is freed twice.
+        const result = await run(
+            "to-array-strings",
+            `export function main(): i32 {
+         const names: FixedArray<string, 3> = fixedArrayOf("a" + "b", "c" + "d", "e" + "f");
+         const xs: string[] = names.toArray();
+         console.log(\`\${xs[0]} \${xs[1]} \${xs[2]}\`);
+         console.log(\`\${names[0]} \${names[1]} \${names[2]}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("ab cd ef\nab cd ef\n");
+    });
+
+    test("a zero-length array converts to an empty vector, which allocates nothing", async () => {
+        const result = await run(
+            "to-array-empty",
+            `export function main(): i32 {
+         const buf: FixedArray<i32, 0> = fixedArrayOf();
+         const xs: i32[] = buf.toArray();
+         console.log(\`\${xs.length} \${xs.capacity}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("0 0\n");
+    });
+
+    test("it works on a fixed array that is a struct's field", async () => {
+        // The receiver is a place with a projection rather than a bare local, which
+        // is the case that would break if the element indices were built off the
+        // local instead of off the place.
+        const result = await run(
+            "to-array-field",
+            `interface Buffer { data: FixedArray<i32, 3>; tag: i32; }
+
+       export function main(): i32 {
+         const b: Buffer = { data: fixedArrayOf(4, 5, 6), tag: 1 };
+         const xs: i32[] = b.data.toArray();
+         console.log(\`\${xs[0]} \${xs[2]} \${xs.length}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("4 6 3\n");
+    });
+
+    test("the receiver may be a temporary", async () => {
+        // The fixed array is never bound to a name: it is a temporary the
+        // full-expression releases, and the elements are read out of it before that
+        // happens. Both values own their strings, so the live-allocation check is
+        // the real assertion again.
+        //
+        // `fixedArray` rather than `fixedArrayOf` because this receiver has no
+        // annotation to take an element type from, and only `fixedArray` can infer
+        // one — its `fill` is a parameter of type `T`, where `fixedArrayOf`'s
+        // values only ever appear inside the inferred tuple.
+        const result = await run(
+            "to-array-temporary",
+            `export function main(): i32 {
+         const xs: string[] = fixedArray(2, "a" + "b").toArray();
+         console.log(\`\${xs[0]} \${xs[1]} \${xs.length}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("ab ab 2\n");
+    });
+
+    test("a program's own `toArray` and `fixedArrayOf` still win", async () => {
+        // The trap DECISIONS §27 records for `take`, in two new places. The
+        // function name is covered by `shadowsPrelude`, which every intrinsic goes
+        // through; the *method* is covered by testing the receiver's kind, since
+        // nothing but a fixed array can erase to one.
+        const result = await run(
+            "to-array-shadowed",
+            `class Bag {
+         n: i32 = 0;
+         constructor(n: i32) { this.n = n; }
+         toArray(): i32[] { return [this.n, this.n]; }
+       }
+
+       function fixedArrayOf(n: i32): i32 {
+         return n * 3;
+       }
+
+       export function main(): i32 {
+         const b: Bag = new Bag(7);
+         const xs: i32[] = b.toArray();
+         console.log(\`\${xs[0]} \${xs.length} \${fixedArrayOf(2)}\`);
+         return 0;
+       }\n`,
+        );
+        expect(result.stdout).toBe("7 2 6\n");
+    });
+
+    test("longer than the unroll budget is a `GF0001`, not a slow compile", async () => {
+        // One operand per element, so this is a budget rather than a rule: the loop
+        // form needs an rvalue for "an uninitialised `T[]` of length n" that the MIR
+        // does not have yet.
+        await expectRejected(
+            "to-array-too-long",
+            `export function main(): i32 {
+         const buf: FixedArray<u8, 300> = fixedArray(300, 1);
+         const xs: u8[] = buf.toArray();
+         return cast<i32>(xs.length);
+       }\n`,
+            "GF0001",
         );
     });
 });

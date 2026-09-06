@@ -30,6 +30,17 @@ export const MOVE = "move";
 export const TAKE = "take";
 /** The intrinsic that builds a `FixedArray<T, N>`. */
 export const FIXED_ARRAY = "fixedArray";
+/** `fixedArrayOf(a, b, c)` — the same, from the elements written out. */
+export const FIXED_ARRAY_OF = "fixedArrayOf";
+/**
+ * `buf.toArray()` — a `FixedArray<T, N>` copied into a `T[]`.
+ *
+ * Named here rather than spelled at both sites, because the width pass and the
+ * body pass have to agree about which method calls are the compiler's: one of
+ * them answering about a method the other never recognised is a width for a call
+ * that then does not lower.
+ */
+export const TO_ARRAY = "toArray";
 /** `tryCast<T>(value)` — a checked downcast, `null` when the answer is no. */
 export const TRY_CAST = "tryCast";
 /** `cstring(s)` — borrow a `string`'s bytes as a raw `const char *`. */

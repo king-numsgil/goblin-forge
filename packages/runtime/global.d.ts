@@ -99,6 +99,22 @@ interface FixedArray<T, N extends number> extends CorePointer<T> {
     readonly [FixedLengthBrand]: N;
     /** Known at compile time — this is a literal type, not a load. */
     readonly length: N;
+
+    /**
+     * A `T[]` holding a copy of these `N` elements — one heap buffer, exactly
+     * `N` long.
+     *
+     * The conversion has to be written, and cannot be an assignment, because
+     * the two types are not related and must not become so: `T[]` is a pointer
+     * to a buffer it owns, this is the bytes, and making them assignable would
+     * mean either giving a fixed array `push` or giving a vector `free()`.
+     *
+     * It **copies**, per element, applying each element's own copy — so a
+     * `FixedArray<string, 3>` clones three buffers. And it is a *read*: this
+     * array keeps what it holds and still releases it, the way `peek` and
+     * `valueAt` do and unlike `take`.
+     */
+    toArray(): T[];
 }
 
 /**
@@ -109,6 +125,33 @@ interface FixedArray<T, N extends number> extends CorePointer<T> {
  * to hold — on uninitialised stack that is a garbage pointer (REWRITE-PLAN §10).
  */
 declare function fixedArray<T, N extends number>(length: N, fill: T): FixedArray<T, N>;
+
+/**
+ * Build a fixed array from the elements written out, C's `T x[] = {…}`.
+ *
+ * The length comes from how many arguments there are, so nothing can disagree
+ * about it — `const m: FixedArray<f64, 4> = fixedArrayOf(1, 0, 0, 1)` with three
+ * values is tsc's error naming both counts, not the compiler's.
+ *
+ * `= [1, 2, 3, 4]` is what you would rather write and it cannot be made to
+ * work. An array literal is a `T[]`, which has none of the nine members
+ * `FixedArray` inherits from {@link CorePointer}, and the two ways to close that
+ * gap are the two traps this type is shaped to avoid: putting them on `Array<T>`
+ * makes `xs.free()` legal on a vector, and making them optional here makes every
+ * `Pointer<T>` a fixed array of whatever length was asked for.
+ *
+ * **The element type comes from the annotation, and there is nowhere else it can
+ * come from.** Not only the width — the type. `fixedArray(2, fill)` infers `T`
+ * from its fill, which is an ordinary parameter of type `T`; here every value
+ * appears inside `N`, the inferred tuple, which leaves `T` with no inference site
+ * of its own and `unknown` when nothing supplies one. So this needs a
+ * `FixedArray<…>` on the left even where `fixedArray` would not, and
+ * `fixedArrayOf(a, b).toArray()` on its own is a `TS2322` about `unknown[]`.
+ * DECISIONS §33 has the shapes that were tried.
+ */
+declare function fixedArrayOf<T, const N extends readonly T[]>(
+    ...values: N
+): FixedArray<T, N["length"]>;
 
 /**
  * `T[]`: contiguous elements with a length header behind the pointer, the same

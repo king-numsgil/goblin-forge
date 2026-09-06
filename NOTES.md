@@ -230,6 +230,7 @@ backend failure:
 | **string enums** | `checker/src/types.ts`, `enumUnderlying` — implementable and cheap (the members are string constants), and currently the only way to write named string constants, since module-level `const` is unsupported | later |
 | `>>>`, the comma operator, `&&=` / `\|\|=` / `??=`, `??` | `lower/tables.ts` has no token for them, so `lower/body.ts` refuses. `>>>` also wants a decision, since an explicit unsigned width already spells a logical shift as `>>` | later |
 | the **value** of `a++` / `++a` / `(a += 1)` | `lower/body.ts`, `#unary` — they update as statements; only the value is missing, which is the half where prefix and postfix differ | later |
+| `buf.toArray()` on more than **256 elements** | `lower/intrinsics.ts`, `TO_ARRAY_INLINE_LIMIT` — a budget, not a rule: it emits one operand per element, and the loop form wants an rvalue for "an uninitialised `T[]` of length n" that the MIR does not have. `gf_array_new` is already the runtime call it would make. DECISIONS §33 | later |
 
 `Rvalue::Ref` and `Rvalue::AddrOf` **are** implemented now — the lowerer emits a
 `Ref` for every `this`, every method receiver and every `p.deref()`, and an

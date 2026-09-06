@@ -40,6 +40,7 @@ import {
     CSTRING_FREE,
     EQUALS_OF,
     FIXED_ARRAY,
+    FIXED_ARRAY_OF,
     HASH_OF,
     MOVE,
     NATIVE_ALIGN_OF,
@@ -52,6 +53,7 @@ import {
     STRING_FROM_BYTES,
     STRING_FROM_CSTRING,
     TAKE,
+    TO_ARRAY,
     TRY_CAST,
 } from "./tables.ts";
 import {
@@ -897,11 +899,19 @@ export abstract class WidthPass extends Emitter {
             return target === undefined ? ERROR : typed(target);
         }
 
-        if (name === FIXED_ARRAY) {
-            // The *contextual* type first. `fixedArray(4, 0)` infers `T` from the
-            // literal `0`, which is a plain `number` and has no width — the
-            // annotation on the binding is what says `i32`, and it is the answer that
-            // matters.
+        // The *contextual* type first, for both, and for `fixedArrayOf` it is the
+        // only answer there is. `fixedArray(4, 0)` infers `T` from the literal `0`,
+        // which is a plain `number` and has no width — the annotation on the
+        // binding is what says `i32`. `fixedArrayOf(1, 0, 0, 1)` cannot infer an
+        // element type at all: its values live inside the inferred tuple, which
+        // gives `T` no inference site, so without a contextual type it is
+        // `unknown` and tsc has already said so (DECISIONS §33).
+        //
+        // Neither walks its arguments: the elements are lowered against
+        // `natural.element`, which is a *narrower* context than this pass could
+        // give them, so asking here would report a widthless literal at the one
+        // position where something does say what it should be.
+        if (name === FIXED_ARRAY || name === FIXED_ARRAY_OF) {
             const type = this.erase(
                 expression,
                 this.outer.checker.getContextualType(expression) ??
@@ -1035,6 +1045,17 @@ export abstract class WidthPass extends Emitter {
                         `\`${access.name.text}\` on a \`${renderType(element)}[]\``,
                     );
                     return ERROR;
+            }
+        }
+
+        // `buf.toArray()`. The **name** is tested before the receiver, so that
+        // every other method on a fixed array keeps whatever path it has today —
+        // `free` and `deref` are inherited from `CorePointer` and are not this
+        // branch's business.
+        if (access.name.text === TO_ARRAY) {
+            const fixed = this.tryErase(access.expression);
+            if (fixed?.kind === "fixedArray") {
+                return typed({kind: "array", element: fixed.element});
             }
         }
 

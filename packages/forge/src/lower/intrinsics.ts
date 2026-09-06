@@ -11,10 +11,27 @@
 import { FieldId, type Operand, type Place } from "@goblin-forge/backend";
 import { type MachineType, renderType } from "@goblin-forge/checker";
 import ts from "typescript";
-import { NATIVE_ALIGN_OF, NATIVE_SIZE_OF, NATIVE_ZEROED, NO_UNWIND, RUNTIME } from "./tables.ts";
+import {
+    FIXED_ARRAY_OF,
+    NATIVE_ALIGN_OF,
+    NATIVE_SIZE_OF,
+    NATIVE_ZEROED,
+    NO_UNWIND,
+    RUNTIME,
+    TO_ARRAY,
+} from "./tables.ts";
 import { ISIZE, type Typed, USIZE, VOID } from "./types.ts";
 import { needsDrop, placeOf } from "./util.ts";
 import { WidthPass } from "./width.ts";
+
+/**
+ * How many elements `toArray` will unroll, past which it is a `GF0001`.
+ *
+ * A budget rather than a rule about the language, so the number matters less than
+ * that there is one: a matrix or a colour is a handful of elements and a pixel
+ * buffer is not, and the second wants the loop form that does not exist yet.
+ */
+const TO_ARRAY_INLINE_LIMIT = 256;
 
 export abstract class IntrinsicLowerer extends WidthPass {
     /**
@@ -1339,5 +1356,138 @@ export abstract class IntrinsicLowerer extends WidthPass {
             type: natural,
             temporary: array,
         };
+    }
+
+    /**
+     * `fixedArrayOf(a, b, c)` — the same array, from the elements written out.
+     *
+     * Straight-line rather than a loop, which is the opposite of what
+     * {@link IntrinsicLowerer.fixedArray} does and for the opposite reason: there
+     * is one distinct value per slot, so there is nothing here that repeats.
+     *
+     * `N` comes from the *type* and the values come from the call, and tsc has
+     * already matched the two — the length is a literal type, so a miscount is
+     * its error naming both numbers. The check below is what keeps that a
+     * diagnostic rather than a wrong layout if some future spelling ever gets
+     * between them.
+     */
+    protected fixedArrayOf(expression: ts.CallExpression, natural: MachineType): Typed | undefined {
+        if (natural.kind !== "fixedArray") {
+            this.outer.error(
+                expression,
+                "GF0161",
+                `\`${FIXED_ARRAY_OF}\` builds a \`FixedArray<T, N>\`, not a ` +
+                `\`${renderType(natural)}\`.`,
+            );
+            return undefined;
+        }
+        const values = expression.arguments;
+        if (values.length !== natural.length) {
+            this.outer.error(
+                expression,
+                "GF0002",
+                `\`${FIXED_ARRAY_OF}\` was given ${values.length} ` +
+                `${values.length === 1 ? "value" : "values"} for a ` +
+                `\`${renderType(natural)}\`, which holds ${natural.length}.`,
+            );
+            return undefined;
+        }
+
+        const ty = this.outer.tyOf(natural, expression);
+        const array = this.f.addLocal({ty, storage: "Temporary"});
+        this.temporaries.push(array);
+        this.push({kind: "StorageLive", value: array});
+        // Zeroed first, for the reason `fixedArray` zeroes: an element of an owning
+        // type is constructed *into* its slot, and a slot whose `Init` never ran —
+        // because an argument further along was refused — is still destroyed at
+        // scope exit, over whatever uninitialised stack held (REWRITE-PLAN §10).
+        this.push({kind: "Init", place: placeOf(array), rvalue: {kind: "Default"}});
+
+        for (const [index, value] of values.entries()) {
+            const element = this.expressionTyped(value, natural.element);
+            if (element === undefined) {
+                return undefined;
+            }
+            // `Init`, not `Assign`: the slot was zeroed and holds nothing to
+            // destroy. And `forStorage` rather than `repeatable`, which is the
+            // other half of the difference from `fixedArray` — each element is
+            // written exactly once, so an owning one moves out of its temporary
+            // instead of being cloned and the original left to the
+            // full-expression.
+            this.push({
+                kind: "Init",
+                place: {local: array, projection: [{kind: "ConstIndex", value: BigInt(index)}]},
+                rvalue: {kind: "Use", value: this.forStorage(element)},
+            });
+        }
+
+        return {
+            operand: {kind: "Borrow", value: placeOf(array)},
+            type: natural,
+            temporary: array,
+        };
+    }
+
+    /**
+     * `buf.toArray()` — the `N` elements copied into a `T[]` of exactly that
+     * length.
+     *
+     * The same `Aggregate` an array literal builds, which is the whole
+     * implementation: the backend already answers it with one `gf_array_new` and
+     * a store per element applying that element's own copy, so a
+     * `FixedArray<string, 3>` clones three buffers without this knowing how a
+     * string is copied. `N` is a compile-time constant, so the indices are
+     * `ConstIndex` and there is no loop and no header read.
+     *
+     * Reading the elements is a **copy** and not a move: the fixed array still
+     * owns what it holds afterwards and its scope still releases it, which is the
+     * `peek`/`valueAt` rule rather than `take`'s (DECISIONS §27).
+     */
+    protected fixedArrayToArray(
+        expression: ts.CallExpression,
+        subject: Typed,
+        type: Extract<MachineType, { kind: "fixedArray" }>,
+    ): Typed | undefined {
+        if (expression.arguments.length !== 0) {
+            this.outer.error(expression, "GF0002", `\`${TO_ARRAY}\` takes no arguments.`);
+            return undefined;
+        }
+        // One operand per element, so a long array is long MIR. An array *literal*
+        // has the same property and no limit, and the difference is that its
+        // elements were all written down: `toArray` is three tokens whose cost
+        // comes out of a type, so `FixedArray<u8, 65536>` would quietly emit
+        // sixty-five thousand of them. The loop that would fix this needs an
+        // rvalue for "an uninitialised `T[]` of length n" that the MIR does not
+        // have — `gf_array_new` is already the runtime call it would make.
+        if (type.length > TO_ARRAY_INLINE_LIMIT) {
+            this.outer.unsupported(
+                expression,
+                `\`${TO_ARRAY}\` on a \`${renderType(type)}\`, which is longer than ` +
+                `${TO_ARRAY_INLINE_LIMIT} elements`,
+            );
+            return undefined;
+        }
+
+        const place = this.placeOfSubject(expression, subject);
+        if (place === undefined) {
+            return undefined;
+        }
+
+        const array: MachineType = {kind: "array", element: type.element};
+        const fields: Operand[] = [];
+        for (let index = 0; index < type.length; index += 1) {
+            fields.push({
+                kind: "Copy",
+                value: {
+                    local: place.local,
+                    projection: [...place.projection, {kind: "ConstIndex", value: BigInt(index)}],
+                },
+            });
+        }
+        return this.temporaryTyped(expression, array, {
+            kind: "Aggregate",
+            ty: this.outer.tyOf(array, expression),
+            fields,
+        });
     }
 }

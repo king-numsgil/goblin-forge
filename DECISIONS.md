@@ -4032,3 +4032,132 @@ is a pointer: a borrowed value is `ConstReference<T>`, a borrowed array is
 signature — and §24 already decided that a `Pointer<T>` does not get the
 C-boundary checking a `Reference<T>` gets, for the same reason. The payoff
 lands in the one spot the design has opted out of.
+
+## §33 — `fixedArrayOf`, `toArray`, and why `= [1, 2, 3, 4]` cannot be a fixed array *(settled and built, 2026-09-05)*
+
+**Answer: both directions between the two array kinds are written as a call, and
+neither is an assignment.** `fixedArrayOf(a, b, c)` builds a `FixedArray<T, N>`
+from the elements written out; `buf.toArray()` copies one into a `T[]`. Both are
+frontend-only — no MIR node, no runtime symbol, no backend change.
+
+### `= [1, 2, 3, 4]` is not a lowering gap, and cannot be made into one
+
+The obvious spelling is the one that started this, and it is unreachable:
+
+```console
+[TS2740] Type 'number[]' is missing the following properties from type
+         'FixedArray<i32, 4>': [FixedLengthBrand], address, deref, free, and 5 more.
+```
+
+Not the length brand alone — the whole of `CorePointer<T>`. So there is no
+lowering to write, special-cased to global scope or otherwise, because tsc never
+reaches one. The two ways to open it are both the trap this type is shaped to
+avoid:
+
+- **put those members on `Array<T>`** — then every `T[]` satisfies `FixedArray`,
+  and `xs.free()` type-checks on a vector;
+- **make them optional here** — optional-and-absent is assignable, so every
+  `Pointer<T>` becomes a fixed array of whatever length was asked for. That is
+  REWRITE-PLAN §7's trap, and it is the reason the brand is required in the first
+  place. `LocalFn` took this trade for *one* marker property and moved the escape
+  rule into the compiler (`GF0239`); here it would be nine members, and the
+  direction being opened is the one that fabricates a length out of nothing.
+
+**A tuple annotation was the near miss.** `const buf: [i32, i32, i32, i32] = [1,
+2, 3, 4]` type-checks today with no brand games at all, which is exactly the
+syntax wanted. It is rejected for three reasons, in order of weight: a tuple and
+a `FixedArray<i32, 4>` are unrelated types (`TS2345`), so this is a second
+spelling for one machine type, which is what §32 just finished removing in the
+reference layer; the prelude's `Array<T>` members leak onto tuples, so
+`buf.push(5)` type-checks on inline bytes; and a 256-entry table is 256 type
+arguments, so tuples could never *replace* `FixedArray` and could only ever be
+added beside it.
+
+### What `fixedArrayOf` is
+
+`fixedArrayOf<T, const N extends readonly T[]>(...values: N): FixedArray<T, N["length"]>`.
+
+The length is read off the argument list as a literal type, so a miscount is
+tsc's error naming both numbers rather than a rule of the compiler's.
+
+**The element type has to come from the annotation, and that is a real limit
+rather than a choice.** Not just the width — the type. `fixedArray(2, fill)`
+infers `T` from its fill, because that is an ordinary parameter of type `T`; here
+every value appears inside `N`, the inferred tuple, so `T` has no inference site
+and is `unknown` when nothing supplies one. Three shapes were measured and none
+of them fixes it:
+
+| Shape | Result |
+|---|---|
+| `<T, const N extends readonly T[]>(...values: N)` | `T` is `unknown` without an annotation — inference from N's *constraint* does not happen |
+| `…(...values: [...N])` | identical |
+| `<T, const N extends readonly [T, ...T[]]>(...values: N)` | identical, **and** `fixedArrayOf()` becomes `TS2555`, losing the zero-length case |
+
+Dropping `T` entirely and using `FixedArray<N[number], N["length"]>` does infer
+an element type from the arguments, and the wrong one: with `const N` it is the
+union of the *literal* types, so `fixedArrayOf(1, 0, 0, 1)` is a
+`FixedArray<0 | 1, 4>`, and `0` is not assignable to a branded `f64`. That
+breaks the case the function exists for in exchange for the case it does not.
+
+So `const m: FixedArray<f64, 4> = fixedArrayOf(1, 0, 0, 1)` is the shape to
+write, and `fixedArrayOf(a, b).toArray()` with no annotation anywhere is a
+`TS2322` about `unknown[]`. `fixedArray(2, a).toArray()` is the spelling that
+needs nothing, because that `T` is inferable.
+
+The lowering is `fixedArray`'s with both halves inverted: straight-line rather
+than a loop, because there is one distinct value per slot and nothing repeats;
+and `forStorage` rather than `repeatable`, because each element is written
+exactly once, so an owning one moves out of its temporary instead of being cloned
+with the original left behind. The zeroing before the stores is kept for the
+reason `fixedArray` has it — a slot whose `Init` never ran, because an argument
+further along was refused, is still destroyed at scope exit.
+
+### What `toArray` is
+
+The same `Rvalue::Aggregate` an array literal builds, which is the whole
+implementation: `build_array` in the LLVM backend already answers it with one
+`gf_array_new` and a store per element applying that element's own copy. `N` is a
+compile-time constant, so the indices are `ConstIndex` and there is no loop and
+no header read. A zero-length one is the shared static empty and allocates
+nothing.
+
+Three semantics decided rather than fallen into:
+
+- **It copies, per element.** A `FixedArray<string, 3>` clones three buffers,
+  because `Copy` of an element place applies that element's copy operation. A
+  memcpy would be correct only for a trivial element and is not what this emits.
+- **It is a read, not a `take`.** The fixed array still owns what it holds
+  afterwards and its scope still releases it — the `peek`/`valueAt` rule, not
+  §27's. The test that matters reads the source *after* the conversion and the
+  live-allocation check proves neither buffer is freed twice.
+- **Capacity is exactly `N`.** One allocation, no slack, matching what an array
+  literal promises.
+
+**The 256-element unroll budget is a budget, not a rule.** One operand per
+element, so a long array is long MIR. An array *literal* has the same property
+and no limit, and the difference is that its elements were all written down:
+`toArray` is three tokens whose cost comes out of a type, so `FixedArray<u8,
+65536>` would quietly emit sixty-five thousand of them. Past the budget it is a
+`GF0001` with a caret. The loop form that would lift it needs an rvalue for "an
+uninitialised `T[]` of length n" that the MIR does not have — `gf_array_new` is
+already the runtime call it would make, so this is a MIR node and a fingerprint
+bump, not new runtime surface.
+
+### Still open — the reason this was asked for
+
+The motivation was a module-level constant table — `const TABLE: FixedArray<f64,
+256>` living in `.rodata` rather than being 2KB of stack stores on every call —
+and that still needs the globals work `NOTES.md` describes: a **global place
+root** (`Place`'s root is always a `LocalId`, so this is a fingerprint bump),
+data emission for `Module::globals`, which nothing has ever read, and a
+const-folder that refuses what it cannot fold rather than emitting a silent zero.
+
+The intended rule when it lands is **C++'s: anything that can be fully resolved
+at compile time**, with `string` and `T[]` as the most complex types admitted.
+Worth noting how that lands here, because it is not the same as "trivial types
+only": the runtime already lays a `string` out as a 16-byte header whose literals
+are static and unowned, and it already has a shared static empty array — so a
+constant `string` or `T[]` global is emittable *as data*, and the rule it needs
+is "a global is never destroyed" rather than "a global has nothing to destroy".
+`fixedArrayOf` is what makes the initialiser writable either way, which is why it
+landed first and alone.
